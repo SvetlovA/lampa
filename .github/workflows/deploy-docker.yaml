@@ -11,13 +11,12 @@ permissions:
   contents: read
   packages: write
 
-env:
-  DEPLOY_DIR: /opt/svtlvtv/lampa-web
-
 jobs:
   deploy:
     name: Build image and deploy to Svtlv server
     runs-on: ubuntu-latest
+    env:
+      DEPLOY_DIR: ${{ secrets.DEPLOY_DIR }}
 
     steps:
       - name: Checkout code
@@ -46,7 +45,7 @@ jobs:
         run: |
           set -euo pipefail
           missing=()
-          for name in GHCR_PAT LAMPA_DOMAIN SERVER_HOST SSH_PRIVATE_KEY SSH_USER TAILSCALE_AUTHKEY; do
+          for name in DEPLOY_DIR GHCR_PAT LAMPA_DOMAIN SERVER_HOST SSH_PRIVATE_KEY SSH_USER TAILSCALE_AUTHKEY; do
             if [ -z "${!name:-}" ]; then
               missing+=("$name")
             fi
@@ -54,6 +53,11 @@ jobs:
 
           if [ "${#missing[@]}" -ne 0 ]; then
             printf 'Missing required repository secret: %s\n' "${missing[@]}" >&2
+            exit 1
+          fi
+
+          if [[ "$DEPLOY_DIR" = "/" || ! "$DEPLOY_DIR" =~ ^/[-A-Za-z0-9._/]+$ ]]; then
+            echo "DEPLOY_DIR must be a safe absolute server path" >&2
             exit 1
           fi
 

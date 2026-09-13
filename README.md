@@ -149,8 +149,7 @@ The workflow performs the following operations:
 3. Tags the image with the deployed commit's full SHA and the moving `svtlvtv` tag.
 4. Connects the GitHub-hosted runner to the server's tailnet.
 5. Configures SSH using the deployment key.
-6. Copies the Compose file and generated environment file to
-   `/opt/svtlvtv/lampa-web`.
+6. Copies the Compose file and generated environment file to `DEPLOY_DIR`.
 7. Logs the server in to GHCR and pulls the immutable SHA-tagged image.
 8. Pulls and recreates the Lampa container with `docker-compose`.
 
@@ -163,7 +162,7 @@ The target server must have:
 
 - Docker Engine;
 - the `docker-compose` executable;
-- an SSH user that can create `/opt/svtlvtv/lampa-web` and run Docker commands;
+- an SSH user that can create `DEPLOY_DIR` and run Docker commands;
 - Tailscale connectivity from the GitHub Actions runner to `SERVER_HOST`;
 - the configured `LAMPA_PORT` available to bind, or a reverse proxy prepared to
   use that port.
@@ -178,6 +177,7 @@ Secrets**:
 
 | Secret | Description |
 | --- | --- |
+| `DEPLOY_DIR` | Absolute deployment path, such as `/opt/svtlvtv/lampa-web` |
 | `LAMPA_DOMAIN` | Public MSX host without a protocol |
 | `TAILSCALE_AUTHKEY` | Auth key for runner tailnet access |
 | `SERVER_HOST` | Server's Tailscale hostname or IP |
@@ -211,8 +211,8 @@ the **Run workflow** button. Once it is available:
 
 No deployment occurs until an operator completes these steps.
 
-The workflow creates the remote deployment directory automatically. After a
-successful run it contains:
+The workflow creates the directory configured by `DEPLOY_DIR` automatically.
+With `DEPLOY_DIR=/opt/svtlvtv/lampa-web`, a successful run produces:
 
 ```text
 /opt/svtlvtv/lampa-web/
@@ -229,7 +229,8 @@ credentials are not written into the application image.
 On the server:
 
 ```bash
-cd /opt/svtlvtv/lampa-web
+DEPLOY_DIR=/opt/svtlvtv/lampa-web
+cd "$DEPLOY_DIR"
 docker-compose ps lampa-web
 docker inspect --format '{{.State.Health.Status}}' svtlvtv_lampa_web
 docker-compose logs --tail 100 lampa-web
@@ -242,11 +243,12 @@ accordingly.
 ### Roll back
 
 Every deployment publishes an immutable `sha-<commit>` image tag. To restore an
-earlier build, edit `LAMPA_IMAGE` in `/opt/svtlvtv/lampa-web/.env` to the previous
-SHA tag and recreate the service:
+earlier build, edit `LAMPA_IMAGE` in `$DEPLOY_DIR/.env` to the previous SHA tag
+and recreate the service. For example:
 
 ```bash
-cd /opt/svtlvtv/lampa-web
+DEPLOY_DIR=/opt/svtlvtv/lampa-web
+cd "$DEPLOY_DIR"
 docker-compose pull lampa-web
 docker-compose up -d --no-build lampa-web
 docker-compose ps lampa-web
