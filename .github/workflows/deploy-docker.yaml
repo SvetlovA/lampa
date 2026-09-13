@@ -1,0 +1,182 @@
+name: Build and Deploy Lampa
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: lampa-production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  DEPLOY_DIR: /opt/svtlvtv/lampa-web
+
+jobs:
+  deploy:
+    name: Build image and deploy to Svtlv server
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          ref: svtlvtv
+
+      - name: Resolve image coordinates
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          COMMIT_SHA=$(git rev-parse HEAD)
+          echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "tag=sha-${COMMIT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate required configuration
+        shell: bash
+        env:
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
+          LAMPA_DOMAIN: ${{ secrets.LAMPA_DOMAIN }}
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in GHCR_PAT LAMPA_DOMAIN SERVER_HOST SSH_PRIVATE_KEY SSH_USER TAILSCALE_AUTHKEY; do
+            if [ -z "${!name:-}" ]; then
+              missing+=("$name")
+            fi
+          done
+
+          if [ "${#missing[@]}" -ne 0 ]; then
+            printf 'Missing required repository secret: %s\n' "${missing[@]}" >&2
+            exit 1
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: |
+            ${{ steps.image.outputs.name }}:${{ steps.image.outputs.tag }}
+            ${{ steps.image.outputs.name }}:svtlvtv
+          build-args: |
+            domain=${{ secrets.LAMPA_DOMAIN }}
+            prefix=${{ vars.LAMPA_PREFIX || 'https://' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Install Tailscale
+        shell: bash
+        env:
+          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          set -euo pipefail
+          : "${TAILSCALE_AUTHKEY:?Repository secret TAILSCALE_AUTHKEY is required}"
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up \
+            --authkey "$TAILSCALE_AUTHKEY" \
+            --hostname github-actions-lampa
+
+      - name: Verify server connectivity
+        shell: bash
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+        run: |
+          set -euo pipefail
+          : "${SERVER_HOST:?Repository secret SERVER_HOST is required}"
+          tailscale status
+          tailscale ping "$SERVER_HOST"
+
+      - name: Configure SSH key
+        uses: webfactory/ssh-agent@v0.10.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Trust server SSH host key
+        shell: bash
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 ~/.ssh
+          ssh-keyscan -H "$SERVER_HOST" >> ~/.ssh/known_hosts
+
+      - name: Prepare deployment files
+        shell: bash
+        env:
+          LAMPA_BIND_ADDRESS: ${{ vars.LAMPA_BIND_ADDRESS }}
+          LAMPA_DOMAIN: ${{ secrets.LAMPA_DOMAIN }}
+          LAMPA_PORT: ${{ vars.LAMPA_PORT }}
+          LAMPA_PREFIX: ${{ vars.LAMPA_PREFIX }}
+        run: |
+          set -euo pipefail
+          {
+            printf 'LAMPA_IMAGE=%s:%s\n' \
+              '${{ steps.image.outputs.name }}' \
+              '${{ steps.image.outputs.tag }}'
+            printf 'LAMPA_DOMAIN=%s\n' "$LAMPA_DOMAIN"
+            printf 'LAMPA_PREFIX=%s\n' "${LAMPA_PREFIX:-https://}"
+            printf 'LAMPA_BIND_ADDRESS=%s\n' "${LAMPA_BIND_ADDRESS:-0.0.0.0}"
+            printf 'LAMPA_PORT=%s\n' "${LAMPA_PORT:-8082}"
+          } > deploy.env
+
+      - name: Copy deployment files to server
+        shell: bash
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+          : "${SSH_USER:?Repository secret SSH_USER is required}"
+          SSH_TARGET="${SSH_USER}@${SERVER_HOST}"
+          ssh "$SSH_TARGET" "mkdir -p '${DEPLOY_DIR}'"
+          scp devops/docker-compose.yaml \
+            "$SSH_TARGET:${DEPLOY_DIR}/docker-compose.yaml.next"
+          scp deploy.env "$SSH_TARGET:${DEPLOY_DIR}/.env.next"
+          ssh "$SSH_TARGET" "mv '${DEPLOY_DIR}/docker-compose.yaml.next' '${DEPLOY_DIR}/docker-compose.yaml' && mv '${DEPLOY_DIR}/.env.next' '${DEPLOY_DIR}/.env' && chmod 600 '${DEPLOY_DIR}/.env'"
+
+      - name: Log in to registry on server
+        shell: bash
+        env:
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
+          GHCR_USERNAME: ${{ github.repository_owner }}
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+          : "${GHCR_PAT:?Repository secret GHCR_PAT is required}"
+          printf '%s' "$GHCR_PAT" | ssh "${SSH_USER}@${SERVER_HOST}" \
+            "docker login ghcr.io -u '${GHCR_USERNAME}' --password-stdin"
+
+      - name: Deploy container
+        shell: bash
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+          ssh "${SSH_USER}@${SERVER_HOST}" "DEPLOY_DIR='${DEPLOY_DIR}' bash -se" <<'REMOTE'
+          set -euo pipefail
+          cd "$DEPLOY_DIR"
+          docker-compose config --quiet
+          docker-compose pull lampa-web
+          docker-compose up -d --no-build --remove-orphans lampa-web
+          docker image prune -f
+          REMOTE

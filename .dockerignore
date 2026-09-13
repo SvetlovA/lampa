@@ -1,5 +1,10 @@
 .git
 .idea
 .dockerignore
+.github
+devops
+AGENTS.md
+CLAUDE.md
 Dockerfile
 README.md
+SECURITY.md
