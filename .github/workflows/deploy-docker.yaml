@@ -38,6 +38,7 @@ jobs:
         env:
           GHCR_PAT: ${{ secrets.GHCR_PAT }}
           LAMPA_DOMAIN: ${{ secrets.LAMPA_DOMAIN }}
+          LAMPA_PORT: ${{ secrets.LAMPA_PORT }}
           SERVER_HOST: ${{ secrets.SERVER_HOST }}
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
           SSH_USER: ${{ secrets.SSH_USER }}
@@ -58,6 +59,12 @@ jobs:
 
           if [[ "$DEPLOY_DIR" = "/" || ! "$DEPLOY_DIR" =~ ^/[-A-Za-z0-9._/]+$ ]]; then
             echo "DEPLOY_DIR must be a safe absolute server path" >&2
+            exit 1
+          fi
+
+          PORT_TO_VALIDATE="${LAMPA_PORT:-8092}"
+          if [[ ! "$PORT_TO_VALIDATE" =~ ^[0-9]+$ ]] || (( PORT_TO_VALIDATE < 1 || PORT_TO_VALIDATE > 65535 )); then
+            echo "LAMPA_PORT must be an integer between 1 and 65535" >&2
             exit 1
           fi
 
@@ -127,7 +134,7 @@ jobs:
         env:
           LAMPA_BIND_ADDRESS: ${{ vars.LAMPA_BIND_ADDRESS }}
           LAMPA_DOMAIN: ${{ secrets.LAMPA_DOMAIN }}
-          LAMPA_PORT: ${{ vars.LAMPA_PORT }}
+          LAMPA_PORT: ${{ secrets.LAMPA_PORT }}
           LAMPA_PREFIX: ${{ vars.LAMPA_PREFIX }}
         run: |
           set -euo pipefail
@@ -138,7 +145,7 @@ jobs:
             printf 'LAMPA_DOMAIN=%s\n' "$LAMPA_DOMAIN"
             printf 'LAMPA_PREFIX=%s\n' "${LAMPA_PREFIX:-https://}"
             printf 'LAMPA_BIND_ADDRESS=%s\n' "${LAMPA_BIND_ADDRESS:-0.0.0.0}"
-            printf 'LAMPA_PORT=%s\n' "${LAMPA_PORT:-8082}"
+            printf 'LAMPA_PORT=%s\n' "${LAMPA_PORT:-8092}"
           } > deploy.env
 
       - name: Copy deployment files to server

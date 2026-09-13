@@ -67,11 +67,11 @@ docker build \
 
 docker run --rm \
   --name lampa-web \
-  -p 8082:80 \
+  -p 8092:80 \
   lampa-web:local
 ```
 
-Open <http://localhost:8082>. During the image build, the `domain` and `prefix`
+Open <http://localhost:8092>. During the image build, the `domain` and `prefix`
 values replace the `{domain}` and `{PREFIX}` placeholders in `msx/start.json`.
 
 ### Docker Compose
@@ -100,7 +100,7 @@ The Compose service uses these values:
 | `LAMPA_PREFIX` | No | `https://` | Protocol written to `msx/start.json` |
 | `LAMPA_IMAGE` | No | `lampa-web:local` | Image name used by Compose |
 | `LAMPA_BIND_ADDRESS` | No | `0.0.0.0` | Published host interface |
-| `LAMPA_PORT` | No | `8082` | Host port mapped to Apache port 80 |
+| `LAMPA_PORT` | No | `8092` | Host port mapped to Apache port 80 |
 
 Check or stop the local service with:
 
@@ -167,8 +167,9 @@ The target server must have:
 - the configured `LAMPA_PORT` available to bind, or a reverse proxy prepared to
   use that port.
 
-The default port is `8082` because port `8080` is already used by Keycloak on the
-Svtlv server.
+Local Compose and automated deployments default to port `8092` because port
+`8080` is already used by Keycloak on the Svtlv server. The optional
+`LAMPA_PORT` secret overrides that default.
 
 ### Required GitHub Actions secrets
 
@@ -188,6 +189,12 @@ Secrets**:
 `GITHUB_TOKEN` is supplied automatically by GitHub Actions and is used to check
 out the repository and push the image produced by the workflow.
 
+### Optional GitHub Actions secret
+
+| Secret | Default | Description |
+| --- | --- | --- |
+| `LAMPA_PORT` | `8092` | Server port mapped to the container's port 80 |
+
 ### Optional GitHub Actions variables
 
 Configure these under **Repository settings → Secrets and variables → Actions →
@@ -197,7 +204,6 @@ Variables** when the defaults are not suitable:
 | --- | --- | --- |
 | `LAMPA_PREFIX` | `https://` | Protocol written to the MSX descriptor |
 | `LAMPA_BIND_ADDRESS` | `0.0.0.0` | Published server interface |
-| `LAMPA_PORT` | `8082` | Server port mapped to the container's port 80 |
 
 ### Run a deployment
 
@@ -230,11 +236,12 @@ On the server:
 
 ```bash
 DEPLOY_DIR=/opt/svtlvtv/lampa-web
+LAMPA_PORT=8092
 cd "$DEPLOY_DIR"
 docker-compose ps lampa-web
 docker inspect --format '{{.State.Health.Status}}' svtlvtv_lampa_web
 docker-compose logs --tail 100 lampa-web
-curl --fail http://127.0.0.1:8082/
+curl --fail "http://127.0.0.1:${LAMPA_PORT}/"
 ```
 
 If `LAMPA_PORT` or `LAMPA_BIND_ADDRESS` was changed, adjust the `curl` address
