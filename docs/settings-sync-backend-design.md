@@ -1,844 +1,621 @@
-# Lampa Svtlv Account and Settings Sync Design
+# Lampa Svtlv User Data Persistence Design
 
-Status: Draft for review  
-Date: 2026-09-13  
+Status: Draft
+
+Date: 2026-09-15
+
 Target branch: `svtlvtv`
 
-## 1. Decision summary
+## 1. Decision
 
-Add an optional Svtlv account and cloud-settings capability without replacing
-Lampa's local-first behavior.
+Add a small Go backend that stores one complete Lampa data document per signed-in
+user.
 
-The target design is:
+The server is the source of truth for signed-in users:
 
-- the existing Apache container continues to serve the static Lampa
-  distribution;
-- a separate Go service owns authentication, sessions, settings validation and
-  persistence;
-- Apache proxies `/api/*` to the Go service so the browser sees one Lampa
-  origin;
-- the Go service uses a new confidential client in the existing Svtlv Keycloak
-  realm;
-- the Keycloak `sub` UUID is the canonical user identifier, matching the Svtlv
-  web application;
-- PostgreSQL stores one versioned `jsonb` settings document per user;
-- credentials and private connection configuration are encrypted by the Go
-  application before being stored;
-- `localStorage` remains the runtime cache and offline fallback;
-- only explicitly classified keys are synchronized. Unknown keys are local by
-  default;
-- browser redirect login is delivered first. TV-friendly device authorization
-  is added after the core sync path works.
+1. User logs in.
+2. Lampa requests the user's data from the server.
+3. If server data exists, Lampa applies it to `localStorage` and uses it.
+4. If server data does not exist, Lampa uploads the current local data.
+5. Lampa reads the saved server data and applies it to `localStorage`.
+6. Later signed-in changes update `localStorage` and replace the document on the
+   server.
 
-This design intentionally does not add MongoDB or another document-database
-service. PostgreSQL `jsonb` gives us a JSON-per-user model while reusing the
-database technology, backup knowledge and operational conventions already used
-by Svtlv.
+Anonymous users continue working exactly as they do now. Their data stays only
+in browser storage and no user-data request is sent to the backend.
 
-## 2. Why this design is needed
+## 2. Scope
 
-Today, Lampa stores preferences, runtime state, caches, account data and
-connection credentials together in browser `localStorage`. A setting configured
-on one television or browser does not appear on another device. Clearing browser
-storage also removes the configuration.
+Persist durable user-owned data already saved by Lampa, including:
 
-The desired result is that a user can sign in with the same Svtlv identity on
-multiple devices and receive the same appropriate settings, including an
-opt-in path for TorrServer and parser connection configuration.
+- settings and preferences;
+- TorrServer and Jackett connection settings;
+- favorites and bookmarks;
+- scores and reactions;
+- subscriptions;
+- watched state and playback progress;
+- useful history;
+- other durable personal data discovered while implementing the exporter.
 
-The implementation must respect this repository's unusual constraints:
+Do not persist temporary caches, current navigation state, device-detection
+values, temporary request data or authentication tokens owned by another
+service.
 
-- this is a distribution repository, not the Lampa source repository;
-- `app.min.js` is generated-but-readable ES5 and is edited directly;
-- old TV browsers constrain JavaScript and authentication choices;
-- Lampa can run without a backend today and must continue to work when the new
-  API or Keycloak is unavailable;
-- third-party Lampa plugins execute inside the application origin and must be
-  treated as untrusted;
-- upstream frequently replaces the complete application bundle, so local
-  integration changes must remain small and easy to reapply.
+This work does not install, upgrade, configure or proxy Lampa, TorrServer or
+Jackett. Those services already work and must remain unchanged.
 
-The current Lampa deployment already follows important parts of the Svtlv
-delivery style: manual GitHub Actions deployment, immutable GHCR image tags,
-Tailscale plus SSH, Docker Compose and container health checks. The new service
-should extend that pattern rather than create another deployment system.
+It also does not modify Lampa's generated frontend bundle or compiled stylesheet.
+Receiving frontend updates from the fork/upstream must remain routine.
 
-## 3. Goals
-
-1. Let existing Svtlv users sign in without creating a second password or user
-   database.
-2. Synchronize a documented set of settings across a user's devices.
-3. Preserve guest mode, offline startup and local settings when the backend is
-   unavailable.
-4. Support both normal browsers and, in a later step, televisions with awkward
-   text entry or limited embedded browsers.
-5. Protect centrally stored connection credentials at rest and keep them out of
-   logs, metrics and health responses.
-6. Make concurrent changes deterministic and prevent one device from silently
-   replacing unrelated changes made by another.
-7. Use plan-sized phases with testable exit criteria and safe rollback points.
-8. Keep Svtlv identity and Lampa application data separate: Keycloak owns users;
-   Lampa owns settings.
-
-## 4. Non-goals for the first release
-
-- Replacing CUB accounts, bookmarks, viewing history or CUB synchronization.
-- Copying all `localStorage` keys to the server.
-- Proxying torrents, TorrServer traffic or media through the Go service.
-- Building a general user-profile or household/profile system.
-- Real-time push synchronization between open devices.
-- An administration UI for inspecting or editing user settings.
-- Storing user passwords or calling the Keycloak Admin API during normal
-  requests.
-- Making cloud login mandatory to use Lampa.
-- Reconstructing or checking out `lampa-source` as part of this work.
-
-These can become separate designs after settings synchronization proves useful.
-
-## 5. Approaches considered
-
-### 5.1 Recommended: same-origin Go backend with server sessions
-
-The browser navigates to the Go backend to start the OpenID Connect
-Authorization Code flow. The backend exchanges the code, validates the identity
-and gives the browser an opaque, `HttpOnly` session cookie. Keycloak tokens stay
-server-side and are not written to `localStorage`.
-
-Advantages:
-
-- aligns with the cookie-backed OpenID Connect pattern already used by Svtlv;
-- avoids exposing Keycloak access and refresh tokens to Lampa or plugins;
-- avoids normal CORS complexity because the static app and API share an origin;
-- lets the Go service enforce one settings contract for every client;
-- can later broker Keycloak Device Authorization for televisions.
-
-Costs:
-
-- introduces server-side session storage and CSRF protection;
-- native shells loaded from `file://` may not support the same cookie behavior;
-- Apache needs a small reverse-proxy configuration.
-
-### 5.2 Direct browser OIDC with a public Keycloak client
-
-The JavaScript application would use Authorization Code plus PKCE and call the
-Go API with bearer tokens.
-
-This has fewer session endpoints, but it puts tokens inside a large legacy
-JavaScript application that deliberately runs untrusted plugins. It also adds
-token refresh, CORS and old-browser compatibility work to `app.min.js`. It is
-not recommended for the normal hosted application.
-
-### 5.3 Device Authorization only
-
-Every device would show a code that the user approves in another browser. This
-fits televisions well but is needlessly awkward on desktop and mobile browsers.
-It is retained as a second authentication path, not the only path.
-
-## 6. Target architecture
+## 3. Architecture
 
 ```mermaid
 flowchart LR
-    U[Browser or TV] -->|HTTPS /| W[Apache lampa-web]
-    U -->|HTTPS /api| W
-    W -->|static files| U
-    W -->|private Docker network| A[Go lampa-api]
-    A -->|OIDC code or device flow| K[Existing Svtlv Keycloak]
-    A -->|sessions and settings| P[(PostgreSQL)]
-    A -->|internal only| H[/live and ready health/]
+    L[Lampa browser or TV] -->|HTTPS| W[Existing lampa-web]
+    W -->|/api| A[New Go API]
+    A -->|OIDC| K[Existing Svtlv Keycloak]
+    A -->|one document per user| P[(PostgreSQL)]
+    D[Docker healthcheck] -->|:8081/health/critical| A
+    M[Svtlv.Monitoring.Service] -->|:8081/health| A
 ```
 
-Production rules:
+Components:
 
-- only the Lampa HTTPS origin is public for application traffic;
-- the API container has no public host port;
-- the database has no new public port;
-- the existing public Keycloak realm endpoints remain reachable through the
-  Svtlv gateway, while Keycloak admin and management paths remain private;
-- service-to-service database and Keycloak addresses use the private network
-  where the deployment topology permits it;
-- TLS termination and forwarded headers have one documented trust boundary.
+- `lampa-web` continues serving the existing static application and proxies
+  `/api` to the Go service.
+- `lampa-api` handles login, sessions and user-data reads and writes.
+- the existing Svtlv Keycloak identifies the user.
+- PostgreSQL stores the complete user document in JSONB.
+- a small ES5 browser adapter exports data from Lampa, calls the API and imports
+  server data into `localStorage`.
 
-## 7. Components
+The frontend adapter is required because a backend cannot directly read or
+update browser `localStorage`.
 
-### 7.1 `lampa-web`
+### 3.1 Go engineering baseline: Ralphex
 
-Responsibilities remain static file delivery plus reverse proxying `/api/*`.
-It must not interpret sessions or contain secrets. A dedicated Apache
-configuration should enable only the proxy modules and paths required by the
-API.
+Use Ralphex as the engineering baseline for the new Go module. The baseline
+inspected for this design is Ralphex `master` at commit `a736d5e`; re-check its
+current `master` at the start of Plan 1 so the Go version and pinned tool
+versions do not drift accidentally.
 
-### 7.2 `lampa-api`
+Ralphex is the reference for project structure, code style and quality checks,
+not for Lampa's business architecture. Do not copy Ralphex CLI, dashboard or
+executor dependencies into this service unless the backend actually needs
+them.
 
-A small Go HTTP service with these packages or equivalent boundaries:
-
-- `auth`: OIDC discovery, callback validation, logout and device flow;
-- `session`: opaque browser/device sessions and expiry;
-- `settings`: allowlist, type validation, schema migration and merge rules;
-- `crypto`: encryption/decryption of sensitive settings and key rotation;
-- `store/postgres`: transactional persistence;
-- `httpapi`: routes, middleware, request limits and error envelopes;
-- `health`: liveness and database readiness.
-
-Use the Go standard library where practical. Dependencies should be limited to a
-PostgreSQL driver, an OIDC/OAuth implementation, migrations and focused test
-support. Framework selection is an implementation-plan decision, not an
-architectural requirement.
-
-### 7.3 PostgreSQL
-
-Production should use a dedicated logical database and least-privileged role,
-even if it shares the existing Svtlv PostgreSQL server. Local Compose may run a
-dedicated PostgreSQL container for self-contained development.
-
-This cross-repository production choice must be resolved in Step 0:
-
-- preferred: add a dedicated `lampa` database and role to the managed Svtlv
-  PostgreSQL instance;
-- fallback: deploy an independent `lampa-db` container and named volume.
-
-Do not reuse a broad database credential merely because another Svtlv service
-already has it.
-
-### 7.4 Lampa cloud-settings adapter
-
-Keep the fork-specific browser integration in a clearly marked ES5 module. The
-preferred implementation is a small additional file under `svtlv/`, loaded
-after `app.min.js`, rather than a large block inserted into the generated bundle.
-The compatibility spike must prove that this load point is early enough for the
-required events and works when Android supplies a remote Lampa script URL.
-
-The adapter should use existing primitives such as `Lampa.Storage`,
-`Lampa.SettingsApi`, `Lampa.Listener`, jQuery AJAX and remote-focusable
-`.selector` controls. It must not require modern JavaScript syntax or a new
-frontend build system.
-
-## 8. Identity and authentication
-
-### 8.1 Keycloak integration
-
-Create a separate confidential client, tentatively named `svtlv-lampa`, in the
-existing `svtlv` realm. Do not reuse the Svtlv web client secret.
-
-Required properties:
-
-- Authorization Code flow enabled;
-- exact Lampa callback and post-logout redirect URIs;
-- PKCE S256 required where supported by the selected Go client flow;
-- Device Authorization enabled before the TV phase;
-- Direct Access Grants and Implicit flow disabled;
-- normal `openid profile email` scopes only unless a later feature justifies
-  more;
-- no Keycloak Admin API permission.
-
-The backend validates issuer, audience/client, signature, expiry, nonce/state and
-the `sub` claim. As in Svtlv web, `sub` must parse as a UUID. That UUID is stored
-as `user_sub`; email and username are display data, not identity keys.
-
-There is no Lampa users table. Deleting a Keycloak user may leave orphaned
-settings until a future retention/cleanup process is defined.
-
-### 8.2 Browser session flow
-
-1. Lampa calls `GET /api/v1/session`.
-2. An anonymous response leaves the application in guest/local mode.
-3. The user activates **Sign in with Svtlv**.
-4. The browser navigates to `GET /api/v1/auth/login`.
-5. The backend performs Authorization Code plus PKCE with Keycloak.
-6. The callback validates the identity and creates an opaque application
-   session.
-7. The backend redirects to a fixed, prevalidated Lampa path.
-8. Lampa fetches settings and runs first-login reconciliation if needed.
-
-Cookie baseline:
-
-- `HttpOnly`, `Secure`, `SameSite=Lax`, host-only and `Path=/`;
-- random 256-bit session identifier; only its hash is stored;
-- idle and absolute expiration;
-- rotation after login and other privilege-boundary events;
-- logout revokes the local session. Keycloak single logout is optional in the
-  first increment and must be explicit if added.
-
-All state-changing API requests require a CSRF defense. Prefer a session-bound
-anti-forgery token carried in a custom header, plus strict Origin/Referer checks
-when those headers are present. CORS is denied by default.
-
-### 8.3 Television/device flow
-
-Televisions should not require users to type a Keycloak password with a remote.
-
-1. The TV asks the Go service to start device authorization.
-2. The service requests a Keycloak device code and stores the attempt
-   server-side.
-3. Lampa displays the short code and a QR code for the verification URL.
-4. The user signs in and approves on a phone or computer.
-5. The TV polls the Go service; the Go service enforces Keycloak's interval and
-   expiry.
-6. On success, the service validates the returned identity and creates a
-   Lampa-scoped device session.
-
-The device never receives a reusable Keycloak refresh token. If a hosted TV
-browser accepts the normal same-origin cookie, use it. If packaged `file://` or
-remote-script modes cannot do so, a later compatibility path may issue a
-revocable opaque device credential with settings-only scope. That credential is
-not a Keycloak token, is stored only after explicit device linking and must be
-shown in a **Linked devices** revocation screen.
-
-This fallback is a decision gate, not an assumption: first test real target
-devices and the Android shell.
-
-## 9. Settings classification
-
-Synchronizing `Object.keys(localStorage)` is forbidden. New keys are never
-synced until added to the server and client registries with type, size,
-sensitivity and scope.
-
-| Class | Examples | Persistence rule |
-| --- | --- | --- |
-| Global preference | language, catalog source, subtitle preference, poster/UI choices that make sense everywhere | Store in `settings jsonb` |
-| Private connection | TorrServer URLs/login/password, Jackett or Prowlarr URL/API key | Encrypt as a separate secret document; explicit opt-in |
-| Device-local | platform/native, device name, navigation/keyboard mode, player executable/path, internal player, performance/light settings | Keep only on the device |
-| Runtime/cache | activity stack, request caches, timestamps, search caches, temporary playback state | Never sync |
-| Foreign account/security | CUB account/token, terminal access, parental PIN, consent markers | Never sync in this system |
-| Plugin-owned/unknown | plugin list, blacklist and arbitrary plugin keys | Never sync by default |
-
-The exact initial allowlist must be produced from the current settings templates
-and `SettingsApi.addParam` registrations during Step 3. The table above is policy,
-not the final key inventory.
-
-### 9.1 Precedence
-
-At runtime:
+Keep the Go module additive and isolated from upstream Lampa files:
 
 ```text
-Lampa defaults < cloud global settings < device-local overrides
+backend/
+├── cmd/lampa-api/       # composition root and process lifecycle
+├── pkg/api/             # HTTP routes, middleware and response contract
+├── pkg/auth/            # Keycloak OIDC and session handling
+├── pkg/config/          # typed environment configuration and validation
+├── pkg/health/          # Svtlv-compatible health reports
+├── pkg/storage/         # user-data service and PostgreSQL implementation
+├── migrations/          # versioned PostgreSQL schema
+├── Makefile
+├── go.mod
+├── go.sum
+└── vendor/
 ```
 
-`localStorage` continues to contain the effective values needed by the existing
-application. The cloud service is not queried on every `Storage.get` call.
+Follow these Ralphex conventions:
 
-### 9.2 First-login reconciliation
+- use the same pinned Go toolchain in `go.mod`, CI and the Docker builder
+  (`go 1.26.0` in the inspected baseline);
+- use `cmd/<binary>` for the entry point and small `pkg/<responsibility>`
+  packages, with private internal state and explicit constructors;
+- prefer the standard library, including `net/http`, and add a dependency only
+  when it directly reduces necessary implementation work;
+- define narrow interfaces in the consuming package, pass `context.Context` as
+  the first argument to blocking or cancellable operations, and generate mocks
+  with `moq` into a `mocks/` subdirectory when a generated mock is useful;
+- wrap errors with operation context and `%w`, validate constructor/configuration
+  inputs, set explicit HTTP timeouts, and shut the server down through a bounded
+  context;
+- use a small injected logger interface where test isolation requires it and
+  never log user documents or secrets;
+- use lowercase comments except for exported Go documentation comments;
+- commit `go.mod`, `go.sum` and `vendor/`; after dependency changes run
+  `go mod tidy` and `go mod vendor`.
 
-Never silently erase either side. On the first sign-in for a device:
+Configuration should use typed structs, defaults and startup validation in the
+same style as Ralphex, but read container environment variables rather than
+copying Ralphex's CLI-specific `go-flags` configuration.
 
-- no cloud document: offer **Save this device to cloud**;
-- existing cloud document: offer **Use cloud settings** or **Keep this device
-  and replace cloud settings**;
-- cancel: remain signed in but leave sync disabled on that device.
+The backend quality contract is:
 
-The choice and last synchronized revision are stored locally. Connection-secret
-sync has a separate explicit opt-in and warning because installed plugins can
-read values that Lampa itself can read.
+- provide Ralphex-style `make build`, `make test`, `make lint`, `make fmt` and
+  `make race` targets inside `backend/`;
+- `make test` runs all packages with the race detector and a coverage profile;
+- tests use the standard `testing` package plus `testify/assert` and
+  `testify/require`, table-driven subtests, `httptest` for HTTP handlers,
+  `t.Helper()` in helpers and `t.TempDir()` for filesystem work;
+- keep one matching test file per source file (`foo.go` -> `foo_test.go`) and
+  target at least 80% coverage for new backend code, excluding generated mocks;
+- start from Ralphex's GolangCI-Lint v2 configuration, using the same enabled
+  linters and settings, and pin the same linter version in CI (`v2.13.0` in the
+  inspected baseline); copy only exclusions that apply to this service and
+  explain every Lampa-specific suppression;
+- CI runs the same race, coverage and lint checks before building an image;
+  tool/action versions are pinned rather than floating silently;
+- use a multi-stage Docker build with revision metadata and a minimal non-root
+  runtime image.
 
-## 10. Persistence model
+The Ralphex commands and configuration are the source of truth when the plan is
+implemented. If a Lampa-specific need requires a deviation, record the reason
+in that implementation plan. Ralphex's automatic CI/release triggers are not
+copied: Lampa production deployment remains `workflow_dispatch` only.
 
-Initial schema, subject to naming review:
+## 4. Data model
+
+Use one row per Keycloak user:
 
 ```sql
-create table user_settings (
-    user_sub uuid primary key,
+create table lampa_user_data (
+    user_id uuid primary key,
     schema_version integer not null,
-    revision bigint not null,
-    settings jsonb not null,
-    secrets_ciphertext bytea null,
-    secrets_nonce bytea null,
-    encryption_key_version integer null,
+    data jsonb not null,
+    encrypted_connections bytea null,
     created_at timestamptz not null,
     updated_at timestamptz not null
 );
-
-create table sessions (
-    id uuid primary key,
-    session_hash bytea unique not null,
-    user_sub uuid not null,
-    kind text not null,
-    device_name text null,
-    created_at timestamptz not null,
-    last_seen_at timestamptz not null,
-    expires_at timestamptz not null,
-    revoked_at timestamptz null
-);
-
-create index sessions_user_sub_idx on sessions (user_sub);
-create index sessions_expires_at_idx on sessions (expires_at);
 ```
 
-Device-authorization attempts may use a short-lived table or bounded in-memory
-store. Prefer PostgreSQL if the API may ever have more than one replica.
+`user_id` is the Keycloak `sub` UUID. The browser never chooses or sends a
+different owner ID; the backend obtains it from the authenticated session.
 
-No GIN index is needed initially: normal reads are by primary-key `user_sub`, not
-by arbitrary JSON contents. Add indexes only when a real query needs them.
-
-### 10.1 Encryption
-
-Sensitive connection keys are serialized into a small JSON document and
-encrypted in the application with an authenticated cipher such as AES-256-GCM.
-The encryption key is supplied through deployment secrets, never stored in the
-database or image. Store a key version so a new primary key can decrypt old rows
-and re-encrypt them gradually.
-
-Database backups therefore contain ciphertext for connection secrets. This does
-not protect a signed-in client from a malicious same-origin Lampa plugin: the
-application ultimately needs plaintext to contact the configured service. That
-risk already exists for locally stored credentials and must be presented
-honestly to users.
-
-## 11. API contract
-
-All responses use JSON except redirects and empty health responses. Errors have
-a stable shape:
+The JSON document has a simple top-level structure:
 
 ```json
 {
-  "error": {
-    "code": "settings_revision_conflict",
-    "message": "Settings changed on another device",
-    "request_id": "..."
+  "settings": {},
+  "favorites": {},
+  "bookmarks": {},
+  "scores": {},
+  "subscriptions": {},
+  "progress": {},
+  "history": {},
+  "other": {}
+}
+```
+
+The exact inner values follow the formats already used by Lampa. The backend
+validates the allowed sections, document size and valid JSON, but it does not
+create separate relational tables for every Lampa feature.
+
+Connection credentials and API keys are removed from the normal JSONB value and
+encrypted by the Go service into `encrypted_connections`. The API returns one
+logical document after decrypting those fields for the authenticated user.
+
+## 5. Authentication
+
+Use the existing Svtlv Keycloak realm and its existing users. Create a separate
+confidential OpenID Connect client named `svtlv-lampa`. Do not reuse the
+`svtlv-web` client: users and Keycloak SSO are shared at realm level, while each
+application keeps its own redirect URIs, client secret and session boundary.
+
+Lampa initially requires only a valid authenticated user. It does not consume
+Svtlv Web application roles. If Lampa-specific roles are ever needed, define
+them as client roles on `svtlv-lampa`, not as dependencies on another client's
+roles.
+
+Recommended flow:
+
+- the browser opens `/api/v1/auth/login`;
+- the Go backend performs the Keycloak Authorization Code flow;
+- the callback creates an opaque `HttpOnly`, `Secure` session cookie;
+- Keycloak tokens and client secrets never enter `localStorage`;
+- `/api/v1/auth/logout` ends the session;
+- `/api/v1/session` reports whether the browser is signed in.
+
+Anonymous use does not require a session.
+
+## 6. Synchronization behavior
+
+### 6.1 Anonymous startup
+
+1. Lampa starts normally.
+2. It reads and writes its current browser storage.
+3. The sync adapter does not call the user-data API.
+
+Result: behavior is the same as the current application.
+
+### 6.2 Login when server data exists
+
+1. Complete Keycloak login.
+2. Call `GET /api/v1/user-data`.
+3. Receive the complete server document.
+4. Replace the synchronized Lampa values in `localStorage` with that document.
+5. Refresh or restart the affected Lampa components.
+
+The previous local values do not overwrite existing server data. The server
+document wins.
+
+### 6.3 Login when server data does not exist
+
+1. Complete Keycloak login.
+2. Call `GET /api/v1/user-data`.
+3. Receive `404 Not Found` with error code `user_data_not_found`.
+4. Export the current durable Lampa values from browser storage.
+5. Call `PUT /api/v1/user-data` with the complete document.
+6. Call `GET /api/v1/user-data` again.
+7. Apply the returned server document to `localStorage`.
+
+This is the only automatic import of pre-login local data. Existing server data
+is never silently replaced during login.
+
+### 6.4 Changes while signed in
+
+1. Lampa writes the change to `localStorage` as it does today.
+2. The adapter waits for a short debounce period.
+3. The adapter exports the complete durable document.
+4. It calls `PUT /api/v1/user-data`.
+5. A successful response means the server has accepted the new source-of-truth
+   document.
+
+Multiple changes during the debounce period produce one server write.
+
+### 6.5 Later startup or refresh
+
+When an authenticated session exists, Lampa gets the server document before
+normal synchronized data is used. Server values replace the synchronized local
+values.
+
+If the server is temporarily unavailable, Lampa continues with its current
+local data and displays a small synchronization error. It must not clear local
+storage because of a network error.
+
+## 7. Conflict policy
+
+The first version deliberately uses a simple policy:
+
+- the server stores one complete document;
+- each successful `PUT` replaces the previous document;
+- the last successful save wins;
+- login and startup always prefer the server document;
+- there is no field-level merge, change cursor, mutation log or tombstone table.
+
+This means two devices editing at the same time can overwrite each other's last
+changes. That is an accepted first-version limitation. More complex merging
+should be added only if real usage demonstrates the need.
+
+## 8. API
+
+| Method and path | Purpose |
+| --- | --- |
+| `GET /api/v1/auth/login` | Start Keycloak login |
+| `GET /api/v1/auth/callback` | Finish login and create session |
+| `POST /api/v1/auth/logout` | End session |
+| `GET /api/v1/session` | Return login status |
+| `GET /api/v1/user-data` | Return the signed-in user's complete document |
+| `PUT /api/v1/user-data` | Create or replace the complete document |
+| `DELETE /api/v1/user-data` | Delete the signed-in user's cloud document |
+| `GET :8081/health` | Return all critical and advisory health checks |
+| `GET :8081/health/critical` | Return only Docker-critical health checks |
+
+Example successful response:
+
+```json
+{
+  "schema_version": 1,
+  "data": {
+    "settings": {},
+    "favorites": {},
+    "bookmarks": {},
+    "scores": {},
+    "subscriptions": {},
+    "progress": {},
+    "history": {},
+    "other": {}
+  },
+  "updated_at": "2026-09-15T12:00:00Z"
+}
+```
+
+The API requires authentication for every user-data operation, limits the
+request size and never accepts a `user_id` from the request body or URL.
+
+## 9. Health and Svtlv monitoring
+
+The Go service must reproduce the existing Svtlv two-tier health contract even
+though it cannot reference the .NET `Svtlv.Common.HealthChecks` library.
+
+Both endpoints listen on container-internal HTTP port `8081` and are not
+published to the host or proxied through the public Lampa origin. Their consumers
+are intentionally separate: Docker Compose calls only `/health/critical`, while
+`Svtlv.Monitoring.Service` calls only `/health`.
+
+### 9.1 Endpoints
+
+- `/health` runs every critical and advisory check. `Svtlv.Monitoring.Service`
+  consumes this endpoint; operators may also use it for diagnosis.
+- `/health/critical` runs only critical checks. It is used exclusively by the
+  Docker Compose healthcheck.
+- health endpoints require no user login because they are private network
+  endpoints.
+
+Initial checks:
+
+| Check | Tier | Meaning |
+| --- | --- | --- |
+| `database` | Critical | PostgreSQL is reachable and the required schema is usable |
+| `keycloak` | Advisory | Keycloak discovery/login dependency is reachable |
+
+A database failure makes persistence unusable and returns `Unhealthy` from both
+endpoints. A Keycloak failure prevents new logins but does not invalidate
+existing sessions or justify restarting the API, so `/health` becomes
+`Degraded` while `/health/critical` remains `Healthy`.
+
+### 9.2 JSON contract
+
+Both endpoints return the same camel-case document shape used by Svtlv:
+
+```json
+{
+  "status": "Healthy",
+  "totalDurationMs": 1.234,
+  "checks": [
+    {
+      "name": "database",
+      "status": "Healthy",
+      "description": "PostgreSQL is reachable.",
+      "durationMs": 1.123,
+      "error": null
+    }
+  ]
+}
+```
+
+Allowed status strings are `Healthy`, `Degraded` and `Unhealthy`. HTTP status
+mapping must also match Svtlv:
+
+- `Healthy` -> `200`;
+- `Degraded` -> `200`;
+- `Unhealthy` -> `503`.
+
+The JSON document and each check's `status` are authoritative. A `200` response
+does not prove health because advisory failures deliberately return
+`Degraded` with HTTP `200`.
+
+Descriptions and errors must be short and must never contain connection
+strings, credentials, user data or Keycloak tokens.
+
+### 9.3 Docker healthcheck
+
+The `lampa-api` container uses the critical endpoint:
+
+```yaml
+healthcheck:
+  test: ["CMD-SHELL", "curl -fsS http://localhost:8081/health/critical || exit 1"]
+  interval: 30s
+  timeout: 10s
+  retries: 5
+  start_period: 30s
+```
+
+### 9.4 Svtlv.Monitoring.Service target
+
+The Lampa deployment and Monitoring service must share a private Docker network
+or another private route on which `lampa-api:8081` is resolvable. Add this target
+to the Svtlv monitoring configuration when the API is deployed:
+
+```json
+{
+  "Id": "lampa-api",
+  "Name": "Lampa API",
+  "Kind": "Url",
+  "Enabled": true,
+  "Severity": "Critical",
+  "Interval": "00:01:00",
+  "Timeout": "00:00:05",
+  "Url": {
+    "Url": "http://lampa-api:8081/health",
+    "Evaluator": "HealthReport",
+    "StatusPolicy": "Reachable",
+    "TreatDegradedAs": "Alert"
   }
 }
 ```
 
-Proposed endpoints:
+Monitoring must call `/health`, not `/health/critical`, so it can notify about
+both `Unhealthy` critical checks and `Degraded` advisory checks. Docker remains
+the independent consumer of `/health/critical`.
 
-| Method and path | Purpose |
-| --- | --- |
-| `GET /api/v1/session` | Anonymous/authenticated state and safe display identity |
-| `GET /api/v1/auth/login` | Start browser OIDC navigation |
-| `GET /api/v1/auth/callback` | Validate callback and establish session |
-| `POST /api/v1/auth/logout` | Revoke local session |
-| `POST /api/v1/auth/device` | Start TV device authorization |
-| `GET /api/v1/auth/device/{attempt}` | Poll a bound device attempt |
-| `GET /api/v1/settings` | Return schema version, revision and allowed settings |
-| `PUT /api/v1/settings` | Explicit first-time import/replace |
-| `PATCH /api/v1/settings` | Apply changed and removed keys |
-| `DELETE /api/v1/settings` | Delete cloud document after confirmation |
-| `GET /api/v1/devices` | List active Lampa sessions/devices |
-| `DELETE /api/v1/devices/{id}` | Revoke a linked device |
-| `GET /health/live` | Process liveness; internal |
-| `GET /health/ready` | Database readiness; internal |
+## 10. Browser integration and upstream compatibility
 
-Example patch:
-
-```json
-{
-  "base_revision": 12,
-  "changes": {
-    "language": "en",
-    "subtitles_start": true
-  },
-  "unset": ["poster_size"]
-}
-```
-
-The backend validates every key and value, locks the user's row, applies the
-patch in one transaction, increments the revision and returns the canonical
-document. If `base_revision` is stale it returns `409`. Because a patch contains
-only changed keys, the client can refetch and retry once without replacing
-unrelated settings; a second conflict becomes a visible sync error.
-
-Contract limits should include a small total document size, per-string and
-per-array limits, accepted URL schemes, request timeouts and a rejection of
-unknown keys. Private network URLs are valid for TorrServer, so validation must
-not incorrectly require public DNS.
-
-## 12. Client synchronization behavior
-
-1. Lampa always starts from local values and remains usable immediately.
-2. The adapter checks the application session in the background with a short
-   timeout.
-3. If authenticated and sync is enabled, it fetches the cloud document.
-4. It applies global keys through `Lampa.Storage.set(name, value, true)` or an
-   equivalent batch path to avoid an API write for every imported key.
-5. It emits one completion event and reloads only when a startup-sensitive key
-   requires it.
-6. It subscribes to `Lampa.Storage.listener` and debounces allowed changes.
-7. Pending changes are coalesced by key and patched with the last known revision.
-8. On network failure, pending changes remain local and retry with bounded
-   exponential backoff when the app is online.
-9. `401` changes the UI to **session expired** but never clears local settings.
-10. Validation errors mark only the affected keys unsynchronized and expose a
-    user-readable error without logging their values.
-
-Do not monkey-patch `Storage.set`, replace `localStorage`, or block every read on
-the network. Do not run a continuous polling loop merely to simulate real-time
-sync. Fetch on startup, after login, on explicit **Sync now**, and when the app
-returns from a long background period.
-
-## 13. Security and privacy
-
-- Use HTTPS for every public authentication and settings request.
-- Keep Keycloak client secrets, encryption keys and database credentials out of
-  the frontend, image layers, Compose files committed with values and logs.
-- Store hashes of opaque session/device credentials, not their plaintext.
-- Prevent session fixation and open redirects; return locations use an allowlist
-  of local paths.
-- Require authentication and ownership checks on every settings/device query.
-- Apply CSRF protection to every state-changing cookie-authenticated endpoint.
-- Rate-limit login starts, device-flow starts/polls and repeated failed requests.
-- Never log request/response bodies for settings endpoints. Log request ID,
-  subject hash or safe internal correlation ID, changed key names, revision and
-  result.
-- Return generic authentication failures to clients while retaining useful
-  structured server logs.
-- Cap request bodies before JSON decoding.
-- Keep detailed readiness output private; public health, if needed, is a simple
-  verdict.
-- Add retention behavior for expired sessions and abandoned device attempts.
-- Provide **Delete cloud settings** and **Revoke device** controls.
-
-The plugin threat boundary is important: a plugin running in Lampa can act as
-the signed-in user inside the page. `HttpOnly` prevents direct token extraction,
-but it cannot make same-origin application data invisible to code the user chose
-to execute. Connection-secret sync must therefore be opt-in and documented. A
-future stronger boundary would require moving the actual TorrServer operation
-server-side, which creates substantial proxy, SSRF, privacy and bandwidth scope
-and is not part of this project.
-
-## 14. Reliability and failure handling
-
-- API unavailable: guest and cached signed-in devices continue with local
-  settings; changes remain pending.
-- Keycloak unavailable: existing application sessions and settings continue;
-  new login/device linking fails cleanly.
-- PostgreSQL unavailable: readiness fails, settings APIs return a temporary
-  error and no local values are deleted.
-- Corrupt encrypted row: return non-secret settings, report that connection
-  settings could not be decrypted and emit a high-severity server event without
-  ciphertext/plaintext.
-- Unknown settings schema: do not partially apply it; require a supported
-  migration or return an upgrade-required error.
-- Concurrent update: `409`, refetch, reapply pending key patch once.
-- Deployment during use: sessions survive API restart because they are stored in
-  PostgreSQL.
-
-Database migrations run as a one-shot deployment step under a database lock,
-not independently in every API replica. Migrations should be backward-compatible
-with the previously deployed API whenever possible so an image rollback remains
-safe.
-
-## 15. Repository shape
-
-Tentative layout:
+Keep all fork-specific frontend integration outside the generated Lampa files:
 
 ```text
-/
-├── app.min.js
-├── index.html
-├── svtlv/
-│   └── settings-sync.js
-├── backend/
-│   ├── cmd/lampa-api/main.go
-│   ├── internal/
-│   │   ├── auth/
-│   │   ├── config/
-│   │   ├── crypto/
-│   │   ├── health/
-│   │   ├── httpapi/
-│   │   ├── session/
-│   │   ├── settings/
-│   │   └── store/postgres/
-│   ├── migrations/
-│   ├── Dockerfile
-│   ├── go.mod
-│   └── go.sum
-├── devops/
-│   ├── apache/
-│   └── docker-compose.yaml
-└── docs/
-    └── settings-sync-backend-design.md
+svtlv/
+├── account-sync.js
+└── account-sync.css
 ```
 
-Fork-specific frontend code in `svtlv/` should have a small stable loader change
-in `index.html`. This reduces conflict when upstream replaces `app.min.js`.
-
-## 16. CI/CD and operations
-
-Extend the current manual Svtlv-style workflow rather than replace it.
-
-Pull-request/build validation:
-
-- format check and `go vet ./...`;
-- `go test ./...` including race-enabled tests where runner cost is acceptable;
-- migration validation against a disposable PostgreSQL service;
-- build both `lampa-web` and `lampa-api` images;
-- static check that the ES5 adapter has no unsupported syntax;
-- API contract tests and secret-log redaction tests;
-- Compose configuration validation.
-
-Deployment:
-
-1. validate every required secret before building or changing the server;
-2. publish immutable SHA-tagged web and API images to GHCR;
-3. connect through Tailscale and SSH using the existing convention;
-4. copy Compose and a mode-`600` environment file atomically;
-5. back up the Lampa database before a schema migration;
-6. run the one-shot migration job;
-7. pull and recreate only the Lampa services;
-8. wait for actual web and API readiness, not merely container start;
-9. smoke-test anonymous session and settings authorization behavior;
-10. retain the previous image tags for rollback.
-
-Likely new deployment secrets:
-
-- `KEYCLOAK_LAMPA_CLIENT_SECRET`;
-- `LAMPA_DB_CONNECTION_STRING` or separately managed DB credentials;
-- `LAMPA_SETTINGS_ENCRYPTION_KEYS` with current and previous key versions;
-- session/OIDC state protection key if the selected implementation needs one.
-
-Rollback switches the web/API image tags back. Database migrations are not
-automatically reversed; each migration plan must state whether the previous API
-can run against the new schema.
-
-## 17. Verification strategy
-
-### Automated backend tests
-
-- allowlist, type, size and URL validation;
-- authenticated ownership and IDOR attempts;
-- OIDC state, nonce, issuer, audience, expiry and invalid `sub` handling;
-- session creation, rotation, expiry and revocation;
-- CSRF and open-redirect rejection;
-- settings create/get/patch/delete and revision conflicts;
-- encryption round-trip, wrong key, key rotation and proof that plaintext is not
-  present in database rows or logs;
-- migrations from every released schema version;
-- database outage and timeout behavior;
-- device-code expiry, denial, slow-down and replay behavior.
-
-### Client contract tests
-
-Because this distribution has no frontend test runner, start with a small static
-contract harness or browser fixture that loads the adapter with fake
-`Lampa.Storage` and API responses. Verify filtering, batching, debouncing,
-conflict retry, offline queues and first-login choices.
-
-### Manual device matrix
-
-At minimum verify:
-
-- current desktop Chrome/Edge;
-- Android shell, including remote `AndroidJS.getLampaURL()` behavior;
-- one representative webOS device/browser;
-- one representative Tizen device/browser;
-- remote-control-only navigation for login, reconciliation and errors;
-- offline launch after at least one successful sync;
-- two devices changing different keys and then the same key;
-- revoked and expired sessions;
-- Keycloak and API downtime independently.
-
-## 18. Plan-ready delivery steps
-
-Each step should become its own implementation plan or a small group of pull
-requests. Do not start a later step until the prior exit criteria are recorded.
-
-### Step 0: Compatibility spike and decisions
-
-Work:
-
-- test cookies, redirects, AJAX, QR display and storage on the real target device
-  matrix;
-- test hosted HTTPS, Android remote-script and any `file://` launch modes;
-- confirm the public Lampa and Keycloak origins;
-- decide shared PostgreSQL instance versus independent container;
-- capture the exact current Keycloak version and realm export procedure;
-- make ADRs for authentication transport and production database topology.
-
-Exit criteria:
-
-- every supported launch mode has a documented auth transport;
-- no unresolved blocker can force a redesign of sessions or topology.
-
-No production behavior changes in this step.
-
-### Step 1: Go service foundation
-
-Work:
-
-- add Go module, configuration validation, structured logging and request IDs;
-- add liveness/readiness endpoints;
-- add PostgreSQL connection, migrations and local Compose service;
-- add unit and integration-test foundations.
-
-Exit criteria:
-
-- clean checkout can run API plus database locally;
-- missing configuration fails before listening;
-- readiness accurately fails when PostgreSQL is unavailable;
-- CI proves formatting, vet, tests, migrations and image build.
-
-Rollback: remove/disable the unused API service; static Lampa is unaffected.
-
-### Step 2: Same-origin routing and deploy skeleton
-
-Work:
-
-- add Apache `/api` reverse proxy and private Compose networking;
-- build/publish immutable API image alongside web image;
-- deploy the API with no user-facing feature enabled;
-- add post-deploy readiness and anonymous-session smoke checks.
-
-Exit criteria:
-
-- `/api/v1/session` is reachable only through the Lampa origin;
-- API and database ports are not public;
-- a failed readiness check fails deployment visibly;
-- old static behavior is unchanged.
-
-Rollback: deploy the prior web Compose/image set.
-
-### Step 3: Keycloak browser authentication
-
-Work:
-
-- create/export the `svtlv-lampa` Keycloak client;
-- implement OIDC login/callback, opaque sessions, CSRF and logout;
-- add an ES5 Svtlv account settings component with TV focus behavior;
-- keep authentication optional behind a deployment feature flag.
-
-Exit criteria:
-
-- Svtlv identity maps to the same Keycloak `sub` UUID as Svtlv web;
-- tokens and client secret never enter browser storage;
-- invalid callbacks, redirects, sessions and CSRF requests are rejected;
-- existing sessions still use settings while Keycloak is temporarily down;
-- guest mode works unchanged.
-
-Rollback: disable the feature flag and restore previous images. Keycloak client
-can remain disabled for investigation.
-
-### Step 4: Settings inventory and contract
-
-Work:
-
-- enumerate current built-in setting keys from templates and dynamic
-  `SettingsApi` registrations;
-- classify each key using Section 9;
-- define types, defaults, maximum sizes and schema version 1;
-- explicitly identify startup-sensitive settings;
-- add shared JSON fixtures used by Go tests and the browser contract harness.
-
-Exit criteria:
-
-- every built-in key has a recorded class;
-- server rejects unknown keys and invalid values;
-- no cache, token, plugin-owned value or device fact is in the allowlist.
-
-No settings are synchronized yet.
-
-### Step 5: Non-secret settings sync
-
-Work:
-
-- implement settings persistence and versioned API;
-- implement first-login reconciliation;
-- add filtered change listener, debounced patches, offline queue and conflict
-  retry;
-- add sync status and **Sync now** without blocking normal startup.
-
-Exit criteria:
-
-- two devices converge for the approved non-secret allowlist;
-- unrelated concurrent key changes do not overwrite each other;
-- API/database outage cannot erase or prevent access to local settings;
-- sign-out leaves effective local settings intact;
-- upstream bundle replacement requires only the documented loader reapply.
-
-Rollback: disable sync; local cached values continue to work.
-
-### Step 6: Encrypted connection settings
-
-Work:
-
-- add secret-key classification and encrypted persistence;
-- implement encryption key versioning and rotation procedure;
-- add separate opt-in UX and risk explanation;
-- cover TorrServer first, then Jackett/Prowlarr only after its behavior is proven.
-
-Exit criteria:
-
-- database dump and logs contain no plaintext connection credentials;
-- wrong/missing keys fail safely without damaging non-secret settings;
-- rotation is tested using old and new key versions;
-- users can disable secret sync and delete the cloud copy.
-
-Rollback: disable secret-sync endpoints; do not delete ciphertext until the user
-requests deletion or rollback is confirmed complete.
-
-### Step 7: TV device authorization
-
-Work:
-
-- enable and configure Keycloak Device Authorization for the Lampa client;
-- implement start/poll/deny/expire flow and QR/code UI;
-- add linked-device listing and revocation;
-- only if Step 0 proves cookies impossible, add the restricted opaque device
-  credential fallback.
-
-Exit criteria:
-
-- login is completable with only a remote on the TV and a phone for approval;
-- polling obeys server interval and expiry;
-- device codes and credentials cannot be replayed after completion/revocation;
-- no Keycloak refresh token is stored by Lampa JavaScript;
-- revoking a device prevents its next settings request.
-
-Rollback: disable device linking while retaining browser login and existing
-sessions.
-
-### Step 8: Production hardening and rollout
-
-Work:
-
-- perform backup/restore drill and image rollback drill;
-- verify health, log redaction, rate limits and session cleanup;
-- stage rollout to one account/device pair, then multiple device types;
-- document Keycloak client setup, secrets, recovery and incident procedures;
-- update README only after actual production behavior is verified.
-
-Exit criteria:
-
-- all manual matrix results and operational commands are recorded;
-- deployment reports real post-deploy health;
-- rollback has been exercised, not merely described;
-- cloud sync remains opt-in until the rollout evidence supports changing that
-  default.
-
-## 19. Open decisions
-
-Resolve these in Step 0, in this order:
-
-1. Which launch modes are genuinely required: hosted HTTPS only, or also native
-   shells whose page origin is `file://`?
-2. Which physical webOS/Tizen/Android versions define the compatibility floor?
-3. Can production use a dedicated database/role in the existing PostgreSQL
-   instance, or must Lampa own a separate container and volume?
-4. What is the exact public Lampa origin and callback path?
-5. Which non-secret settings belong in schema version 1?
-6. Should cloud settings remain after a Keycloak account is deleted, and for how
-   long?
-
-The first two answers determine whether cookie-only sessions are sufficient.
-They should not be postponed until device-flow implementation.
-
-## 20. Definition of the completed concept
-
-The concept is complete when a user can:
-
-- use Lampa normally without an account;
-- sign in with the existing Svtlv Keycloak identity;
-- explicitly import local settings or adopt existing cloud settings;
-- change approved settings on one device and obtain them on another;
-- continue using local settings during API, database or Keycloak outages;
-- opt in separately to encrypted connection-setting synchronization;
-- see and revoke linked devices;
-- delete the cloud settings copy;
-- recover from a failed deployment using a tested rollback procedure.
-
-## 21. External references
-
-- [OAuth 2.0 for Browser-Based Applications, RFC 10017](https://www.rfc-editor.org/rfc/rfc10017.html)
-- [OAuth 2.0 Security Best Current Practice, RFC 9700](https://www.rfc-editor.org/rfc/rfc9700.html)
-- [Keycloak: JavaScript adapter and public-client considerations](https://www.keycloak.org/securing-apps/javascript-adapter)
-- [Keycloak: securing applications and Device Authorization Grant](https://www.keycloak.org/docs/latest/securing_apps/)
-- [Keycloak: reverse-proxy path recommendations](https://www.keycloak.org/server/reverseproxy)
-- [PostgreSQL JSON and JSONB types](https://www.postgresql.org/docs/current/datatype-json.html)
-- [Go database transactions](https://go.dev/doc/database/execute-transactions)
+Add only clearly marked script and stylesheet includes to `index.html`.
+`app.min.js` is loaded asynchronously and may come from the local distribution
+or an Android-provided remote URL, so `account-sync.js` must wait until the
+public `window.Lampa` API is available before initializing.
+
+The adapter must use ES5 syntax and public Lampa/jQuery APIs because the
+application supports older TV browsers. In particular, observe changes through
+`Lampa.Storage.listener.follow('change', ...)`; do not replace `localStorage`,
+patch `Lampa.Storage.set`, or depend on generated internal names with `$N`
+suffixes.
+
+The adapter has four small responsibilities:
+
+1. `exportData()` reads the approved durable Lampa values.
+2. `importData(data)` writes server values into the correct local stores.
+3. `loadFromServer()` implements the login/startup flow.
+4. `saveToServer()` debounces and uploads the complete document.
+
+Do not replace the global `localStorage` object or send every storage key
+blindly. Export/import code should explicitly cover Lampa's durable user data so
+temporary caches and unrelated tokens are not uploaded.
+
+### 10.1 Hard compatibility rules
+
+- Do not edit `app.min.js` for account, login or synchronization behavior.
+- Do not edit compiled `css/app.css`; use `svtlv/account-sync.css`.
+- Do not modify upstream language bundles for the first version; keep the small
+  Svtlv UI text inside the add-on until upstream-safe localization is designed.
+- Use only stable names exported through `window.Lampa`.
+- Treat the add-on as optional: missing configuration, backend failure, script
+  failure or API incompatibility must leave normal anonymous Lampa working.
+- Keep backend, database, deployment and documentation files in additive
+  directories that upstream Lampa does not own.
+- Any future requirement to edit a generated upstream file needs an explicit
+  design decision; it is not part of normal implementation.
+
+### 10.2 Minimal loader seam
+
+The intended frontend conflict surface is limited to the marked includes in
+`index.html`. The add-on initializes itself only after `window.Lampa` is ready
+and catches initialization errors without interrupting Lampa boot.
+
+This works for both current loader branches:
+
+- local `app.min.js`;
+- an Android-provided remote `app.min.js` with local fallback.
+
+When frontend updates are received, take the updated upstream distribution
+files as-is, preserve the small marked `index.html` includes and run the Lampa
+smoke checks. The synchronization implementation remains in `svtlv/` and should
+not participate in conflicts inside the generated bundle.
+
+## 11. Failure behavior
+
+- No server document: upload current local data, read it back and use it.
+- API unavailable during login: keep current local data and show sync as
+  unavailable; do not initialize the server document.
+- API unavailable during save: keep the local change and show that it has not
+  been saved to the server. A later save may retry the complete current
+  document.
+- PostgreSQL unavailable: both health endpoints report `Unhealthy`, the Docker
+  critical probe fails and user-data endpoints return a temporary error.
+- Keycloak unavailable: anonymous mode and already-loaded local data continue
+  working; new login fails cleanly and `/health` reports `Degraded`.
+- Invalid server document: reject it and keep the current local values.
+
+## 12. Security
+
+- Serve login and API traffic through HTTPS.
+- Use `HttpOnly`, `Secure` and appropriate `SameSite` session cookies.
+- Protect modifying requests against CSRF.
+- Derive ownership only from the authenticated Keycloak session.
+- Encrypt TorrServer/Jackett credentials and API keys before database storage.
+- Never log user documents, connection values, credentials or Keycloak tokens.
+- Limit JSON nesting, section sizes and total request size.
+- Keep the API and PostgreSQL ports private.
+- Keep port `8081` and detailed health responses private to Docker and the
+  monitoring network.
+
+## 13. Existing deployment
+
+The existing Lampa, TorrServer and Jackett services are the working baseline.
+They are not recreated or reconfigured by this project.
+
+Deployment work only adds:
+
+- the `lampa-api` image;
+- PostgreSQL database access for that API;
+- the Apache `/api` reverse proxy;
+- backend secrets and migration execution;
+- the Svtlv-compatible health endpoints and Docker critical healthcheck;
+- private network reachability from `Svtlv.Monitoring.Service`;
+- Ralphex-style Go build, race-test, coverage and lint gates in the existing
+  manual CI/CD workflow.
+
+Disabling the API/sync feature must return Lampa to its current anonymous,
+local-only behavior.
+
+## 14. Roadmap
+
+Each step is one separate implementation plan. Complete and verify the plans in
+this order. There is no final standalone CI/CD or deployment plan: every plan
+must include the tests, image, Docker Compose, manual CI/CD, deployment,
+healthcheck, smoke verification and rollback changes required by its feature.
+The deployment workflow remains manual-only and remote server commands continue
+to use `docker-compose`.
+
+### Plan 1: Build and deploy the Go persistence service
+
+Re-check the current Ralphex baseline and create the isolated `backend/` Go
+module with its package layout, Make targets, vendoring, GolangCI-Lint v2
+configuration and test conventions. Create the Go API and its PostgreSQL table
+containing one JSONB document per user. Implement user-data read, replace and
+delete operations, sensitive-value encryption, validation, table-driven tests,
+and the Svtlv-compatible `/health` and `/health/critical` endpoints. In the same
+plan, create the multi-stage backend image, add the API and database connection
+to Docker Compose, run the Ralphex-style race/coverage/lint gates before image
+build in the manual CI/CD workflow, add the Docker `/health/critical` probe,
+register `/health` in `Svtlv.Monitoring.Service`, deploy it and verify rollback.
+
+Result: the backend is running and monitored on the server and can securely
+store and retrieve isolated user documents.
+
+### Plan 2: Add and deploy Keycloak authentication
+
+Create the confidential `svtlv-lampa` client inside the existing `svtlv` realm.
+Implement login, callback, session status and logout. Validate the Keycloak
+`sub` UUID and make it available to authenticated backend handlers, but do not
+connect the Lampa frontend to the user-data API yet. Add the new Keycloak
+configuration and secret to Compose and the manual deployment workflow, deploy
+the change and verify login, session identity, session expiry and rollback.
+
+Result: existing Svtlv users can sign in and Lampa can recognize the active
+session. Settings, favorites, bookmarks, scores and every other Lampa value
+still read from and write only to the device's existing `localStorage`. Login
+does not download, upload or replace any user data in this plan.
+
+### Plan 3: Synchronize and deploy all Lampa user data
+
+Add the optional ES5 adapter under `svtlv/` through a small marked loader seam
+in `index.html`. This plan makes the first frontend calls to the user-data API
+and connects the authenticated Keycloak `sub` to its server document. Implement
+the server-first login flow for settings, existing TorrServer and Jackett
+connection configuration, favorites, bookmarks, scores, reactions,
+subscriptions, watched state, playback progress, history and other durable
+personal data. Exclude caches, device state and unrelated tokens, and do not
+change `app.min.js` or `css/app.css`. In the same plan, add frontend checks and
+the updated web image to the manual CI/CD workflow, deploy behind the sync
+feature flag, verify the complete flow on two devices and verify rollback.
+
+Result: anonymous mode remains local-only, while a signed-in user receives the
+same complete Lampa state on every device. The deployed feature can be disabled
+to restore the original behavior.
+
+## 15. Acceptance criteria
+
+The design is complete when:
+
+- anonymous users work exactly as before and use only local storage;
+- a signed-in user with server data always receives and uses that data;
+- a signed-in user without server data uploads the current local data once;
+- later signed-in changes update both local storage and the server document;
+- the same Keycloak user receives the same data on another device;
+- one user cannot access another user's data;
+- backend code follows the current Ralphex package, formatting, lint, test,
+  vendoring and Docker conventions, with documented exceptions only;
+- temporary backend failure does not stop normal local Lampa operation;
+- Docker evaluates `/health/critical`, while `Svtlv.Monitoring.Service`
+  evaluates the full `/health` JSON and sends notifications for bad checks;
+- frontend updates can be received without merging synchronization code inside
+  `app.min.js`, `css/app.css` or upstream language bundles;
+- failure of the optional Svtlv add-on never prevents original Lampa startup;
+- existing Lampa, TorrServer and Jackett behavior remains unchanged.
+
+## 16. Open decision
+
+Logout needs one explicit product rule:
+
+- keep the last synchronized values in `localStorage` and continue anonymously
+  with them; or
+- clear synchronized values on logout so the next person using the device does
+  not see the signed-in user's data.
+
+The second option is safer for shared devices. Preserving a separate pre-login
+guest snapshot can be added later only if it is actually needed.
