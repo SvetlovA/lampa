@@ -382,16 +382,20 @@ feature = `api_enabled: false` (design §13: returns Lampa to anonymous, local-o
 - Create: `backend/pkg/storage/crypto.go`
 - Create: `backend/pkg/storage/crypto_test.go`
 
-- [ ] `NewSealer(key [32]byte) (*Sealer, error)` using AES-256-GCM
-- [ ] `Split(userID, doc) (clean Document, blob []byte, err)` — move sensitive `settings` keys
+- [x] `NewSealer(key [32]byte) (*Sealer, error)` using AES-256-GCM
+- [x] `Split(userID, doc) (clean Document, blob []byte, err)` — move sensitive `settings` keys
       into a sealed blob (AAD = format byte ‖ 16-byte UUID), `nil` blob when none present
-- [ ] `Merge(userID, doc, blob) (Document, error)` — decrypt and put the keys back into
+- [x] `Merge(userID, doc, blob) (Document, error)` — decrypt and put the keys back into
       `settings`; reject unknown format version
-- [ ] tests: round trip, no sensitive keys → nil blob, clean `data` never contains the
+- [x] tests: round trip, no sensitive keys → nil blob, clean `data` never contains the
       plaintext values, wrong key fails, blob under another user ID fails (AAD), same UUID in
       upper/lower case decrypts, tampered byte fails, truncated/empty blob fails, unknown
       version byte fails
-- [ ] run `make test` and `make lint` - must pass before Task 5
+      - `nil` blob = no stored credentials (maps to SQL `NULL`); a non-nil empty blob is
+        unreadable; sealed keys outside `SensitiveSettings` are ignored on merge; settings are
+        re-encoded without HTML escaping; unexported `parseUUID` (canonical 8-4-4-4-12, any case,
+        `ErrInvalidUserID`) is reused by the service in Task 6
+- [x] run `make test` and `make lint` - must pass before Task 5
 
 ### Task 5: Migrations, test database helper and PostgreSQL store
 
