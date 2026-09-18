@@ -482,20 +482,28 @@ feature = `api_enabled: false` (design §13: returns Lampa to anonymous, local-o
 - Create: `backend/pkg/api/userdata.go`
 - Create: `backend/pkg/api/userdata_test.go`
 
-- [ ] `identity.go`: `Authenticator` interface, `ErrUnauthenticated`, `DenyAll` type, the
+- [x] `identity.go`: `Authenticator` interface, `ErrUnauthenticated`, `DenyAll` type, the
       middleware that stores the authenticated ID under an unexported context key, `UserID(ctx)`
-- [ ] `server.go`: `ServerConfig` + `NewServer(cfg, svc, auth, logger) (*Server, error)`,
+- [x] `server.go`: `ServerConfig` + `NewServer(cfg, svc, auth, logger) (*Server, error)`,
       `Serve(ctx, ln)` / `Start(ctx)` per the Go Style server deviation, `Handler()` accessor;
       method-pattern routes + JSON 405/404 fallbacks; middleware order per Technical Details;
       JSON error writer
-- [ ] `userdata.go`: GET/PUT/DELETE handlers per the API contract table; `Content-Type` check on
+- [x] `userdata.go`: GET/PUT/DELETE handlers per the API contract table; `Content-Type` check on
       PUT; `*http.MaxBytesError` → 413
-- [ ] tests via `httptest` with a fake authenticator: every status code in the contract,
+- [x] tests via `httptest` with a fake authenticator: every status code in the contract,
       `DenyAll` → 401 on all three routes, `POST` → JSON 405 with `Allow`, unknown path → JSON
       404, a `user_id` in body/query/header is ignored, panic → logged 500 JSON, access log
       contains no body or cookie values; `Serve` on a `127.0.0.1:0` listener returns only after
       in-flight requests finish
-- [ ] run `make test` and `make lint` - must pass before Task 9
+      - authenticator wraps only the three method routes, so 404/405 fallbacks answer without
+        auth; a non-`ErrUnauthenticated` auth error (or empty id) is still `401`, logged `[WARN]`;
+        consumer-side `UserData` interface + moq `mocks/userdata.go`; middleware lives in
+        `server.go`; `serve(ctx, ln, h)` is unexported and reusable by the health server in Task 9;
+        response sections are encoded in `storage.Sections` order without HTML escaping;
+        unexpected service errors (incl. `ErrInvalidUserID`) → logged `500 internal_error`;
+        body read failures other than the size limit → `400 invalid_json`; api coverage 97.4 %,
+        total 93.0 %
+- [x] run `make test` and `make lint` - must pass before Task 9
 
 ### Task 9: Composition root and lifecycle
 
