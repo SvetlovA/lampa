@@ -612,25 +612,46 @@ feature = `api_enabled: false` (design §13: returns Lampa to anonymous, local-o
 **Files:**
 - Modify: `.github/workflows/deploy-docker.yaml`
 
-- [ ] add the `deploy`, `web_image_tag`, `api_image_tag`, `api_enabled` inputs from Technical
+- [x] add the `deploy`, `web_image_tag`, `api_image_tag`, `api_enabled` inputs from Technical
       Details; validate tag inputs against `^sha-[0-9a-f]{40}$`
-- [ ] new `backend-checks` job (skipped when `api_image_tag` is set): `setup-go@v7` with
+      - new `prepare` job validates inputs, resolves `web_image`/`api_image`/`build_*` outputs
+        and, when a tag is supplied, checks the image exists (`docker buildx imagetools inspect`)
+        so a rollback to a missing tag fails before touching the server
+- [x] new `backend-checks` job (skipped when `api_image_tag` is set): `setup-go@v7` with
       `go-version: "1.26"` + `cache-dependency-path: backend/go.sum`,
       `golangci-lint-action@v9` with `version: v2.13.0` and `working-directory: backend`,
       `make test` + `make race` in `backend/` with `LAMPA_API_REQUIRE_DOCKER=1`
-- [ ] build jobs: web image only when `web_image_tag` is empty; API image
+      - checks out the exact commit resolved by `prepare` (all jobs do), so every job builds and
+        deploys the same sha even if `svtlvtv` moves mid-run
+- [x] build jobs: web image only when `web_image_tag` is empty; API image
       `ghcr.io/<repo>-api:sha-<sha>` from `backend/` only when `api_image_tag` is empty and
       after `backend-checks`; push the moving `:svtlvtv` tags only when `deploy` is true
-- [ ] validate new secrets `LAMPA_DB_PASSWORD` (`^[0-9a-f]{64}$`) and `LAMPA_API_DATA_KEY`
+      - separate gha cache scopes (`web`, `api`); API image built with `CI=true`,
+        `GIT_BRANCH=svtlvtv`, `GITHUB_SHA` (Task 10). `deploy` job runs when no needed job
+        failed/cancelled, so skipped builds (existing tag requested) are fine
+- [x] validate new secrets `LAMPA_DB_PASSWORD` (`^[0-9a-f]{64}$`) and `LAMPA_API_DATA_KEY`
       (base64 → 32 bytes) when `api_enabled`; write `LAMPA_API_IMAGE`, `LAMPA_DB_PASSWORD`,
       `LAMPA_API_DATA_KEY` into `.env` (still `chmod 600`)
-- [ ] remote steps only when `deploy`: print `docker-compose version`; `config --quiet`;
+      - required only when `deploy && api_enabled`, but format-checked whenever set.
+        ⚠️ **deviation**: compose v1 interpolates every service, so with `api_enabled: false` and
+        unset secrets `.env` gets `api-disabled` placeholders (lampa-db is never started then);
+        `.env` is written with `umask 077` and `chmod 600` before the atomic `mv`
+- [x] remote steps only when `deploy`: print `docker-compose version`; `config --quiet`;
       if `api_enabled` → `pull lampa-web lampa-api`, `up -d --no-build --remove-orphans lampa-db
       lampa-api lampa-web`, poll `docker inspect` health of `svtlvtv_lampa_api` (≤ 3 min) and
       on failure print `docker-compose logs --tail=50 lampa-api` and fail; else →
       `rm -sf lampa-api lampa-db` (volume kept) and `up -d --no-build lampa-web`
-- [ ] verify: `actionlint` passes; one dispatch with `deploy: false` goes green through checks
+      - disabled path also pulls `lampa-web` so a web rollback tag is honored; health poll is
+        36 × 5 s on `docker inspect` health status
+- [x] verify: `actionlint` passes; one dispatch with `deploy: false` goes green through checks
       and both image builds without touching the server
+      - `actionlint v1.7.12` with `shellcheck 0.11.0` (WSL): clean; SC2029 on the ssh lines
+        disabled per command (values are validated and expand on the runner on purpose). Secret
+        checks exercised locally (32-byte key ok; 16/33-byte and non-base64 rejected); remote
+        heredoc passes `bash -n`
+      - ⚠️ `deploy: false` dispatch skipped - not automatable here: needs this branch merged to
+        `svtlvtv` and pushed (the workflow checks out `svtlvtv`); run it before the
+        Post-Completion deploy
 
 ### Task 13: Verify acceptance criteria
 - [ ] Plan-1 slice of design §15: users isolated (store + service tests), temporary DB failure
