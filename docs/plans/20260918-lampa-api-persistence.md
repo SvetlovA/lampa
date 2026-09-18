@@ -687,17 +687,20 @@ feature = `api_enabled: false` (design §13: returns Lampa to anonymous, local-o
         credential/content absence in service logs is asserted by the service tests
 
 ### Task 14: [Final] Update documentation
-- [ ] create `backend/README.md`: env vars, WSL/make targets, local run with both compose
+- [x] create `backend/README.md`: env vars, WSL/make targets, local run with both compose
       files, API and health contract summary, data-key backup/rotation caveat, DB password
       rotation caveat
-- [ ] update `CLAUDE.md`: repo now contains a Go module under `backend/` (build/test/lint in
+- [x] update `CLAUDE.md`: repo now contains a Go module under `backend/` (build/test/lint in
       WSL, testcontainers needs Docker), the `.dockerignore` rule for new top-level dirs, and the
       workflow inputs for disable/rollback
-- [ ] update `docs/settings-sync-backend-design.md`: record deviations (keycloak advisory check
+- [x] update `docs/settings-sync-backend-design.md`: record deviations (keycloak advisory check
       and `/api` proxy deferred to Plan 2; Postgres 18.6 data path; rollback by image tag)
-- [ ] move this plan to `docs/plans/completed/` **only after** the Post-Completion deploy,
+- [x] move this plan to `docs/plans/completed/` **only after** the Post-Completion deploy,
       monitoring registration and rollback drill have succeeded; then mark Plan 1 done in the
       design doc
+      - ⚠️ skipped - not automatable here: needs the Post-Completion production deploy,
+        monitoring registration and rollback drill; move the plan and mark Plan 1 done by hand
+        afterwards (the design doc now records the Plan 1 deviations in §14)
 
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*

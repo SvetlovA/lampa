@@ -8,7 +8,7 @@ This is the **distribution** repo of Lampa (a media-catalog / player app for TVs
 
 Consequences that shape everything else:
 
-- There is **no package.json, no build system, no tests, no linter**. Nothing to install, nothing to compile.
+- There is **no package.json, no build system, no tests, no linter** for the frontend. Nothing to install, nothing to compile. The one exception is the fork-only Go service under `backend/` (see "lampa-api" below).
 - `app.min.js` (~56k lines) is the whole application. **Despite the name it is not minified** — it is a readable Rollup IIFE bundle passed through Babel (ES5 output, 2-space indent, JSDoc comments in Russian preserved). Edit it directly.
 - `css/app.css` is compiled + autoprefixed SCSS output. Edit it directly too; do not expect a `.scss` source here.
 - Upstream commits (author `yumata`) touch `app.min.js` + `assembly.json`, sometimes `css/app.css` and `lang/*.js`. Follow the same pattern.
@@ -91,7 +91,17 @@ Third-party plugins are remote scripts loaded at boot (`Plugins.load`) from CUB 
 
 ### Backend
 
-There is no server in this repo. The app talks to CUB (`Manifest.cub_site` → `cub.best`, or `cub.black` when `window.vpn_region == 'ru'`) for accounts / sync / plugins, to TMDB for catalog data, and to user-configured TorrServer / Jackett instances for torrents. `Manifest.cub_mirrors` / `old_mirrors` drive mirror failover — when a domain changes, that list plus `Manifest` are what to edit.
+The upstream app has no server of its own. It talks to CUB (`Manifest.cub_site` → `cub.best`, or `cub.black` when `window.vpn_region == 'ru'`) for accounts / sync / plugins, to TMDB for catalog data, and to user-configured TorrServer / Jackett instances for torrents. `Manifest.cub_mirrors` / `old_mirrors` drive mirror failover — when a domain changes, that list plus `Manifest` are what to edit.
+
+### lampa-api (`backend/`)
+
+A fork-only Go module (`go 1.26`, vendored) that stores one user-data document per user in PostgreSQL; design in `docs/settings-sync-backend-design.md`, usage in `backend/README.md`. It follows the Ralphex checkout's style (lowercase comments, `pkg/<responsibility>`, moq into `mocks/`, one `_test.go` per source file, stdlib `log` with `[INFO]`/`[WARN]` prefixes).
+
+- Run `make test` / `make race` / `make lint` / `make fmt` **inside WSL Ubuntu** from `backend/` — the Windows Go has no cgo, so `-race` fails there.
+- DB tests use testcontainers (`postgres:18.6`) and need Docker; they skip without it unless `LAMPA_API_REQUIRE_DOCKER=1` (CI sets it).
+- The root `Dockerfile` does `COPY . htdocs/`, so **any new top-level directory must be added to the root `.dockerignore`** or it ships inside the public `lampa-web` image (`backend` and `docs` already are).
+- `.github/workflows/deploy-docker.yaml` is manual-only. Rollback = dispatch with an existing `web_image_tag` / `api_image_tag` (`sha-<40 hex>`); `api_enabled: false` removes `lampa-api` + `lampa-db` (volume kept) and leaves only `lampa-web`; `deploy: false` runs checks and builds only.
+- Frontend files (`app.min.js`, `css/app.css`, `lang/*`, `index.html`) are never touched by backend work.
 
 ## Conventions and gotchas
 

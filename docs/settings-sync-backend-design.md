@@ -349,6 +349,9 @@ endpoints. A Keycloak failure prevents new logins but does not invalidate
 existing sessions or justify restarting the API, so `/health` becomes
 `Degraded` while `/health/critical` remains `Healthy`.
 
+Plan 1 ships only the `database` check; `keycloak` is added in Plan 2 (see the
+Plan 1 deviations in §14).
+
 ### 9.2 JSON contract
 
 Both endpoints return the same camel-case document shape used by Svtlv:
@@ -556,6 +559,24 @@ register `/health` in `Svtlv.Monitoring.Service`, deploy it and verify rollback.
 
 Result: the backend is running and monitored on the server and can securely
 store and retrieve isolated user documents.
+
+Deviations recorded while implementing Plan 1
+(`docs/plans/20260918-lampa-api-persistence.md`):
+
+- the `keycloak` advisory check (§9.1) is deferred to Plan 2, when a Keycloak
+  issuer URL exists. Plan 1 ships only the critical `database` check; the
+  advisory tier and `Degraded` aggregation are implemented and tested with fakes;
+- the Apache `/api` reverse proxy (§13) is deferred to Plan 2, when login needs
+  it. `lampa-api` joins the default Compose network so `lampa-web` can reach it,
+  but its port is not published and user-data routes answer `401` until Plan 2
+  plugs in authentication;
+- PostgreSQL is pinned to `postgres:18.6`, in Compose and in testcontainers.
+  Postgres 18+ images keep data in a versioned subdirectory, so the volume is
+  mounted at `/var/lib/postgresql`, not `/var/lib/postgresql/data`;
+- rollback redeploys previously built images by tag (`web_image_tag`,
+  `api_image_tag` workflow inputs) instead of rebuilding old commits;
+  `api_enabled: false` disables the feature by removing `lampa-api` and
+  `lampa-db` while keeping the data volume.
 
 ### Plan 2: Add and deploy Keycloak authentication
 
