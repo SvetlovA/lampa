@@ -302,29 +302,42 @@ feature = `api_enabled: false` (design §13: returns Lampa to anonymous, local-o
 - Create: `backend/cmd/lampa-api/main_test.go`
 - Modify: `.dockerignore`
 
-- [ ] prepare WSL Ubuntu: Go 1.26.x, `make`, `gcc` (for `-race`), `golangci-lint v2.13.0`;
+- [x] prepare WSL Ubuntu: Go 1.26.x, `make`, `gcc` (for `-race`), `golangci-lint v2.13.0`;
       confirm `docker ps` works from WSL (Docker Desktop WSL integration)
-- [ ] re-check Ralphex: `git -C C:/Users/21art/Projects/ralphex pull --ff-only` (Orca repo
+      - installed Go 1.26.8 (`/usr/local/go`, PATH via `/etc/profile.d/go.sh`), make 4.3, gcc 13.3,
+        golangci-lint 2.13.0; run make targets with `wsl -d Ubuntu -- bash -lc 'cd ... && make test'`
+      - ⚠️ `docker ps` not confirmed: Docker Desktop (WSL integration for `Ubuntu` already enabled in
+        its settings) would not start from the non-interactive agent session. Start Docker Desktop
+        manually before Task 5, otherwise `pgtest` tests skip locally
+      - ⚠️ WSL `git` cannot resolve this worktree's Windows `.git` path, so `make build`/`make version`
+        in WSL report `REV=latest`; CI and the Docker build are not affected
+- [x] re-check Ralphex: `git -C C:/Users/21art/Projects/ralphex pull --ff-only` (Orca repo
       `ralphex`); if `master` moved past `a736d5e`, diff `go.mod`/`.golangci.yml`/`Makefile`/
       `.github/workflows/ci.yml` and update versions and the Go Style section here
-- [ ] `go mod init` (module path `github.com/SvetlovA/lampa/backend` — confirm the GitHub owner
+      - still `a736d5e` on 2026-09-18, nothing to update
+- [x] `go mod init` (module path `github.com/SvetlovA/lampa/backend` — confirm the GitHub owner
       first), `go 1.26.0`; add `testify v1.12.1`; `go get -tool` for `moq` and `goimports`;
       `go mod tidy && go mod vendor`
-- [ ] Makefile from Ralphex: `build` (→ `.bin/lampa-api`, `-X main.revision`), `test`
+      - owner confirmed from `origin` (`github.com/SvetlovA/lampa`); tools: `moq v0.7.1`,
+        `x/tools v0.50.0` (goimports)
+- [x] Makefile from Ralphex: `build` (→ `.bin/lampa-api`, `-X main.revision`), `test`
       (race + coverage excluding mocks), `lint`, `fmt` (via `go tool goimports`), `race`,
       `version`, `generate` (`go generate ./...`); drop e2e/site/docker targets; **deviation**:
-      `race` timeout `300s` (first-run Postgres image pull exceeds Ralphex's `60s`)
-- [ ] copy Ralphex `.golangci.yml`, then drop gosec `G204`/`G702` (subprocess) and `G706` (log
+      `race` timeout `300s` (first-run Postgres image pull exceeds Ralphex's `60s`); **deviation**:
+      `TIMESTAMP` uses GNU `date -u -d @<ts>` (Ralphex's `date -r` is BSD/macOS-only); added
+      `backend/.gitattributes` (`eol=lf`) so `core.autocrlf=true` checkouts don't break make in WSL
+- [x] copy Ralphex `.golangci.yml`, then drop gosec `G204`/`G702` (subprocess) and `G706` (log
       injection — we log with `%q` instead) exclusions; keep `G705` (JSON responses) and the
       rest that apply; comment every remaining Lampa-specific suppression
-- [ ] `main.go` stub copying Ralphex `cmd/ralphex/main.go` shape: `var revision = "unknown"`,
+      - also dropped `G703` (path traversal, no user paths); kept `G115`, `G118`, `G705`
+- [x] `main.go` stub copying Ralphex `cmd/ralphex/main.go` shape: `var revision = "unknown"`,
       `resolveVersion()` (ldflags → build info VCS → `unknown`), `run(ctx, args, lookup,
       stdout) error` split from `main()` for testability
-- [ ] add `backend` and `docs` to root `.dockerignore` so Go sources and design docs are no
+- [x] add `backend` and `docs` to root `.dockerignore` so Go sources and design docs are no
       longer copied into the public `lampa-web` web root
-- [ ] write `main_test.go` for `run` (prints revision with `--version`, returns error on unknown
+- [x] write `main_test.go` for `run` (prints revision with `--version`, returns error on unknown
       argument)
-- [ ] run `make test` and `make lint` - must pass before Task 2
+- [x] run `make test` and `make lint` - must pass before Task 2
 
 ### Task 2: Typed environment configuration
 

@@ -1,0 +1,7 @@
+# binaries
+.bin/
+
+# test files
+*.test
+coverage.out
+coverage_no_mocks.out
