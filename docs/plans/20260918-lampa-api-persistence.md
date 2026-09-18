@@ -410,20 +410,26 @@ feature = `api_enabled: false` (design §13: returns Lampa to anonymous, local-o
 - Create: `backend/pkg/storage/postgres.go`
 - Create: `backend/pkg/storage/postgres_test.go`
 
-- [ ] add `pgx/v5`, `goose/v3`, `testcontainers-go` + `modules/postgres`; tidy + vendor
-- [ ] `migrations.FS` via `//go:embed *.sql`; test that the FS lists the expected files
-- [ ] `storage.Migrate(ctx, pool)` via `goose.NewProvider(goose.DialectPostgres,
+- [x] add `pgx/v5`, `goose/v3`, `testcontainers-go` + `modules/postgres`; tidy + vendor
+- [x] `migrations.FS` via `//go:embed *.sql`; test that the FS lists the expected files
+- [x] `storage.Migrate(ctx, pool)` via `goose.NewProvider(goose.DialectPostgres,
       stdlib.OpenDBFromPool(pool), migrations.FS, goose.WithSessionLocker(...))`
-- [ ] `pgtest.DB(t) *pgxpool.Pool`: `sync.Once` container start (`postgres:18.6`),
+- [x] `pgtest.DB(t) *pgxpool.Pool`: `sync.Once` container start (`postgres:18.6`),
       migrations applied once, `t.Skip` without Docker unless `LAMPA_API_REQUIRE_DOCKER=1`
       (then `t.Fatal`); container terminated by testcontainers' reaper
-- [ ] `PgStore` with `Get(ctx, userID) (Record, error)` (`ErrNotFound`), `Upsert(ctx, Record)
+- [x] `PgStore` with `Get(ctx, userID) (Record, error)` (`ErrNotFound`), `Upsert(ctx, Record)
       (Record, error)`, `Delete(ctx, userID) error`, `Ping(ctx) error` (ping + schema probe)
-- [ ] tests: migrate is idempotent, **two concurrent `Migrate` calls both succeed** (locker),
+- [x] tests: migrate is idempotent, **two concurrent `Migrate` calls both succeed** (locker),
       get missing → `ErrNotFound`, insert then get, upsert replaces and bumps `updated_at` but
       keeps `created_at`, delete + delete again, two users isolated, `Ping` fails on a closed
       pool; every test uses fresh random UUIDs and may run `t.Parallel()`
-- [ ] run `make test` and `make lint` - must pass before Task 6
+      - `Migrate` retries the advisory lock every 1 s up to 300 times (goose default is 5 s, which
+        made the concurrent case slow); store and migrate tests are external `package storage_test`
+        because `pgtest` imports `storage.Migrate`; tests also cover a missing schema in `Ping`, a
+        canceled `Migrate`, and non-UUID ids surfacing as driver errors (Task 6 validates up front)
+      - Docker Desktop started via `docker desktop start`; `pgtest` package coverage is 68.6 %
+        (docker-missing/startup-failure branches are not exercised), storage 94 %, total 89.9 %
+- [x] run `make test` and `make lint` - must pass before Task 6
 
 ### Task 6: User-data service
 
