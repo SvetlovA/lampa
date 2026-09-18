@@ -41,8 +41,11 @@
   `github.com/pressly/goose/v3 v3.28.0`, `github.com/testcontainers/testcontainers-go v0.44.0`
   (+ `modules/postgres`), `github.com/stretchr/testify v1.12.1`; tools `moq`, `goimports` as
   `go tool` dependencies.
-- **PostgreSQL**: latest stable `postgres:18.6-alpine3.24` (19 is only `19beta3`), used both in
-  Compose and in testcontainers so tests and production run the same version.
+- **PostgreSQL**: latest stable `postgres:18.6` (19 is only `19beta3`), used both in
+  Compose and in testcontainers so tests and production run the same version. Debian (glibc)
+  variant, not Alpine: matches the Svtlv stack (`postgres:17`), avoids musl locale/collation
+  quirks; the ~40 MB size saving is irrelevant on the server. Exact patch pinned so the DB only
+  changes via a commit; bump manually after reading release notes.
 
 ## Development Approach
 - **testing approach**: Regular (code first, then tests in the same task)
@@ -103,7 +106,7 @@ Every task follows these; reviewers check them against the Ralphex checkout.
 - **unit tests**: required for every task; `make test` = `go test -race -coverprofile` over all
   packages, coverage reported excluding `mocks/`; target ≥ 80 % for new code.
 - **integration tests**: PostgreSQL-backed tests use `pgtest.DB(t)` (Task 5): a lazy,
-  `sync.Once`-per-test-binary testcontainers `postgres:18.6-alpine3.24` with migrations applied.
+  `sync.Once`-per-test-binary testcontainers `postgres:18.6` with migrations applied.
   Without Docker it calls `t.Skip`, **unless `LAMPA_API_REQUIRE_DOCKER=1`, then `t.Fatal`** —
   CI sets that variable, so DB tests can never silently skip there. Pure unit tests in the same
   package never touch the container. Tests isolate by generating random user UUIDs (no
@@ -247,7 +250,7 @@ headers or cookies) → recover → body limit (`http.MaxBytesReader`) → authe
 `MaxHeaderBytes 16 KiB`; shutdown timeout 15 s.
 
 ### Compose (`devops/docker-compose.yaml`, copied to the server)
-- `lampa-db`: `postgres:18.6-alpine3.24`, `container_name: svtlvtv_lampa_db`,
+- `lampa-db`: `postgres:18.6`, `container_name: svtlvtv_lampa_db`,
   `restart: unless-stopped`, `POSTGRES_DB=lampa`, `POSTGRES_USER=lampa`,
   `POSTGRES_PASSWORD=${LAMPA_DB_PASSWORD:?}`, volume `lampa_db_data:/var/lib/postgresql`
   (**PG 18+ image layout** — not `.../data`), healthcheck
@@ -388,7 +391,7 @@ feature = `api_enabled: false` (design §13: returns Lampa to anonymous, local-o
 - [ ] `migrations.FS` via `//go:embed *.sql`; test that the FS lists the expected files
 - [ ] `storage.Migrate(ctx, pool)` via `goose.NewProvider(goose.DialectPostgres,
       stdlib.OpenDBFromPool(pool), migrations.FS, goose.WithSessionLocker(...))`
-- [ ] `pgtest.DB(t) *pgxpool.Pool`: `sync.Once` container start (`postgres:18.6-alpine3.24`),
+- [ ] `pgtest.DB(t) *pgxpool.Pool`: `sync.Once` container start (`postgres:18.6`),
       migrations applied once, `t.Skip` without Docker unless `LAMPA_API_REQUIRE_DOCKER=1`
       (then `t.Fatal`); container terminated by testcontainers' reaper
 - [ ] `PgStore` with `Get(ctx, userID) (Record, error)` (`ErrNotFound`), `Upsert(ctx, Record)
