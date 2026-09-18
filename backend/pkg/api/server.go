@@ -102,14 +102,18 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 // routes registers method patterns plus json fallbacks, since ServeMux answers 404/405 in plain text.
 // middleware order, outermost first: access log, recover, body limit, deadline, authenticator (per route).
 func (s *Server) routes() http.Handler {
+	methodNotAllowed := func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Allow", "GET, PUT, DELETE")
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+userDataPath, s.authenticate(s.getUserData))
 	mux.HandleFunc("PUT "+userDataPath, s.authenticate(s.putUserData))
 	mux.HandleFunc("DELETE "+userDataPath, s.authenticate(s.deleteUserData))
-	mux.HandleFunc(userDataPath, func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Allow", "GET, PUT, DELETE")
-		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
-	})
+	// a "GET" pattern also matches HEAD, so HEAD needs its own route to reach the 405 fallback
+	// instead of running the authenticated get handler.
+	mux.HandleFunc("HEAD "+userDataPath, methodNotAllowed)
+	mux.HandleFunc(userDataPath, methodNotAllowed)
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "not found")
 	})

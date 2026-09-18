@@ -63,6 +63,8 @@ func TestServer_Fallbacks(t *testing.T) {
 			code: "method_not_allowed", allow: "GET, PUT, DELETE"},
 		{name: "patch user data", method: http.MethodPatch, path: userDataPath, status: http.StatusMethodNotAllowed,
 			code: "method_not_allowed", allow: "GET, PUT, DELETE"},
+		{name: "head user data", method: http.MethodHead, path: userDataPath, status: http.StatusMethodNotAllowed,
+			code: "method_not_allowed", allow: "GET, PUT, DELETE"},
 		{name: "root", method: http.MethodGet, path: "/", status: http.StatusNotFound, code: "not_found"},
 		{name: "unknown path", method: http.MethodGet, path: "/api/v1/other", status: http.StatusNotFound, code: "not_found"},
 		{name: "trailing slash", method: http.MethodGet, path: userDataPath + "/", status: http.StatusNotFound, code: "not_found"},
