@@ -17,3 +17,11 @@ services:
       timeout: 5s
       retries: 6
       start_period: 10s
+    networks:
+      - default
+      - monitoring_external
+
+networks:
+  monitoring_external:
+    external: true
+    name: svtlv_monitoring_external
