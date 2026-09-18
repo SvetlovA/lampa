@@ -1,0 +1,27 @@
+services:
+  lampa-web:
+    image: ${LAMPA_IMAGE:-lampa-web:local}
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        domain: ${LAMPA_DOMAIN:?Set LAMPA_DOMAIN to the host used by MSX}
+        prefix: ${LAMPA_PREFIX:-https://}
+    container_name: svtlvtv_lampa_web
+    restart: unless-stopped
+    ports:
+      - "${LAMPA_BIND_ADDRESS:-0.0.0.0}:${LAMPA_PORT:-8092}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    networks:
+      - default
+      - monitoring_external
+
+networks:
+  monitoring_external:
+    external: true
+    name: svtlv_monitoring_external
