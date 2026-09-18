@@ -345,13 +345,15 @@ feature = `api_enabled: false` (design §13: returns Lampa to anonymous, local-o
 - Create: `backend/pkg/config/config.go`
 - Create: `backend/pkg/config/config_test.go`
 
-- [ ] `Config` struct + `Load(lookup)` with defaults and validation from the configuration
+- [x] `Config` struct + `Load(lookup)` with defaults and validation from the configuration
       table; errors name the variable and wrap with `%w`, never include values
-- [ ] decode `LAMPA_API_DATA_KEY` into a `[32]byte`; redact DSN/key in `String()`
-- [ ] tests: defaults, every override, each invalid value (missing required, bad base64, wrong
+- [x] decode `LAMPA_API_DATA_KEY` into a `[32]byte`; redact DSN/key in `String()`
+- [x] tests: defaults, every override, each invalid value (missing required, bad base64, wrong
       key length, non-positive body limit, equal listen addresses)
-- [ ] test that `String()`/`%v`/`%+v` output contains neither DSN nor key
-- [ ] run `make test` and `make lint` - must pass before Task 3
+      - empty values are treated as unset (compose `VAR=`); sentinels `ErrMissing`/`ErrInvalid`;
+        `GoString` also redacts so `%#v` is safe; `.golangci.yml` excludes gosec `G101` in tests
+- [x] test that `String()`/`%v`/`%+v` output contains neither DSN nor key
+- [x] run `make test` and `make lint` - must pass before Task 3
 
 ### Task 3: Document model and validation
 

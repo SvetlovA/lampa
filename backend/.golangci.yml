@@ -130,6 +130,10 @@ linters:
         path: _test\.go$
         text: unused-parameter
       - linters:
+          - gosec
+        path: _test\.go$
+        text: "G101:" # fake DSNs/keys in test fixtures are not real credentials
+      - linters:
           - dupl
           - noctx
           - usestdlibvars
