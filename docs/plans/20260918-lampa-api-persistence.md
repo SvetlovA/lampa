@@ -438,19 +438,23 @@ feature = `api_enabled: false` (design §13: returns Lampa to anonymous, local-o
 - Create: `backend/pkg/storage/service_test.go` (external `package storage_test`)
 - Create: `backend/pkg/storage/mocks/store.go` (generated)
 
-- [ ] consumer-side `Store` interface + `//go:generate go tool moq -out mocks/store.go -pkg
+- [x] consumer-side `Store` interface + `//go:generate go tool moq -out mocks/store.go -pkg
       mocks -skip-ensure -fmt goimports . Store`
-- [ ] `NewService(store, sealer, limits, logger)` validating its inputs;
+- [x] `NewService(store, sealer, limits, logger)` validating its inputs;
       `Get(ctx, userID)`, `Replace(ctx, userID, raw []byte)`, `Delete(ctx, userID)`
-- [ ] parse `userID` as a UUID up front (defense in depth — the seam should already guarantee
+- [x] parse `userID` as a UUID up front (defense in depth — the seam should already guarantee
       it); map store errors to `ErrNotFound` / `ErrUnavailable`, wrap others with `%w`
-- [ ] tests with the moq store (external test package, so `mocks` → `storage` import is not a
+- [x] tests with the moq store (external test package, so `mocks` → `storage` import is not a
       cycle): happy paths, validation errors pass through untouched, sealer split on write +
       merge on read, store failures → `ErrUnavailable`, bad user ID rejected before touching
       the store, log output contains no document content
-- [ ] one `pgtest` round trip through the real `PgStore` confirming encrypted keys are absent
+      - ids are lower-cased before reaching the store; `storeError` logs `[WARN] <op>: <err>` and
+        returns `<op>: storage unavailable: <driver err>` (both in the chain via double `%w`);
+        merge failures log `[ERROR]` with the user id only; a stored non-object `data` is a
+        wrapped decode error, not `ErrUnavailable`; storage coverage 94.4 %, total 90.7 %
+- [x] one `pgtest` round trip through the real `PgStore` confirming encrypted keys are absent
       from the `data` column
-- [ ] run `make test` and `make lint` - must pass before Task 7
+- [x] run `make test` and `make lint` - must pass before Task 7
 
 ### Task 7: Svtlv-compatible health reports
 
