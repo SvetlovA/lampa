@@ -361,16 +361,20 @@ feature = `api_enabled: false` (design §13: returns Lampa to anonymous, local-o
 - Create: `backend/pkg/storage/document.go`
 - Create: `backend/pkg/storage/document_test.go`
 
-- [ ] `Document{SchemaVersion int; Data map[string]json.RawMessage; UpdatedAt time.Time}`,
+- [x] `Document{SchemaVersion int; Data map[string]json.RawMessage; UpdatedAt time.Time}`,
       section list, `Limits{MaxBodyBytes, MaxSectionBytes, MaxDepth}`
-- [ ] `ParseDocument(raw []byte, limits) (Document, error)` — valid UTF-8, no `\u0000`, valid
+- [x] `ParseDocument(raw []byte, limits) (Document, error)` — valid UTF-8, no `\u0000`, valid
       JSON, schema version 1, allowed sections only, each section an object, per-section size,
       token-walk depth check, fill missing sections with `{}`
-- [ ] typed validation error (`*ValidationError{Code}`) so the API maps it via `errors.As`
-- [ ] tests: valid full/partial documents, unknown section, non-object section, array/scalar
+- [x] typed validation error (`*ValidationError{Code}`) so the API maps it via `errors.As`
+- [x] tests: valid full/partial documents, unknown section, non-object section, array/scalar
       `data`, wrong schema version, invalid JSON, invalid UTF-8, `\u0000` escape, depth at/over
       limit, section at/over limit, deeply nested input does not blow the stack
-- [ ] run `make test` and `make lint` - must pass before Task 4
+      - also rejects unpaired surrogate escapes (`\ud800`-`\udfff`; jsonb refuses them with
+        `22P02`, they would otherwise surface as `503`); unknown envelope fields →
+        `invalid_document`; body over `MaxBodyBytes` → `request_too_large`;
+        `Document.String()` prints no content
+- [x] run `make test` and `make lint` - must pass before Task 4
 
 ### Task 4: Connection credential sealing
 
