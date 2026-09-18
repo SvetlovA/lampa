@@ -157,6 +157,9 @@ linters:
           - errcheck
         source: "w\\.log\\("
       - linters:
+          - errcheck
+        source: "w\\.Write\\(" # a failed response write means the client is gone, nothing to handle
+      - linters:
           - gosec
         text: "G104: Errors unhandled"
     paths:

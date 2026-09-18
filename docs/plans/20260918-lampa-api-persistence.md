@@ -462,15 +462,15 @@ feature = `api_enabled: false` (design §13: returns Lampa to anonymous, local-o
 - Create: `backend/pkg/health/health.go`
 - Create: `backend/pkg/health/health_test.go`
 
-- [ ] `Check`, `Tier`, `Status` types; `NewReporter(checks, timeout)`
-- [ ] `Handler(criticalOnly bool)` producing the §9.2 JSON and the Healthy/Degraded→200,
+- [x] `Check`, `Tier`, `Status` types; `NewReporter(checks, timeout)`
+- [x] `Handler(criticalOnly bool)` producing the §9.2 JSON and the Healthy/Degraded→200,
       Unhealthy→503 mapping; each check under its own timeout
-- [ ] `DatabaseCheck(pinger)` critical check with fixed description/error strings
-- [ ] tests (table-driven): all healthy, advisory fail → Degraded/200 on `/health` and Healthy
+- [x] `DatabaseCheck(pinger)` critical check with fixed description/error strings
+- [x] tests (table-driven): all healthy, advisory fail → Degraded/200 on `/health` and Healthy
       on `/health/critical`, critical fail → Unhealthy/503 on both, timeout → failed check,
       exact JSON field names/casing and `"error": null`, error text never contains the
       underlying driver error
-- [ ] run `make test` and `make lint` - must pass before Task 8
+- [x] run `make test` and `make lint` - must pass before Task 8
 
 ### Task 8: HTTP API, Authenticator seam and error contract
 
