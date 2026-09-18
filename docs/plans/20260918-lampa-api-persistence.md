@@ -654,19 +654,37 @@ feature = `api_enabled: false` (design §13: returns Lampa to anonymous, local-o
         Post-Completion deploy
 
 ### Task 13: Verify acceptance criteria
-- [ ] Plan-1 slice of design §15: users isolated (store + service tests), temporary DB failure
+- [x] Plan-1 slice of design §15: users isolated (store + service tests), temporary DB failure
       yields 503 without crashing, Docker evaluates `/health/critical`, `/health` returns full
       JSON, `lampa-web` unaffected, no edits to `app.min.js`/`css/app.css`/`lang/*`/`index.html`
       (`git diff --stat svtlvtv...` shows only `backend/`, `devops/`, the workflow, `docs/` and
       `.dockerignore`)
-- [ ] verify edge cases: oversize body, deep nesting, invalid UTF-8 / `\u0000`, tampered
+      - added `TestService_UsersIsolated` (writes/deletes of one user leave another intact; a
+        sealed row copied to another user id fails with `ErrConnectionsUnreadable`); store side is
+        `TestPgStore_UsersIsolated`; 503 via `TestService_StoreUnavailable` + api `unavailable`
+        cases; compose healthcheck curls `/health/critical`, `lampa-web` has no `depends_on`;
+        diff scope confirmed (only `backend/`, `devops/`, workflow, plan, `.dockerignore`)
+- [x] verify edge cases: oversize body, deep nesting, invalid UTF-8 / `\u0000`, tampered
       ciphertext, concurrent migrations
-- [ ] run full suite in WSL: `cd backend && make test && make lint && make race`
-- [ ] verify coverage ≥ 80 % excluding mocks (`make test` output)
-- [ ] walk Ralphex `CLAUDE.md` → "Before Submitting a PR" checklist and this plan's Go Style
+      - covered by `document_test.go` (body/section/depth limits, 100k-deep stack test, invalid
+        UTF-8, `\u0000` in keys/values), api 413 cases, `crypto_test.go` tampered
+        nonce/ciphertext/tag, `TestMigrate_concurrent`
+- [x] run full suite in WSL: `cd backend && make test && make lint && make race`
+      - all pass, lint 0 issues, `make fmt` leaves no changes
+      - ⚠️ Docker Desktop would not start from the agent session, so 16 `pgtest`-backed tests
+        (incl. `TestMigrate_concurrent`, `TestPgStore_UsersIsolated`) skipped locally; CI runs
+        them with `LAMPA_API_REQUIRE_DOCKER=1` (Task 12) — re-run locally with Docker up
+- [x] verify coverage ≥ 80 % excluding mocks (`make test` output)
+      - total 83.4 % even with DB tests skipped
+- [x] walk Ralphex `CLAUDE.md` → "Before Submitting a PR" checklist and this plan's Go Style
       section against the diff (lowercase comments, one test file per source, moq in `mocks/`,
       consumer-side interfaces, no `slog`, `make fmt` leaves no changes)
-- [ ] `grep` logs of a local run to confirm no DSN, key, credentials or document content appear
+      - capitalized comments are only godoc on exported names; every source has its `_test.go`
+        and vice versa; moq via `go:generate` into `mocks/`; no `log/slog` import
+- [x] `grep` logs of a local run to confirm no DSN, key, credentials or document content appear
+      - ran the binary with an unreachable DSN, a bad key and an unparsable DSN, all carrying
+        marker secrets: config logs `[redacted]`, errors show only host/user/db, no leaks;
+        credential/content absence in service logs is asserted by the service tests
 
 ### Task 14: [Final] Update documentation
 - [ ] create `backend/README.md`: env vars, WSL/make targets, local run with both compose

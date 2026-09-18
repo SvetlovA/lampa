@@ -202,6 +202,35 @@ func TestService_Delete(t *testing.T) {
 	assert.Equal(t, userID, store.DeleteCalls()[0].UserID)
 }
 
+func TestService_UsersIsolated(t *testing.T) {
+	store := memStore()
+	svc, _ := newTestService(t, store, newTestSealer(t, 1))
+	alice, bob := newUserID(t), newUserID(t)
+
+	_, err := svc.Replace(t.Context(), alice, testBody)
+	require.NoError(t, err)
+	_, err = svc.Get(t.Context(), bob)
+	require.ErrorIs(t, err, storage.ErrNotFound, "one user's write is invisible to another")
+
+	_, err = svc.Replace(t.Context(), bob, []byte(`{"schema_version":1,"data":{"settings":{"language":"en"}}}`))
+	require.NoError(t, err)
+	require.NoError(t, svc.Delete(t.Context(), bob))
+
+	got, err := svc.Get(t.Context(), alice)
+	require.NoError(t, err, "another user's replace and delete leave the document intact")
+	assert.Equal(t, secretPassword, settingsOf(t, got)["torrserver_password"])
+	assert.JSONEq(t, `{"title":"`+contentMarker+`"}`, string(got.Data["favorites"]))
+
+	// sealed credentials are bound to their owner: a row copied to another user id cannot be opened
+	rec, err := store.GetFunc(t.Context(), alice)
+	require.NoError(t, err)
+	rec.UserID = bob
+	_, err = store.UpsertFunc(t.Context(), rec)
+	require.NoError(t, err)
+	_, err = svc.Get(t.Context(), bob)
+	require.ErrorIs(t, err, storage.ErrConnectionsUnreadable)
+}
+
 func TestService_GetNotFound(t *testing.T) {
 	svc, buf := newTestService(t, memStore(), newTestSealer(t, 1))
 	_, err := svc.Get(t.Context(), newUserID(t))
