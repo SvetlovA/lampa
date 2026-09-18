@@ -8,13 +8,25 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"runtime/debug"
 	"syscall"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/SvetlovA/lampa/backend/pkg/api"
+	"github.com/SvetlovA/lampa/backend/pkg/config"
+	"github.com/SvetlovA/lampa/backend/pkg/health"
+	"github.com/SvetlovA/lampa/backend/pkg/storage"
 )
 
 var revision = "unknown"
+
+// listenFunc opens a listener on addr. tests replace it to learn the bound addresses.
+type listenFunc func(ctx context.Context, addr string) (net.Listener, error)
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -26,11 +38,11 @@ func main() {
 	}
 }
 
-// run parses arguments and runs the service until ctx is canceled.
-// the env lookup parameter is unused until the composition root wires config, stdout receives user-facing output.
-func run(ctx context.Context, args []string, _ func(string) (string, bool), stdout io.Writer) error {
+// run parses arguments, loads the config through lookup and runs the service until ctx is canceled.
+// out receives the version line and the service log.
+func run(ctx context.Context, args []string, lookup func(string) (string, bool), out io.Writer) error {
 	fs := flag.NewFlagSet("lampa-api", flag.ContinueOnError)
-	fs.SetOutput(stdout)
+	fs.SetOutput(out)
 	showVersion := fs.Bool("version", false, "print version and exit")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -42,14 +54,125 @@ func run(ctx context.Context, args []string, _ func(string) (string, bool), stdo
 		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
 
-	fmt.Fprintf(stdout, "lampa-api %s\n", resolveVersion())
+	fmt.Fprintf(out, "lampa-api %s\n", resolveVersion())
 	if *showVersion {
 		return nil
 	}
 
-	// service wiring arrives with the composition root; until then the stub only waits for shutdown
-	<-ctx.Done()
+	cfg, err := config.Load(lookup)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	logger := log.New(out, "", log.LstdFlags)
+	logger.Printf("[INFO] config: %v", cfg)
+	return start(ctx, cfg, logger, listenTCP)
+}
+
+// start connects and migrates the database, then serves the api and health servers until ctx is
+// canceled or one of them fails. the first failure stops the other server, and the pool is closed
+// only after both returned.
+func start(ctx context.Context, cfg config.Config, logger *log.Logger, listen listenFunc) error {
+	poolCfg, err := pgxpool.ParseConfig(cfg.DBDSN)
+	if err != nil {
+		// the parse error quotes the dsn with a best-effort password redaction, so it is dropped
+		return errors.New("parse database dsn: invalid connection string")
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
+	if err != nil {
+		return fmt.Errorf("create database pool: %w", err)
+	}
+	defer pool.Close()
+
+	if err = storage.Migrate(ctx, pool); err != nil {
+		return fmt.Errorf("migrate database: %w", err)
+	}
+	logger.Printf("[INFO] database migrated")
+
+	store, err := storage.NewPgStore(pool)
+	if err != nil {
+		return fmt.Errorf("create store: %w", err)
+	}
+	sealer, err := storage.NewSealer(cfg.DataKey)
+	if err != nil {
+		return fmt.Errorf("create sealer: %w", err)
+	}
+	limits := storage.Limits{
+		MaxBodyBytes:    cfg.MaxBodyBytes,
+		MaxSectionBytes: storage.DefaultMaxSectionBytes,
+		MaxDepth:        storage.DefaultMaxDepth,
+	}
+	svc, err := storage.NewService(store, sealer, limits, logger)
+	if err != nil {
+		return fmt.Errorf("create service: %w", err)
+	}
+	// user-data routes deny everything until keycloak authentication arrives in plan 2
+	apiSrv, err := api.NewServer(api.ServerConfig{Addr: cfg.Listen, MaxBodyBytes: cfg.MaxBodyBytes}, svc, api.DenyAll{}, logger)
+	if err != nil {
+		return fmt.Errorf("create api server: %w", err)
+	}
+	reporter, err := health.NewReporter([]health.Check{health.DatabaseCheck(store)}, health.DefaultCheckTimeout)
+	if err != nil {
+		return fmt.Errorf("create health reporter: %w", err)
+	}
+
+	return serveAll(ctx, listen, logger, []server{
+		{name: "api", addr: cfg.Listen, handler: apiSrv.Handler()},
+		{name: "health", addr: cfg.HealthListen, handler: healthRoutes(reporter)},
+	})
+}
+
+// server is a named handler served on its own listen address.
+type server struct {
+	name, addr string
+	handler    http.Handler
+}
+
+// serveAll runs every server in its own goroutine until ctx is canceled or one of them fails.
+// the first failure cancels the others; it returns after all of them stopped, joining their errors.
+func serveAll(ctx context.Context, listen listenFunc, logger *log.Logger, servers []server) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	errs := make(chan error, len(servers))
+	for _, s := range servers {
+		go func() {
+			err := listenAndServe(ctx, listen, s.name, s.addr, s.handler, logger)
+			if err != nil {
+				cancel()
+			}
+			errs <- err
+		}()
+	}
+	var result error
+	for range servers {
+		result = errors.Join(result, <-errs)
+	}
+	logger.Printf("[INFO] servers stopped")
+	return result
+}
+
+// healthRoutes serves /health (all checks) and /health/critical (critical checks only).
+func healthRoutes(r *health.Reporter) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("GET /health", r.Handler(false))
+	mux.Handle("GET /health/critical", r.Handler(true))
+	return mux
+}
+
+// listenAndServe listens on addr and serves h until ctx is canceled or the server fails.
+func listenAndServe(ctx context.Context, listen listenFunc, name, addr string, h http.Handler, logger *log.Logger) error {
+	ln, err := listen(ctx, addr)
+	if err != nil {
+		return fmt.Errorf("%s server: listen %s: %w", name, addr, err)
+	}
+	logger.Printf("[INFO] %s server listening on %s", name, ln.Addr())
+	if err = api.ServeHandler(ctx, ln, h); err != nil {
+		return fmt.Errorf("%s server: %w", name, err)
+	}
 	return nil
+}
+
+func listenTCP(ctx context.Context, addr string) (net.Listener, error) {
+	return (&net.ListenConfig{}).Listen(ctx, "tcp", addr) //nolint:wrapcheck // wrapped by listenAndServe
 }
 
 // resolveVersion returns the ldflags revision, falling back to build info VCS data.

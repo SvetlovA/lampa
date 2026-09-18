@@ -92,7 +92,7 @@ func (s *Server) Start(ctx context.Context) error {
 // Serve serves on ln until ctx is canceled or the server fails. it closes ln.
 // after cancellation it returns only once in-flight requests finished or ShutdownTimeout expired.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
-	return serve(ctx, ln, s.handler)
+	return ServeHandler(ctx, ln, s.handler)
 }
 
 // routes registers method patterns plus json fallbacks, since ServeMux answers 404/405 in plain text.
@@ -112,10 +112,10 @@ func (s *Server) routes() http.Handler {
 	return s.accessLog(s.recoverPanic(s.limitBody(mux)))
 }
 
-// serve runs an http.Server with the hardening timeouts on ln. a goroutine shuts it down on
-// <-ctx.Done(), and serve waits for that shutdown so callers never release dependencies
-// under in-flight handlers.
-func serve(ctx context.Context, ln net.Listener, h http.Handler) error {
+// ServeHandler runs an http.Server with the hardening timeouts serving h on ln until ctx is canceled
+// or the server fails. it closes ln. a goroutine shuts the server down on <-ctx.Done(), and ServeHandler
+// waits for that shutdown so callers never release dependencies under in-flight handlers.
+func ServeHandler(ctx context.Context, ln net.Listener, h http.Handler) error {
 	srv := &http.Server{
 		Handler:           h,
 		ReadHeaderTimeout: readHeaderTimeout,
@@ -151,7 +151,10 @@ func serve(ctx context.Context, ln net.Listener, h http.Handler) error {
 		srv.Close()
 		return fmt.Errorf("serve %s: %w", ln.Addr(), err)
 	}
-	return <-shutdown
+	if err := <-shutdown; err != nil {
+		return err
+	}
+	return nil
 }
 
 // errorBody is the json error contract: {"error": {"code": ..., "message": ...}}.

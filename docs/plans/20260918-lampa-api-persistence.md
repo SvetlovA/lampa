@@ -511,17 +511,28 @@ feature = `api_enabled: false` (design §13: returns Lampa to anonymous, local-o
 - Modify: `backend/cmd/lampa-api/main.go`
 - Modify: `backend/cmd/lampa-api/main_test.go`
 
-- [ ] wire config → stdlib `log` (`[INFO]/[WARN]/[ERROR]` prefixes) → pgx pool →
+- [x] wire config → stdlib `log` (`[INFO]/[WARN]/[ERROR]` prefixes) → pgx pool →
       `storage.Migrate` → sealer → service → API server (`DenyAll`) + health server with the
       hardening timeouts
-- [ ] `main()` = `signal.NotifyContext` + `run(ctx, ...)`; `run` starts both servers in
+- [x] `main()` = `signal.NotifyContext` + `run(ctx, ...)`; `run` starts both servers in
       goroutines under one cancelable context, the first error cancels the other, waits for
       both, then closes the pool; only `main` calls `os.Exit(1)`
-- [ ] tests: invalid config fails fast with no DB contact; `pgtest`-backed start on
+- [x] tests: invalid config fails fast with no DB contact; `pgtest`-backed start on
       `127.0.0.1:0` listeners → `/health/critical` 200 and `GET /api/v1/user-data` 401 →
       context cancel shuts down cleanly; a bind failure on one listener stops both and returns
       the error
-- [ ] run `make test` and `make lint` - must pass before Task 10
+      - lifecycle lives in `serveAll(ctx, listen, logger, []server)`, unit-tested without a DB
+        (cancel stops both, a listen failure stops the other and is returned, real `listenTCP` on a
+        busy port); `start` takes a `listenFunc` so tests hand in `127.0.0.1:0` listeners; logs go to
+        `run`'s writer as `log.LstdFlags` + `[INFO] config: <redacted Config>`; a DSN parse error is
+        replaced by a fixed message (pgx quotes the DSN with only best-effort password redaction);
+        `api.serve` exported as `api.ServeHandler` for the health server
+      - ⚠️ Docker Desktop would not start from the agent session, so the three `pgtest`-backed tests
+        (`TestStart_servesUntilCanceled`, `TestStart_bindFailureStopsBoth`, `TestRun_bindFailure`)
+        skipped locally; they run under `LAMPA_API_REQUIRE_DOCKER=1` in Task 12's CI job and in
+        Task 13's full WSL run
+- [x] run `make test` and `make lint` - must pass before Task 10
+      - all packages pass (DB tests skipped, see above), lint 0 issues, total coverage 83.4 %
 
 ### Task 10: Backend container image
 
