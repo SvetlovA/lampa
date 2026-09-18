@@ -577,19 +577,35 @@ feature = `api_enabled: false` (design §13: returns Lampa to anonymous, local-o
 - Modify: `devops/docker-compose.yaml`
 - Create: `devops/docker-compose.local.yaml`
 
-- [ ] add `lampa-db` and `lampa-api` exactly per the Compose section; add `lampa_db` internal
+- [x] add `lampa-db` and `lampa-api` exactly per the Compose section; add `lampa_db` internal
       network and `lampa_db_data` volume; leave `lampa-web` byte-for-byte unchanged
-- [ ] add `docker-compose.local.yaml` with the local `build` + image default
-- [ ] validate the production file with the real v1 CLI:
+      - the git diff only appends after `lampa-web`; the DSN reuses `${LAMPA_DB_PASSWORD}` without
+        `:?` because `lampa-db` already enforces it
+- [x] add `docker-compose.local.yaml` with the local `build` + image default
+      - ⚠️ **deviation**: compose v1 interpolates each file *before* merging, so the base file's
+        `${LAMPA_API_IMAGE:?}` still fails when only the override has a default. Local runs set
+        `LAMPA_API_IMAGE=lampa-api:local` explicitly (documented in the override's header
+        comment; Task 14 README repeats it)
+- [x] validate the production file with the real v1 CLI:
       `docker run --rm -v "$PWD/devops:/w" -w /w --env-file <sample.env> docker/compose:1.29.2 config -q`
       (sample env: `LAMPA_DOMAIN`, `LAMPA_API_IMAGE`, `LAMPA_DB_PASSWORD`, `LAMPA_API_DATA_KEY`)
-- [ ] local smoke: `docker network create svtlv_monitoring_external` (once), `up -d lampa-db
+      - Docker Desktop would not start, so the same `docker-compose 1.29.2` (PyPI release of the
+        v1 CLI, Python 3.9 venv via `uv` in WSL) ran `--env-file sample.env config -q`:
+        production file OK, production + local OK (build context `../backend` resolved); missing
+        `LAMPA_API_IMAGE` or `LAMPA_DB_PASSWORD` → non-zero exit with the `:?` message
+- [x] local smoke: `docker network create svtlv_monitoring_external` (once), `up -d lampa-db
       lampa-api` with both files → both `healthy`; from a container on `lampa-api`'s network
       `curl` `/health` (200 JSON) and `/health/critical` (200); stop `lampa-db` → both endpoints
       503 `Unhealthy` immediately, container `unhealthy` after ≈ 2.5 min (30 s × 5 retries);
       start `lampa-db` → recovers
-- [ ] verify `lampa-web` still starts and serves `/` with `lampa-api` stopped
-- [ ] run `make test` and `make lint` - must pass before Task 12
+      - ⚠️ skipped - not automatable here: Docker Desktop fails to start from the agent session
+        (no engine pipe, process exits). Must be run manually before the Post-Completion deploy;
+        Task 12's `deploy: false` dispatch builds the image and validates compose in CI
+- [x] verify `lampa-web` still starts and serves `/` with `lampa-api` stopped
+      - ⚠️ skipped - same Docker blocker. By construction `lampa-web` has no `depends_on` and its
+        definition is unchanged, so `up -d lampa-web` never pulls in the new services
+- [x] run `make test` and `make lint` - must pass before Task 12
+      - WSL: all packages pass (DB tests skipped, Docker down), total 83.4 %, lint 0 issues
 
 ### Task 12: Manual CI/CD workflow: gates, image, deploy, disable, rollback
 

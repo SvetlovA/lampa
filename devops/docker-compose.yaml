@@ -21,7 +21,56 @@ services:
       - default
       - monitoring_external
 
+  lampa-db:
+    image: postgres:18.6
+    container_name: svtlvtv_lampa_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: lampa
+      POSTGRES_USER: lampa
+      # applies only on first init of lampa_db_data; rotating it later needs ALTER ROLE first
+      POSTGRES_PASSWORD: ${LAMPA_DB_PASSWORD:?Set LAMPA_DB_PASSWORD for the lampa database role}
+    volumes:
+      # postgres 18+ images keep PGDATA in a versioned subdirectory of /var/lib/postgresql
+      - lampa_db_data:/var/lib/postgresql
+    healthcheck:
+      # tcp check, so the socket-only init server of the entrypoint does not count as ready
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U lampa -d lampa"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks:
+      - lampa_db
+
+  lampa-api:
+    # no build here: the server has no backend/ directory and compose v1 validates build paths
+    image: ${LAMPA_API_IMAGE:?Set LAMPA_API_IMAGE to the lampa-api image}
+    container_name: svtlvtv_lampa_api
+    restart: unless-stopped
+    depends_on:
+      lampa-db:
+        condition: service_healthy
+    environment:
+      LAMPA_API_DB_DSN: postgres://lampa:${LAMPA_DB_PASSWORD}@lampa-db:5432/lampa?sslmode=disable
+      LAMPA_API_DATA_KEY: ${LAMPA_API_DATA_KEY:?Set LAMPA_API_DATA_KEY to base64 of 32 random bytes}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8081/health/critical || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - default
+      - lampa_db
+      - monitoring_external
+
 networks:
+  lampa_db:
+    internal: true
   monitoring_external:
     external: true
     name: svtlv_monitoring_external
+
+volumes:
+  lampa_db_data:
