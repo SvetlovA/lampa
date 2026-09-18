@@ -16,7 +16,7 @@ on:
         type: string
         default: ""
       api_enabled:
-        description: "Run lampa-api and lampa-db (false = remove both containers, keep the volume, deploy lampa-web only)"
+        description: "Run lampa-api and lampa-db (false = skip backend checks and the API build, remove both containers, keep the volume, deploy lampa-web only)"
         type: boolean
         default: true
 
@@ -66,6 +66,7 @@ jobs:
         env:
           WEB_IMAGE_TAG: ${{ inputs.web_image_tag }}
           API_IMAGE_TAG: ${{ inputs.api_image_tag }}
+          API_ENABLED: ${{ inputs.api_enabled }}
         run: |
           set -euo pipefail
           COMMIT_SHA=$(git rev-parse HEAD)
@@ -76,7 +77,8 @@ jobs:
             echo "web_image=${WEB_NAME}:${WEB_IMAGE_TAG:-sha-${COMMIT_SHA}}"
             echo "api_image=${API_NAME}:${API_IMAGE_TAG:-sha-${COMMIT_SHA}}"
             if [ -z "$WEB_IMAGE_TAG" ]; then echo "build_web=true"; else echo "build_web=false"; fi
-            if [ -z "$API_IMAGE_TAG" ]; then echo "build_api=true"; else echo "build_api=false"; fi
+            # a disabled api needs no image, so failing backend checks can never block turning it off
+            if [ "$API_ENABLED" = "true" ] && [ -z "$API_IMAGE_TAG" ]; then echo "build_api=true"; else echo "build_api=false"; fi
           } >> "$GITHUB_OUTPUT"
 
       - name: Validate required configuration
@@ -146,7 +148,7 @@ jobs:
           fi
 
       - name: Log in to GitHub Container Registry
-        if: steps.image.outputs.build_web == 'false' || steps.image.outputs.build_api == 'false'
+        if: steps.image.outputs.build_web == 'false' || (steps.image.outputs.build_api == 'false' && inputs.api_enabled)
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -154,9 +156,10 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Verify requested images exist
-        if: steps.image.outputs.build_web == 'false' || steps.image.outputs.build_api == 'false'
+        if: steps.image.outputs.build_web == 'false' || (steps.image.outputs.build_api == 'false' && inputs.api_enabled)
         shell: bash
         env:
+          API_ENABLED: ${{ inputs.api_enabled }}
           BUILD_WEB: ${{ steps.image.outputs.build_web }}
           BUILD_API: ${{ steps.image.outputs.build_api }}
           WEB_IMAGE: ${{ steps.image.outputs.web_image }}
@@ -166,7 +169,7 @@ jobs:
           if [ "$BUILD_WEB" = "false" ]; then
             docker buildx imagetools inspect "$WEB_IMAGE" > /dev/null
           fi
-          if [ "$BUILD_API" = "false" ]; then
+          if [ "$BUILD_API" = "false" ] && [ "$API_ENABLED" = "true" ]; then
             docker buildx imagetools inspect "$API_IMAGE" > /dev/null
           fi
 

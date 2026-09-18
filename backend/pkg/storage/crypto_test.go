@@ -106,6 +106,24 @@ func TestSealer_Split(t *testing.T) {
 		assert.NotContains(t, string(blob), "s3cret-pass")
 	})
 
+	t.Run("escaped duplicate and null sensitive keys never reach clean data", func(t *testing.T) {
+		doc := docWithSettings(t, `{"jackett_key":"jk-escaped","torrserver_login":"login-first",`+
+			`"torrserver_login":"login-last","jackett_key_two":null,"language":"ru"}`)
+		clean, blob, err := s.Split(testUserID, doc)
+		require.NoError(t, err)
+		require.NotNil(t, blob)
+		assert.Equal(t, map[string]any{"language": "ru"}, settingsOf(t, clean))
+		for _, leaked := range []string{"jk-escaped", "login-first", "login-last", "jackett_key", `k`} {
+			assert.NotContains(t, string(clean.Data["settings"]), leaked)
+		}
+
+		merged, err := s.Merge(testUserID, clean, blob)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]any{
+			"language": "ru", "jackett_key": "jk-escaped", "torrserver_login": "login-last", "jackett_key_two": nil,
+		}, settingsOf(t, merged), "the last duplicate wins, null is restored as null")
+	})
+
 	t.Run("input document is not modified", func(t *testing.T) {
 		doc := docWithSettings(t, `{"jackett_key":"jk-one-value"}`)
 		before := string(doc.Data["settings"])

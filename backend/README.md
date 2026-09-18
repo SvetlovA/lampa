@@ -92,6 +92,11 @@ generic messages.
 progress, history, other` (missing ones are stored as `{}`), each a JSON object; only
 `schema_version` 1 is accepted. Sections are capped at 1 MiB and nesting at depth 32.
 
+A value PostgreSQL still refuses to store (a SQLSTATE class 22 data exception, for example a
+number outside jsonb's numeric range) is also `400 invalid_document`, not `503`. Every request
+runs under a 10 s deadline, so a stalled database answers `503 storage_unavailable` before the
+15 s write timeout drops the connection.
+
 The user ID comes only from the `Authenticator`; no header, query or body can set it.
 
 ## Health
@@ -128,7 +133,7 @@ Tailscale + SSH. Inputs:
 | `deploy` | `true` | `false` = checks and image builds only |
 | `web_image_tag` | empty | deploy an existing `sha-...` web image instead of building |
 | `api_image_tag` | empty | deploy an existing `sha-...` API image, skipping backend checks |
-| `api_enabled` | `true` | `false` = remove `lampa-api` / `lampa-db` (volume kept), deploy only `lampa-web` |
+| `api_enabled` | `true` | `false` = skip backend checks and the API build, remove `lampa-api` / `lampa-db` (volume kept), deploy only `lampa-web` |
 
 Rollback = dispatch with the previous `api_image_tag` / `web_image_tag`. Disable the feature
-with `api_enabled: false`.
+with `api_enabled: false`; because it skips the backend checks, failing tests can never block it.

@@ -25,6 +25,10 @@ const (
 	idleTimeout       = 60 * time.Second
 	maxHeaderBytes    = 16 << 10
 
+	// requestTimeout bounds the store work of one request. it stays below writeTimeout so a stalled
+	// database still answers 503 storage_unavailable instead of a dropped connection.
+	requestTimeout = 10 * time.Second
+
 	// ShutdownTimeout bounds the wait for in-flight requests after the serve context is canceled.
 	ShutdownTimeout = 15 * time.Second
 )
@@ -96,7 +100,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 }
 
 // routes registers method patterns plus json fallbacks, since ServeMux answers 404/405 in plain text.
-// middleware order, outermost first: access log, recover, body limit, authenticator (per route).
+// middleware order, outermost first: access log, recover, body limit, deadline, authenticator (per route).
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+userDataPath, s.authenticate(s.getUserData))
@@ -109,7 +113,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "not found")
 	})
-	return s.accessLog(s.recoverPanic(s.limitBody(mux)))
+	return s.accessLog(s.recoverPanic(s.limitBody(s.withDeadline(mux))))
 }
 
 // ServeHandler runs an http.Server with the hardening timeouts serving h on ln until ctx is canceled
@@ -251,6 +255,16 @@ func (s *Server) recoverPanic(next http.Handler) http.Handler {
 			writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		}()
 		next.ServeHTTP(w, r)
+	})
+}
+
+// withDeadline gives the request context a deadline. the http server timeouts only set connection
+// deadlines and never cancel the request context, so without it a stalled database blocks handlers.
+func (s *Server) withDeadline(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
+		defer cancel()
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 

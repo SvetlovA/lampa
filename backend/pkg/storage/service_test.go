@@ -254,6 +254,28 @@ func TestService_InvalidUserID(t *testing.T) {
 	}
 }
 
+func TestService_StoreRejectsContent(t *testing.T) {
+	dbErr := errors.New("ERROR: value overflows numeric format (SQLSTATE 22003)")
+	store := &mocks.StoreMock{
+		UpsertFunc: func(context.Context, storage.Record) (storage.Record, error) {
+			return storage.Record{}, errors.Join(storage.ErrInvalidData, dbErr)
+		},
+	}
+	svc, buf := newTestService(t, store, newTestSealer(t, 1))
+
+	_, err := svc.Replace(t.Context(), newUserID(t), testBody)
+	var verr *storage.ValidationError
+	require.ErrorAs(t, err, &verr, "rejected content is a client error, not unavailability")
+	assert.Equal(t, storage.CodeInvalidDocument, verr.Code)
+	require.NotErrorIs(t, err, storage.ErrUnavailable)
+
+	logged := buf.String()
+	assert.Contains(t, logged, "[WARN] upsert user data: ")
+	assert.Contains(t, logged, "SQLSTATE 22003")
+	assert.NotContains(t, logged, secretPassword)
+	assert.NotContains(t, logged, contentMarker)
+}
+
 func TestService_StoreUnavailable(t *testing.T) {
 	dbErr := errors.New("dial tcp 10.0.0.5:5432: connection refused")
 	store := &mocks.StoreMock{

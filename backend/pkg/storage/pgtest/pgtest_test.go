@@ -1,6 +1,8 @@
 package pgtest
 
 import (
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -19,5 +21,5 @@ func TestDB(t *testing.T) {
 
 	var version string
 	require.NoError(t, p.QueryRow(t.Context(), `show server_version`).Scan(&version))
-	assert.Regexp(t, `^18\.6\b`, version)
+	assert.Regexp(t, `^`+regexp.QuoteMeta(strings.TrimPrefix(Image, "postgres:"))+`\b`, version)
 }

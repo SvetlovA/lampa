@@ -5,14 +5,24 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// ErrNotFound is returned when a user has no stored document.
-var ErrNotFound = errors.New("user data not found")
+var (
+	// ErrNotFound is returned when a user has no stored document.
+	ErrNotFound = errors.New("user data not found")
+	// ErrInvalidData is returned by Upsert when postgres rejects the document content itself,
+	// for example a json number that overflows jsonb's numeric, as opposed to a failing database.
+	ErrInvalidData = errors.New("document content rejected by store")
+)
+
+// dataExceptionClass is the SQLSTATE class of errors caused by the data of a statement.
+const dataExceptionClass = "22"
 
 // Record is one row of lampa_user_data: the document data without credentials plus their sealed blob.
 type Record struct {
@@ -69,6 +79,10 @@ func (s *PgStore) Upsert(ctx context.Context, rec Record) (Record, error) {
 		returning created_at, updated_at`,
 		rec.UserID, rec.SchemaVersion, []byte(rec.Data), rec.EncryptedConnections).
 		Scan(&rec.CreatedAt, &rec.UpdatedAt)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && strings.HasPrefix(pgErr.Code, dataExceptionClass) {
+		return Record{}, fmt.Errorf("upsert user data: %w: %w", ErrInvalidData, err)
+	}
 	if err != nil {
 		return Record{}, fmt.Errorf("upsert user data: %w", err)
 	}

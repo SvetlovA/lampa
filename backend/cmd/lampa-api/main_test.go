@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"runtime/debug"
 	"testing"
 	"time"
 
@@ -358,12 +359,30 @@ func TestHealthRoutes(t *testing.T) {
 }
 
 func TestResolveVersion(t *testing.T) {
-	orig := revision
-	t.Cleanup(func() { revision = orig })
-
-	revision = "v1.2.3"
-	assert.Equal(t, "v1.2.3", resolveVersion())
-
-	revision = "unknown"
-	assert.NotEmpty(t, resolveVersion())
+	buildInfo := func(version string, settings ...debug.BuildSetting) func() (*debug.BuildInfo, bool) {
+		return func() (*debug.BuildInfo, bool) {
+			return &debug.BuildInfo{Main: debug.Module{Version: version}, Settings: settings}, true
+		}
+	}
+	vcs := debug.BuildSetting{Key: "vcs.revision", Value: "0123456789abcdef"}
+	tests := []struct {
+		name string
+		rev  string
+		read func() (*debug.BuildInfo, bool)
+		want string
+	}{
+		{name: "ldflags revision wins", rev: "v1.2.3", read: buildInfo("v9.9.9", vcs), want: "v1.2.3"},
+		{name: "module version", rev: "unknown", read: buildInfo("v0.4.0", vcs), want: "v0.4.0"},
+		{name: "devel module uses vcs revision", rev: "unknown", read: buildInfo("(devel)", vcs), want: "0123456"},
+		{name: "no module version uses vcs revision", rev: "unknown", read: buildInfo("", vcs), want: "0123456"},
+		{name: "short vcs revision is ignored", rev: "unknown", read: buildInfo("", debug.BuildSetting{Key: "vcs.revision", Value: "abc"}),
+			want: "unknown"},
+		{name: "no vcs data", rev: "unknown", read: buildInfo("(devel)"), want: "unknown"},
+		{name: "no build info", rev: "unknown", read: func() (*debug.BuildInfo, bool) { return nil, false }, want: "unknown"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, resolveVersion(tc.rev, tc.read))
+		})
+	}
 }

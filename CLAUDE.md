@@ -13,7 +13,7 @@ Consequences that shape everything else:
 - `css/app.css` is compiled + autoprefixed SCSS output. Edit it directly too; do not expect a `.scss` source here.
 - Upstream commits (author `yumata`) touch `app.min.js` + `assembly.json`, sometimes `css/app.css` and `lang/*.js`. Follow the same pattern.
 
-Local work happens on the `svtlvtv` branch; `main` mirrors upstream. Two worktrees share this repo: `C:/Users/21art/Projects/lampa` (main) and `.../worktrees/lampa/Lampa-SvtlvTv` (svtlvtv).
+Local work happens on the `svtlvtv` branch; `main` mirrors upstream. Several worktrees share this repo: `C:/Users/21art/Projects/lampa` (main), `.../worktrees/lampa/Lampa-SvtlvTv` (svtlvtv) and `.../worktrees/lampa/lampa-backend` (backend work, branch `lampa-backend`). The deploy workflow always checks out `svtlvtv`, so backend work must be merged there before a dispatch can deploy it.
 
 ## Running it
 
@@ -99,8 +99,10 @@ A fork-only Go module (`go 1.26`, vendored) that stores one user-data document p
 
 - Run `make test` / `make race` / `make lint` / `make fmt` **inside WSL Ubuntu** from `backend/` — the Windows Go has no cgo, so `-race` fails there.
 - DB tests use testcontainers (`postgres:18.6`) and need Docker; they skip without it unless `LAMPA_API_REQUIRE_DOCKER=1` (CI sets it).
-- The root `Dockerfile` does `COPY . htdocs/`, so **any new top-level directory must be added to the root `.dockerignore`** or it ships inside the public `lampa-web` image (`backend` and `docs` already are).
-- `.github/workflows/deploy-docker.yaml` is manual-only. Rollback = dispatch with an existing `web_image_tag` / `api_image_tag` (`sha-<40 hex>`); `api_enabled: false` removes `lampa-api` + `lampa-db` (volume kept) and leaves only `lampa-web`; `deploy: false` runs checks and builds only.
+- The root `Dockerfile` does `COPY . htdocs/`, so **any new top-level directory must be added to the root `.dockerignore`** or it ships inside the public `lampa-web` image (`backend`, `docs`, `.codex` and `.ralphex` already are).
+- `.github/workflows/deploy-docker.yaml` is manual-only. Rollback = dispatch with an existing `web_image_tag` / `api_image_tag` (`sha-<40 hex>`); `api_enabled: false` skips the backend checks and API build, removes `lampa-api` + `lampa-db` (volume kept) and leaves only `lampa-web`; `deploy: false` runs checks and builds only. With the API enabled the deploy waits up to 3 minutes for `svtlvtv_lampa_api` to be healthy.
+- `devops/docker-compose.yaml` interpolates every service, so even a web-only run needs `LAMPA_API_IMAGE`, `LAMPA_DB_PASSWORD` and `LAMPA_API_DATA_KEY` (any placeholder) and the external `svtlv_monitoring_external` network. The workflow needs the repository secrets `LAMPA_DB_PASSWORD` and `LAMPA_API_DATA_KEY` when it deploys with the API enabled; `LAMPA_API_DATA_KEY` must be backed up outside GitHub (losing it makes stored credentials unreadable).
+- User-data routes answer `401` until a real `Authenticator` replaces `api.DenyAll` (Plan 2); that is expected, not a bug.
 - Frontend files (`app.min.js`, `css/app.css`, `lang/*`, `index.html`) are never touched by backend work.
 
 ## Conventions and gotchas

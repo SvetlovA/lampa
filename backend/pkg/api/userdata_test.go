@@ -261,3 +261,24 @@ func TestIsJSON(t *testing.T) {
 		})
 	}
 }
+
+func TestServer_RequestContextHasDeadline(t *testing.T) {
+	var deadline time.Time
+	var hasDeadline bool
+	svc := &mocks.UserDataMock{
+		GetFunc: func(ctx context.Context, _ string) (storage.Document, error) {
+			deadline, hasDeadline = ctx.Deadline()
+			return testDocument(), nil
+		},
+	}
+	srv, _ := newTestServer(t, svc, allowAll(testUserID))
+
+	start := time.Now()
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, userDataPath, http.NoBody))
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.True(t, hasDeadline, "the store must not run on a context without a deadline")
+	assert.WithinDuration(t, start.Add(requestTimeout), deadline, time.Second)
+	assert.Less(t, requestTimeout, writeTimeout, "a stalled store has to answer 503 before the write timeout drops the connection")
+}

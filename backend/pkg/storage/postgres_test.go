@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -166,4 +167,20 @@ func TestPgStore_Ping(t *testing.T) {
 		p.Close()
 		require.Error(t, newTestStore(t, p).Ping(t.Context()))
 	})
+}
+
+func TestPgStore_UpsertRejectsUnstorableNumber(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t, pgtest.DB(t))
+	userID := newUserID(t)
+
+	// more digits than jsonb's numeric holds (131072 before the decimal point). ParseDocument never lets
+	// such a number through, so the record goes straight to the store to pin how postgres reports it.
+	data := `{"n":1` + strings.Repeat("0", 140000) + `}`
+	_, err := s.Upsert(t.Context(), testRecord(userID, data, nil))
+	require.ErrorIs(t, err, storage.ErrInvalidData)
+	require.NotErrorIs(t, err, storage.ErrNotFound)
+
+	_, err = s.Get(t.Context(), userID)
+	require.ErrorIs(t, err, storage.ErrNotFound, "nothing was stored")
 }

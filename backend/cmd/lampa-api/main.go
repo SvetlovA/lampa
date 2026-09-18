@@ -54,7 +54,7 @@ func run(ctx context.Context, args []string, lookup func(string) (string, bool),
 		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
 
-	fmt.Fprintf(out, "lampa-api %s\n", resolveVersion())
+	fmt.Fprintf(out, "lampa-api %s\n", resolveVersion(revision, debug.ReadBuildInfo))
 	if *showVersion {
 		return nil
 	}
@@ -175,14 +175,14 @@ func listenTCP(ctx context.Context, addr string) (net.Listener, error) {
 	return (&net.ListenConfig{}).Listen(ctx, "tcp", addr) //nolint:wrapcheck // wrapped by listenAndServe
 }
 
-// resolveVersion returns the ldflags revision, falling back to build info VCS data.
-func resolveVersion() string {
-	if revision != "unknown" {
-		return revision
+// resolveVersion returns the ldflags rev, falling back to the module version and VCS data of readBuildInfo.
+func resolveVersion(rev string, readBuildInfo func() (*debug.BuildInfo, bool)) string {
+	if rev != "unknown" {
+		return rev
 	}
-	bi, ok := debug.ReadBuildInfo()
+	bi, ok := readBuildInfo()
 	if !ok {
-		return revision
+		return rev
 	}
 	if bi.Main.Version != "" && bi.Main.Version != "(devel)" {
 		return bi.Main.Version
@@ -192,5 +192,5 @@ func resolveVersion() string {
 			return s.Value[:7]
 		}
 	}
-	return revision
+	return rev
 }

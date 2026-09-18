@@ -97,6 +97,11 @@ func (s *Service) Replace(ctx context.Context, userID string, raw []byte) (Docum
 	}
 
 	rec, err := s.store.Upsert(ctx, Record{UserID: id, SchemaVersion: doc.SchemaVersion, Data: data, EncryptedConnections: blob})
+	if errors.Is(err, ErrInvalidData) {
+		// the driver error carries only the sqlstate message, never document content
+		s.logger.Printf("[WARN] upsert user data: %v", err)
+		return Document{}, invalid(CodeInvalidDocument, "document contains a value that cannot be stored")
+	}
 	if err != nil {
 		return Document{}, s.storeError("upsert user data", err)
 	}
