@@ -404,17 +404,20 @@
 **Files:**
 - Create: `.github/workflows/tests.yaml`
 
-- [ ] triggers: `pull_request` (all PRs), `push` to `svtlvtv`, `workflow_dispatch`;
+- [x] triggers: `pull_request` (all PRs), `push` to `svtlvtv`, `workflow_dispatch`;
       Svtlv concurrency (cancel superseded PR runs only); `permissions: contents: read`
-- [ ] backend job (`defaults.run.working-directory: backend`, `LAMPA_API_REQUIRE_DOCKER=1`):
+- [x] backend job (`defaults.run.working-directory: backend`, `LAMPA_API_REQUIRE_DOCKER=1`):
   - checkout of the whole repo, so the drift test sees `app.min.js`;
   - `setup-go@v7` 1.26 with `cache-dependency-path: backend/go.sum`;
   - `golangci-lint-action@v9` `v2.13.0` with `with: working-directory: backend`, because the
     action ignores the run default;
   - `make test`, `make race`.
-- [ ] compose job: `docker compose -f devops/docker-compose.yaml --env-file
+- [x] compose job: `docker compose -f devops/docker-compose.yaml --env-file
       devops/.env.example config --quiet` (keeps `.env.example` in step with compose; v2 only)
-- [ ] run `actionlint` on the file (WSL) — must be clean before task 6
+- [x] run `actionlint` on the file (WSL) — must be clean before task 6 (actionlint 1.7.12
+      clean; the compose job's command also passes locally against `.env.example`)
+- ➕ the backend checks stay in `deploy-docker.yaml` until Task 6 rewrites it, so the deploy
+      keeps gating on them in the meantime
 
 ### Task 6: Deploy workflow in Svtlv shape
 
