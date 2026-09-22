@@ -275,6 +275,14 @@ func TestLoad_invalid(t *testing.T) {
 	}
 }
 
+func TestMustSub(t *testing.T) {
+	fsys := fstest.MapFS{"dir/a.json": {Data: []byte("{}")}}
+
+	_, err := fs.Stat(mustSub(fsys, "dir"), "a.json")
+	require.NoError(t, err)
+	assert.Panics(t, func() { mustSub(fsys, "../dir") })
+}
+
 func TestLoad_embeddedDefaults(t *testing.T) {
 	names, err := fs.Glob(Defaults, "appsettings*.json")
 	require.NoError(t, err)

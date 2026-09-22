@@ -465,17 +465,29 @@
       `dockerfile:` and a comment containing the build key are both caught by the guard
 
 ### Task 7: Verify acceptance criteria
-- [ ] each of the six review threads maps to a concrete change (or a reply for the question)
-- [ ] `SensitiveSettings` matches the UI audit table, and the drift test passes against the
-      current `app.min.js`
-- [ ] a grep over `backend/` (excluding `vendor/`), `devops/`, `.github/`, `docs/`, `README.md`,
+- [x] each of the six review threads maps to a concrete change (or a reply for the question):
+      1 `:dev` images + `build:` blocks and the workflow `sed` swap; 2 data-key compose comment +
+      Post-Completion reply; 3 `lampa_db` network gone; 4 single `environment` input; 5 `EXPOSE
+      5800 8081`, `${LAMPA_API_PORT:-5800}:5800`; 6 embedded appsettings + placeholders
+- [x] `SensitiveSettings` matches the UI audit table, and the drift test passes against the
+      current `app.min.js` (`TestSensitiveSettings_matchUI` and `TestSealer_MergeLegacyBlob` pass)
+- [x] a grep over `backend/` (excluding `vendor/`), `devops/`, `.github/`, `docs/`, `README.md`,
       `CLAUDE.md` and `AGENTS.md` (excluding `docs/plans/completed/`) finds none of:
   - `LAMPA_API_LISTEN`, `_HEALTH_LISTEN`, `_DB_DSN`, `_MAX_BODY_BYTES`;
   - `LAMPA_API_IMAGE`, `api_enabled`, `api_image_tag`, `docker-compose.local.yaml`.
-- [ ] published host ports 8092, 5800 and loopback 5434 are absent from Svtlv's list
-- [ ] Test is the default in compose and binary; Production only via the workflow input
-- [ ] full suite in WSL: `make test`, `make race`, `make lint`; coverage for `pkg/config` and
-      `pkg/storage` ≥ the current level (backend total was 83.7%)
+  - clean in Go sources, `devops/` and `.github/`; the remaining hits are only in
+    `backend/README.md`, root `README.md`, `docs/settings-sync-backend-design.md`, `CLAUDE.md`
+    and `AGENTS.md`, which Task 8 rewrites (plus gitignored stale binaries in `backend/.bin/`)
+- [x] published host ports 8092, 5800 and loopback 5434 are absent from Svtlv's list (Svtlv
+      publishes 80, 443, 4317, 5100–5400, 5433, 8080, 9000, 9092, 9094, 9096, 18888, 18891 and
+      loopback 57001–57404)
+- [x] Test is the default in compose and binary; Production only via the workflow input
+- [x] full suite in WSL: `make test`, `make race`, `make lint`; coverage for `pkg/config` and
+      `pkg/storage` ≥ the current level (backend total was 83.7%) — with
+      `LAMPA_API_REQUIRE_DOCKER=1`: all pass, lint 0 issues, total 93.4%, `pkg/config` 100.0%
+      (base 100.0%), `pkg/storage` 94.1% (base 94.1%)
+- ➕ `pkg/config` had dropped to 99.0% because of the unreachable `fs.Sub` panic in `Defaults`;
+      moved into a `mustSub` helper with `TestMustSub` covering the panic on an invalid dir
 
 ### Task 8: [Final] Update documentation
 - [ ] `backend/README.md`: replace the env table with the appsettings layering, environments
@@ -493,6 +505,7 @@
       rollback/`api_enabled`, `.env.example`, no `docker-compose.local.yaml`, ports, the
       `sed`-strip layout rules, the drift test (an upstream pull that adds a secret input fails
       it until `SensitiveSettings` is updated)
+- [ ] ➕ re-run the Task 7 grep for retired names over the docs; it must come back clean
 - [ ] move this plan to `docs/plans/completed/`
 
 ## Post-Completion

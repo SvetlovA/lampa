@@ -46,13 +46,16 @@ var ErrInvalid = errors.New("invalid value")
 var embedded embed.FS
 
 // Defaults holds the shipped appsettings files at its root.
-var Defaults = func() fs.FS {
-	sub, err := fs.Sub(embedded, "defaults")
+var Defaults = mustSub(embedded, "defaults")
+
+// mustSub returns the dir subtree of fsys and panics on an invalid dir path.
+func mustSub(fsys fs.FS, dir string) fs.FS {
+	sub, err := fs.Sub(fsys, dir)
 	if err != nil {
-		panic(err) // unreachable: the directory is embedded above
+		panic(err)
 	}
 	return sub
-}()
+}
 
 var (
 	environments  = []string{Development, Test, Production}
