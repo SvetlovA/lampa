@@ -1,12 +1,23 @@
+# local runs build the images from this file: copy .env.example to .env, then
+# docker-compose up -d --build
+#
+# the deploy workflow swaps every "<service>:dev" image for its ghcr.io latest tag and deletes each
+# build block with sed, from its build key line through its dockerfile line, so the layout of
+# built services must follow:
+#   1. the image line sits before the build block, outside the removed range;
+#   2. only context and args (with their entries) may sit between the build key and dockerfile,
+#      and dockerfile is the last key of the block;
+#   3. no other line, comments included, may contain the build key followed by a colon.
+# the workflow fails the deploy if a build key or a dev image survives the strip.
 services:
   lampa-web:
-    image: ${LAMPA_IMAGE:-lampa-web:local}
+    image: lampa-web:dev
     build:
       context: ..
-      dockerfile: Dockerfile
       args:
         domain: ${LAMPA_DOMAIN:?Set LAMPA_DOMAIN to the host used by MSX}
         prefix: ${LAMPA_PREFIX:-https://}
+      dockerfile: Dockerfile
     container_name: svtlvtv_lampa_web
     restart: unless-stopped
     ports:
@@ -30,6 +41,9 @@ services:
       POSTGRES_USER: lampa
       # applies only on first init of lampa_db_data; rotating it later needs ALTER ROLE first
       POSTGRES_PASSWORD: ${LAMPA_DB_PASSWORD:?Set LAMPA_DB_PASSWORD for the lampa database role}
+    ports:
+      # loopback only: reachable by a Development "go run" on the host, never from outside
+      - "127.0.0.1:${LAMPA_DB_PORT:-5434}:5432"
     volumes:
       # postgres 18+ images keep PGDATA in a versioned subdirectory of /var/lib/postgresql
       - lampa_db_data:/var/lib/postgresql
@@ -40,20 +54,28 @@ services:
       timeout: 5s
       retries: 12
       start_period: 30s
-    networks:
-      - lampa_db
 
   lampa-api:
-    # no build here: the server has no backend/ directory and compose v1 validates build paths
-    image: ${LAMPA_API_IMAGE:?Set LAMPA_API_IMAGE to the lampa-api image}
+    image: lampa-api:dev
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
     container_name: svtlvtv_lampa_api
     restart: unless-stopped
     depends_on:
       lampa-db:
         condition: service_healthy
     environment:
-      LAMPA_API_DB_DSN: postgres://lampa:${LAMPA_DB_PASSWORD}@lampa-db:5432/lampa?sslmode=disable
+      # selects appsettings.<env>.json; non-secret settings live in those files, not here
+      LAMPA_ENVIRONMENT: ${LAMPA_ENVIRONMENT:-Test}
+      LAMPA_DB_PASSWORD: ${LAMPA_DB_PASSWORD:?Set LAMPA_DB_PASSWORD for the lampa database role}
+      # AES-256-GCM key that seals the TorrServer login and password and the Jackett and Prowlarr
+      # API keys inside each user document, so the database never holds them in plain text.
+      # losing it makes the sealed credentials unreadable: back it up outside GitHub.
       LAMPA_API_DATA_KEY: ${LAMPA_API_DATA_KEY:?Set LAMPA_API_DATA_KEY to base64 of 32 random bytes}
+    ports:
+      # 8081 health stays container-internal and is never published
+      - "${LAMPA_API_PORT:-5800}:5800"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8081/health/critical || exit 1"]
       interval: 30s
@@ -62,12 +84,9 @@ services:
       start_period: 30s
     networks:
       - default
-      - lampa_db
       - monitoring_external
 
 networks:
-  lampa_db:
-    internal: true
   monitoring_external:
     external: true
     name: svtlv_monitoring_external

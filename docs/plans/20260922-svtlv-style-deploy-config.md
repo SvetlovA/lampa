@@ -361,11 +361,11 @@
 - Create: `devops/.env.example`
 - Create: `devops/.gitignore`
 
-- [ ] Dockerfile: `EXPOSE 5800 8081` and update the comment ("5800 user-data API, 8081
+- [x] Dockerfile: `EXPOSE 5800 8081` and update the comment ("5800 user-data API, 8081
       container-internal health, never published — Svtlv convention")
-- [ ] header comment with the three `sed`-strip rules
-- [ ] `lampa-web`: `image: lampa-web:dev` then `build` (context `..`, `args`, `dockerfile`)
-- [ ] `lampa-api`: `image: lampa-api:dev` then `build` (context `../backend`, `dockerfile:
+- [x] header comment with the three `sed`-strip rules
+- [x] `lampa-web`: `image: lampa-web:dev` then `build` (context `..`, `args`, `dockerfile`)
+- [x] `lampa-api`: `image: lampa-api:dev` then `build` (context `../backend`, `dockerfile:
       Dockerfile`), with this environment:
   - `LAMPA_ENVIRONMENT: ${LAMPA_ENVIRONMENT:-Test}`;
   - `LAMPA_DB_PASSWORD` and `LAMPA_API_DATA_KEY`, keeping their `:?` markers;
@@ -373,19 +373,31 @@
   - a comment on what the data key protects: AES-256-GCM sealing of the TorrServer login and
     password and the Jackett and Prowlarr API keys inside each user document; losing the key
     makes them unreadable, so back it up outside GitHub.
-- [ ] publish `${LAMPA_API_PORT:-5800}:5800`; healthcheck on `localhost:8081/health/critical`
+- [x] publish `${LAMPA_API_PORT:-5800}:5800`; healthcheck on `localhost:8081/health/critical`
       unchanged
-- [ ] remove the `lampa_db` network; `lampa-db` publishes `127.0.0.1:${LAMPA_DB_PORT:-5434}:5432`
+- [x] remove the `lampa_db` network; `lampa-db` publishes `127.0.0.1:${LAMPA_DB_PORT:-5434}:5432`
       and keeps its `:?` password marker
-- [ ] do not add a top-level `name:` (keeps server volume/network names; compose v1 safety)
-- [ ] add `devops/.env.example` (keys from Technical Details) and `devops/.gitignore` with `.env`
-- [ ] verify:
+- [x] do not add a top-level `name:` (keeps server volume/network names; compose v1 safety)
+- [x] add `devops/.env.example` (keys from Technical Details) and `devops/.gitignore` with `.env`
+- [x] verify:
   - `docker-compose --env-file .env.example config --quiet`;
   - apply the deploy `sed` transform plus guard to a copy, then `config --quiet` again;
   - `docker run` of the built API image without env exits with the `ErrMissing` message naming
     `LAMPA_DB_PASSWORD`;
   - `docker-compose up -d --build` with a local `.env` in Test: API healthy, a user-data route on
     `localhost:5800` answers 401.
+- ➕ the header comment cannot quote the strip command itself: a comment containing the build key
+      with its colon would open a `sed` range and delete everything up to the next `dockerfile:`
+- ➕ `.env.example` uses a non-zero placeholder data key (base64 of a 32-byte marker string);
+      an all-zero key logs as `DataKey:[unset]` because redaction treats the zero key as absent
+- ⚠️ a build block without a `dockerfile:` line makes the `sed` range run to end of file; the
+      post-`sed` guard does not catch that (only leftover keys and `:dev` images); Task 6 may
+      add a check that the stripped file still ends with the `volumes:` section
+- verified locally (compose v5.5.1): base and stripped files pass `config --quiet` (stripped
+      without `LAMPA_DOMAIN`), the guard is clean, `docker run lampa-api:dev` exits 1 with
+      `Database.Password: LAMPA_DB_PASSWORD: required value is not set`, and `up -d` in Test
+      gives a healthy API with GET/PUT/DELETE `/api/v1/user-data` → 401 on `localhost:5800`,
+      8081 unreachable from the host, web 200 on 8092, DB on `127.0.0.1:5434`
 
 ### Task 5: Tests workflow
 

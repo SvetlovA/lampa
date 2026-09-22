@@ -1,8 +1,0 @@
-# local-only override, never copied to the server. compose v1 interpolates every file before
-# merging, so the required LAMPA_API_IMAGE of docker-compose.yaml must still be set:
-# LAMPA_API_IMAGE=lampa-api:local docker-compose -f docker-compose.yaml -f docker-compose.local.yaml up -d --build lampa-db lampa-api
-services:
-  lampa-api:
-    image: ${LAMPA_API_IMAGE:-lampa-api:local}
-    build:
-      context: ../backend

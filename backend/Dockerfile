@@ -29,8 +29,8 @@ LABEL org.opencontainers.image.description="Lampa user-data persistence service"
 COPY --from=build /build/lampa-api /srv/lampa-api
 RUN chmod +x /srv/lampa-api
 
-# 8080 user-data API, 8081 health endpoints
-EXPOSE 8080 8081
+# 5800 user-data API, 8081 container-internal health, never published (Svtlv convention)
+EXPOSE 5800 8081
 
 WORKDIR /srv
 
