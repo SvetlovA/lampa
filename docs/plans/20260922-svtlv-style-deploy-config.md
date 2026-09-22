@@ -336,16 +336,21 @@
 - Modify: `backend/cmd/lampa-api/main.go`
 - Modify: `backend/cmd/lampa-api/main_test.go`
 
-- [ ] change `run` to take `settings fs.FS`; `main` passes `config.Defaults` and `os.LookupEnv`
-- [ ] confirm the startup log carries the environment (via `Config.String()`)
-- [ ] update `main_test.go`:
+- [x] change `run` to take `settings fs.FS`; `main` passes `config.Defaults` and `os.LookupEnv`
+- [x] confirm the startup log carries the environment (via `Config.String()`)
+- [x] update `main_test.go`:
   - the config-error cases become settings-FS / env cases: missing data key variable, bad key,
     same listen;
   - the end-to-end run and the bind-failure test use an `fstest.MapFS` pointing `Database` at
     the testcontainer, with `127.0.0.1:0` listeners.
-- [ ] add a test that `run` with the embedded defaults and an empty env fails with the exact
+- [x] add a test that `run` with the embedded defaults and an empty env fails with the exact
       `ErrMissing` message for `LAMPA_DB_PASSWORD` (first in the fixed resolution order)
-- [ ] run `make test` + `make race` + `make lint` in WSL — must pass before task 4
+- ➕ `TestRun_logsEnvironment` checks the startup log names the environment (default `Test`,
+      explicit `Production`) without a DB: the settings point at a closed port, so `run` stops at
+      the migration right after logging the config
+- [x] run `make test` + `make race` + `make lint` in WSL — must pass before task 4 (Docker was
+      reachable from WSL this time, so the DB-backed tests ran with `LAMPA_API_REQUIRE_DOCKER=1`;
+      total coverage 93.3%)
 
 ### Task 4: Compose in Svtlv shape and container ports
 

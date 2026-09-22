@@ -187,6 +187,43 @@ func TestRun_invalidConfig(t *testing.T) {
 	}
 }
 
+func TestRun_embeddedDefaultsNeedSecrets(t *testing.T) {
+	var out bytes.Buffer
+	err := run(t.Context(), nil, config.Defaults, noEnv, &out)
+	require.ErrorIs(t, err, config.ErrMissing)
+	// the password is resolved before the data key, so it is the one reported
+	assert.EqualError(t, err, "load config: Database.Password: LAMPA_DB_PASSWORD: required value is not set")
+}
+
+func TestRun_logsEnvironment(t *testing.T) {
+	// the database points to a closed port, so run stops at the migration right after logging the config
+	settings := testSettings(t, "127.0.0.1", 1, ":9000", ":9001")
+	tests := []struct {
+		name string
+		env  string
+		want string
+	}{
+		{name: "default", want: "Test"},
+		{name: "explicit", env: "Production", want: "Production"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{"LAMPA_DB_PASSWORD": testSecret, "LAMPA_API_DATA_KEY": testKey}
+			if tc.env != "" {
+				env[config.EnvEnvironment] = tc.env
+			}
+			var out bytes.Buffer
+			err := run(t.Context(), nil, settings, envOf(env), &out)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "migrate database")
+			assert.Contains(t, out.String(), "[INFO] config: {Environment:"+tc.want+" ")
+			assert.NotContains(t, err.Error()+out.String(), testSecret)
+			assert.NotContains(t, out.String(), testKey, "log must not contain the data key")
+		})
+	}
+}
+
 func TestStart_invalidDSN(t *testing.T) {
 	var out bytes.Buffer
 	err := start(t.Context(), testConfig("postgres://lampa:"+testSecret+"@host:notaport/lampa"), log.New(&out, "", 0),
