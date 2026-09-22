@@ -35,12 +35,23 @@ Generate secrets with `openssl rand -base64 32` (data key) and `openssl rand -he
 
 ## Build, test, lint
 
-The Windows host has no cgo toolchain, so `-race` cannot run there. Run every target inside
-WSL Ubuntu (Go 1.26, `make`, `gcc`, `golangci-lint v2.13.0`):
+For CI-equivalent checks, use the default `Makefile` inside WSL Ubuntu (Go 1.26, `make`,
+`gcc`, `golangci-lint v2.13.0`). The Windows host has no cgo toolchain, so `-race` cannot
+run there:
 
 ```sh
 wsl -d Ubuntu -- bash -lc 'cd /mnt/c/.../backend && make test'
 ```
+
+For a native Windows build or non-race test run, use `WMakefile` from the repository root:
+
+```powershell
+make.exe -C ./backend -f WMakefile build
+make.exe -C ./backend -f WMakefile test
+```
+
+`WMakefile` uses `cmd.exe` syntax and produces `.bin/lampa-api.exe`. Its `race` target exits
+with a reminder to use WSL.
 
 | Target | What it does |
 | --- | --- |
