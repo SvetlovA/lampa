@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -30,7 +31,7 @@ type listenFunc func(ctx context.Context, addr string) (net.Listener, error)
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	err := run(ctx, os.Args[1:], os.LookupEnv, os.Stdout)
+	err := run(ctx, os.Args[1:], config.Defaults, os.LookupEnv, os.Stdout)
 	cancel()
 	if err != nil {
 		log.Printf("[ERROR] %v", err)
@@ -38,20 +39,20 @@ func main() {
 	}
 }
 
-// run parses arguments, loads the config through lookup and runs the service until ctx is canceled.
+// run parses arguments, loads the config from the settings files and lookup, and runs the service until ctx is canceled.
 // out receives the version line and the service log.
-func run(ctx context.Context, args []string, lookup func(string) (string, bool), out io.Writer) error {
-	fs := flag.NewFlagSet("lampa-api", flag.ContinueOnError)
-	fs.SetOutput(out)
-	showVersion := fs.Bool("version", false, "print version and exit")
-	if err := fs.Parse(args); err != nil {
+func run(ctx context.Context, args []string, settings fs.FS, lookup func(string) (string, bool), out io.Writer) error {
+	flags := flag.NewFlagSet("lampa-api", flag.ContinueOnError)
+	flags.SetOutput(out)
+	showVersion := flags.Bool("version", false, "print version and exit")
+	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
 		return fmt.Errorf("parse arguments: %w", err)
 	}
-	if fs.NArg() > 0 {
-		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	if flags.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q", flags.Arg(0))
 	}
 
 	fmt.Fprintf(out, "lampa-api %s\n", resolveVersion(revision, debug.ReadBuildInfo))
@@ -59,7 +60,7 @@ func run(ctx context.Context, args []string, lookup func(string) (string, bool),
 		return nil
 	}
 
-	cfg, err := config.Load(lookup)
+	cfg, err := config.Load(settings, lookup)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}

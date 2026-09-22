@@ -7,12 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"runtime/debug"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -68,6 +70,21 @@ func testConfig(dsn string) config.Config {
 	return config.Config{Listen: "api", HealthListen: "health", DBDSN: dsn, DataKey: [config.DataKeySize]byte{7}, MaxBodyBytes: 1 << 20}
 }
 
+// testSettings returns an appsettings.json with the given database and listeners; the password
+// and data key come from the LAMPA_DB_PASSWORD and LAMPA_API_DATA_KEY placeholders.
+func testSettings(t *testing.T, host string, port uint16, apiListen, healthListen string) fstest.MapFS {
+	t.Helper()
+	data, err := json.Marshal(map[string]any{
+		"Api":    map[string]any{"Listen": apiListen, "MaxBodyBytes": 1 << 20},
+		"Health": map[string]any{"Listen": healthListen},
+		"Database": map[string]any{"Host": host, "Port": port, "Name": "lampa", "User": "lampa",
+			"Password": "{LAMPA_DB_PASSWORD}", "SSLMode": "disable"},
+		"DataKey": "{LAMPA_API_DATA_KEY}",
+	})
+	require.NoError(t, err)
+	return fstest.MapFS{"appsettings.json": {Data: data}}
+}
+
 // waitStart runs start in a goroutine and returns its result channel.
 func waitStart(ctx context.Context, cfg config.Config, out io.Writer, listen listenFunc) <-chan error {
 	done := make(chan error, 1)
@@ -116,7 +133,7 @@ func TestRun(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var out bytes.Buffer
-			err := run(t.Context(), tc.args, noEnv, &out)
+			err := run(t.Context(), tc.args, config.Defaults, noEnv, &out)
 			if tc.wantErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErr)
@@ -134,30 +151,34 @@ func TestRun_version(t *testing.T) {
 	revision = "test-rev"
 
 	var out bytes.Buffer
-	require.NoError(t, run(t.Context(), []string{"--version"}, noEnv, &out))
+	require.NoError(t, run(t.Context(), []string{"--version"}, config.Defaults, noEnv, &out))
 	assert.Equal(t, "lampa-api test-rev\n", out.String())
 }
 
 func TestRun_invalidConfig(t *testing.T) {
-	// the dsn points to a closed port: any database contact would fail differently and slower
-	dsn := "postgres://lampa:" + testSecret + "@127.0.0.1:1/lampa?connect_timeout=5"
+	// the database points to a closed port: any database contact would fail differently and slower
+	settings := testSettings(t, "127.0.0.1", 1, ":9000", ":9001")
 	tests := []struct {
-		name    string
-		env     map[string]string
-		wantErr error
+		name     string
+		settings fs.FS
+		env      map[string]string
+		wantErr  error
 	}{
-		{name: "no env", env: map[string]string{}, wantErr: config.ErrMissing},
-		{name: "missing key", env: map[string]string{"LAMPA_API_DB_DSN": dsn}, wantErr: config.ErrMissing},
-		{name: "bad key", env: map[string]string{"LAMPA_API_DB_DSN": dsn, "LAMPA_API_DATA_KEY": "short"}, wantErr: config.ErrInvalid},
-		{name: "same listen", env: map[string]string{"LAMPA_API_DB_DSN": dsn, "LAMPA_API_DATA_KEY": testKey,
-			"LAMPA_API_LISTEN": ":9000", "LAMPA_API_HEALTH_LISTEN": ":9000"}, wantErr: config.ErrInvalid},
+		{name: "no env", settings: settings, env: map[string]string{}, wantErr: config.ErrMissing},
+		{name: "missing key", settings: settings, env: map[string]string{"LAMPA_DB_PASSWORD": testSecret}, wantErr: config.ErrMissing},
+		{name: "bad key", settings: settings, env: map[string]string{"LAMPA_DB_PASSWORD": testSecret, "LAMPA_API_DATA_KEY": "short"},
+			wantErr: config.ErrInvalid},
+		{name: "same listen", settings: testSettings(t, "127.0.0.1", 1, ":9000", ":9000"),
+			env: map[string]string{"LAMPA_DB_PASSWORD": testSecret, "LAMPA_API_DATA_KEY": testKey}, wantErr: config.ErrInvalid},
+		{name: "unknown environment", settings: settings, env: map[string]string{"LAMPA_ENVIRONMENT": "Staging"},
+			wantErr: config.ErrInvalid},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var out bytes.Buffer
 			startedAt := time.Now()
-			err := run(t.Context(), nil, envOf(tc.env), &out)
+			err := run(t.Context(), nil, tc.settings, envOf(tc.env), &out)
 			require.ErrorIs(t, err, tc.wantErr)
 			assert.Contains(t, err.Error(), "load config")
 			assert.Less(t, time.Since(startedAt), time.Second)
@@ -245,15 +266,12 @@ func TestRun_bindFailure(t *testing.T) {
 	dsn := testDSN(t)
 	busy := localListener(t)
 
-	env := envOf(map[string]string{
-		"LAMPA_API_DB_DSN":        dsn,
-		"LAMPA_API_DATA_KEY":      testKey,
-		"LAMPA_API_LISTEN":        "127.0.0.1:0",
-		"LAMPA_API_HEALTH_LISTEN": busy.Addr().String(),
-	})
+	db := pgtest.DB(t).Config().ConnConfig
+	settings := testSettings(t, db.Host, db.Port, "127.0.0.1:0", busy.Addr().String())
+	env := envOf(map[string]string{"LAMPA_DB_PASSWORD": db.Password, "LAMPA_API_DATA_KEY": testKey})
 	var out bytes.Buffer
 	done := make(chan error, 1)
-	go func() { done <- run(t.Context(), nil, env, &out) }()
+	go func() { done <- run(t.Context(), nil, settings, env, &out) }()
 
 	err := requireDone(t, done)
 	require.Error(t, err)

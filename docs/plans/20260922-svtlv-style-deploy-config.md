@@ -304,25 +304,31 @@
 - Modify: `backend/pkg/config/config.go`
 - Modify: `backend/pkg/config/config_test.go`
 
-- [ ] add the three appsettings files with the shape from Technical Details
-- [ ] embed them (`//go:embed defaults/appsettings*.json`) and expose `Defaults fs.FS`
-- [ ] implement environment resolution (`LAMPA_ENVIRONMENT`, default `Test`, allowed
+- [x] add the three appsettings files with the shape from Technical Details
+- [x] embed them (`//go:embed defaults/appsettings*.json`) and expose `Defaults fs.FS`
+- [x] implement environment resolution (`LAMPA_ENVIRONMENT`, default `Test`, allowed
       Development/Test/Production)
-- [ ] implement layered strict decoding: base, then optional environment file, into one struct
-- [ ] implement placeholder resolution for `Database.Password`, then `DataKey`, with key-path
+- [x] implement layered strict decoding: base, then optional environment file, into one struct
+- [x] implement placeholder resolution for `Database.Password`, then `DataKey`, with key-path
       errors that never print values
-- [ ] build `Config` (escaped DSN via `url.URL`, decoded data key) and keep validation +
+- [x] build `Config` (escaped DSN via `url.URL`, decoded data key) and keep validation +
       redacted `String`/`GoString`, now including `Environment`
-- [ ] rewrite `config_test.go` as table tests over `fstest.MapFS`: default environment, each
+- [x] rewrite `config_test.go` as table tests over `fstest.MapFS`: default environment, each
       environment override, layering keeps untouched nested keys, substring placeholder, DSN
       escaping of a password with `@:/?#%`
-- [ ] write error-case tests: unknown environment, missing base file, malformed JSON, trailing
+- [x] write error-case tests: unknown environment, missing base file, malformed JSON, trailing
       data, unknown key, unset/empty placeholder variable (exact message names variable, not
       value), bad listen, same listen, listen port 0 accepted, DB port 0 rejected, non-positive
       body limit, missing DB fields, bad data key, redaction of DSN and key
-- [ ] write a test that loads the real `Defaults` for all three environments with placeholders
+- [x] write a test that loads the real `Defaults` for all three environments with placeholders
       supplied (guards the shipped files, including key casing)
-- [ ] run `make test` + `make lint` in WSL — must pass before task 3
+- [x] run `make test` + `make lint` in WSL — must pass before task 3
+- ➕ pulled forward from Task 3 to keep the build green: `run` already takes `settings fs.FS` (`main`
+      passes `config.Defaults`), and `main_test.go` uses a `testSettings` MapFS helper for the
+      config-error cases and `TestRun_bindFailure`. Task 3 still owns the startup-log check and
+      the exact `ErrMissing` test for the embedded defaults.
+- ⚠️ the DB-backed `cmd/lampa-api` tests (`TestRun_bindFailure`, `TestStart_*`) skip locally (no
+      Docker in WSL or on Windows); CI runs them with `LAMPA_API_REQUIRE_DOCKER=1`
 
 ### Task 3: Wire the settings FS into the composition root
 
