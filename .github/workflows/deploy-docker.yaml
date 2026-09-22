@@ -3,22 +3,15 @@ name: Build and Deploy Lampa
 on:
   workflow_dispatch:
     inputs:
-      deploy:
-        description: "Deploy to the server (false = checks and image builds only, no :svtlvtv tag move)"
-        type: boolean
-        default: true
-      web_image_tag:
-        description: "Deploy this existing web image tag (sha-<40 hex>) instead of building one"
-        type: string
-        default: ""
-      api_image_tag:
-        description: "Deploy this existing API image tag (sha-<40 hex>) instead of building one; skips backend checks"
-        type: string
-        default: ""
-      api_enabled:
-        description: "Run lampa-api and lampa-db (false = skip backend checks and the API build, remove both containers, keep the volume, deploy lampa-web only)"
-        type: boolean
-        default: true
+      environment:
+        description: "lampa-api environment (appsettings.<env>.json); Development is for a local go run only and cannot reach the DB from a container"
+        required: true
+        default: Production
+        type: choice
+        options:
+          - Development
+          - Test
+          - Production
 
 concurrency:
   group: lampa-production-deploy
@@ -26,67 +19,45 @@ concurrency:
 
 permissions:
   contents: read
-  packages: write
+
+env:
+  REGISTRY: ghcr.io
 
 jobs:
   prepare:
-    name: Resolve images and validate configuration
+    name: Validate configuration
     runs-on: ubuntu-latest
     outputs:
-      commit_sha: ${{ steps.image.outputs.commit_sha }}
-      web_image: ${{ steps.image.outputs.web_image }}
-      api_image: ${{ steps.image.outputs.api_image }}
-      build_web: ${{ steps.image.outputs.build_web }}
-      build_api: ${{ steps.image.outputs.build_api }}
+      image_prefix: ${{ steps.image-prefix.outputs.value }}
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-        with:
-          ref: svtlvtv
-
-      - name: Validate inputs
+      # the deploy pulls :latest, and only the default branch publishes it
+      - name: Require the default branch
         shell: bash
         env:
-          WEB_IMAGE_TAG: ${{ inputs.web_image_tag }}
-          API_IMAGE_TAG: ${{ inputs.api_image_tag }}
+          REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
-          for name in WEB_IMAGE_TAG API_IMAGE_TAG; do
-            value="${!name}"
-            if [ -n "$value" ] && [[ ! "$value" =~ ^sha-[0-9a-f]{40}$ ]]; then
-              echo "$name must be empty or match ^sha-[0-9a-f]{40}$" >&2
-              exit 1
-            fi
-          done
+          if [ "$REF_NAME" != "$DEFAULT_BRANCH" ]; then
+            echo "deploy must run from $DEFAULT_BRANCH, got $REF_NAME" >&2
+            exit 1
+          fi
 
-      - name: Resolve image coordinates
-        id: image
+      - name: Set image prefix (lowercase)
+        id: image-prefix
         shell: bash
         env:
-          WEB_IMAGE_TAG: ${{ inputs.web_image_tag }}
-          API_IMAGE_TAG: ${{ inputs.api_image_tag }}
-          API_ENABLED: ${{ inputs.api_enabled }}
+          OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
-          COMMIT_SHA=$(git rev-parse HEAD)
-          WEB_NAME="ghcr.io/${GITHUB_REPOSITORY,,}"
-          API_NAME="${WEB_NAME}-api"
-          {
-            echo "commit_sha=${COMMIT_SHA}"
-            echo "web_image=${WEB_NAME}:${WEB_IMAGE_TAG:-sha-${COMMIT_SHA}}"
-            echo "api_image=${API_NAME}:${API_IMAGE_TAG:-sha-${COMMIT_SHA}}"
-            if [ -z "$WEB_IMAGE_TAG" ]; then echo "build_web=true"; else echo "build_web=false"; fi
-            # a disabled api needs no image, so failing backend checks can never block turning it off
-            if [ "$API_ENABLED" = "true" ] && [ -z "$API_IMAGE_TAG" ]; then echo "build_api=true"; else echo "build_api=false"; fi
-          } >> "$GITHUB_OUTPUT"
+          PREFIX="${OWNER,,}/lampa"
+          echo "value=${PREFIX}" >> "$GITHUB_OUTPUT"
+          echo "::notice::Image prefix set to: ${PREFIX}"
 
       - name: Validate required configuration
         shell: bash
         env:
-          DEPLOY: ${{ inputs.deploy }}
-          API_ENABLED: ${{ inputs.api_enabled }}
-          BUILD_WEB: ${{ steps.image.outputs.build_web }}
           DEPLOY_DIR: ${{ secrets.DEPLOY_DIR }}
           GHCR_PAT: ${{ secrets.GHCR_PAT }}
           LAMPA_DOMAIN: ${{ secrets.LAMPA_DOMAIN }}
@@ -99,16 +70,8 @@ jobs:
           TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
           set -euo pipefail
-          required=()
-          if [ "$BUILD_WEB" = "true" ] || [ "$DEPLOY" = "true" ]; then
-            required+=(LAMPA_DOMAIN)
-          fi
-          if [ "$DEPLOY" = "true" ]; then
-            required+=(DEPLOY_DIR GHCR_PAT SERVER_HOST SSH_PRIVATE_KEY SSH_USER TAILSCALE_AUTHKEY)
-            if [ "$API_ENABLED" = "true" ]; then
-              required+=(LAMPA_DB_PASSWORD LAMPA_API_DATA_KEY)
-            fi
-          fi
+          required=(DEPLOY_DIR GHCR_PAT LAMPA_DOMAIN LAMPA_DB_PASSWORD LAMPA_API_DATA_KEY
+            SERVER_HOST SSH_PRIVATE_KEY SSH_USER TAILSCALE_AUTHKEY)
 
           missing=()
           for name in "${required[@]}"; do
@@ -122,7 +85,7 @@ jobs:
             exit 1
           fi
 
-          if [ "$DEPLOY" = "true" ] && [[ "$DEPLOY_DIR" = "/" || ! "$DEPLOY_DIR" =~ ^/[-A-Za-z0-9._/]+$ ]]; then
+          if [[ "$DEPLOY_DIR" = "/" || ! "$DEPLOY_DIR" =~ ^/[-A-Za-z0-9._/]+$ ]]; then
             echo "DEPLOY_DIR must be a safe absolute server path" >&2
             exit 1
           fi
@@ -133,107 +96,40 @@ jobs:
             exit 1
           fi
 
-          # api secrets are checked whenever present, so a later enable cannot start with a bad value
-          if [ -n "$LAMPA_DB_PASSWORD" ] && [[ ! "$LAMPA_DB_PASSWORD" =~ ^[0-9a-f]{64}$ ]]; then
+          if [[ ! "$LAMPA_DB_PASSWORD" =~ ^[0-9a-f]{64}$ ]]; then
             echo "LAMPA_DB_PASSWORD must be 64 lowercase hex characters (openssl rand -hex 32)" >&2
             exit 1
           fi
 
-          if [ -n "$LAMPA_API_DATA_KEY" ]; then
-            if [[ ! "$LAMPA_API_DATA_KEY" =~ ^[A-Za-z0-9+/]{43}=$ ]] ||
-              [ "$(printf '%s' "$LAMPA_API_DATA_KEY" | base64 -d 2>/dev/null | wc -c)" -ne 32 ]; then
-              echo "LAMPA_API_DATA_KEY must be standard base64 of exactly 32 bytes (openssl rand -base64 32)" >&2
-              exit 1
-            fi
+          if [[ ! "$LAMPA_API_DATA_KEY" =~ ^[A-Za-z0-9+/]{43}=$ ]] ||
+            [ "$(printf '%s' "$LAMPA_API_DATA_KEY" | base64 -d 2>/dev/null | wc -c)" -ne 32 ]; then
+            echo "LAMPA_API_DATA_KEY must be standard base64 of exactly 32 bytes (openssl rand -base64 32)" >&2
+            exit 1
           fi
 
-      - name: Log in to GitHub Container Registry
-        if: steps.image.outputs.build_web == 'false' || (steps.image.outputs.build_api == 'false' && inputs.api_enabled)
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Verify requested images exist
-        if: steps.image.outputs.build_web == 'false' || (steps.image.outputs.build_api == 'false' && inputs.api_enabled)
-        shell: bash
-        env:
-          API_ENABLED: ${{ inputs.api_enabled }}
-          BUILD_WEB: ${{ steps.image.outputs.build_web }}
-          BUILD_API: ${{ steps.image.outputs.build_api }}
-          WEB_IMAGE: ${{ steps.image.outputs.web_image }}
-          API_IMAGE: ${{ steps.image.outputs.api_image }}
-        run: |
-          set -euo pipefail
-          if [ "$BUILD_WEB" = "false" ]; then
-            docker buildx imagetools inspect "$WEB_IMAGE" > /dev/null
-          fi
-          if [ "$BUILD_API" = "false" ] && [ "$API_ENABLED" = "true" ]; then
-            docker buildx imagetools inspect "$API_IMAGE" > /dev/null
-          fi
-
-  backend-checks:
-    name: Backend tests, race and lint
+  build:
+    name: Build ${{ matrix.service.name }} image
     needs: prepare
-    if: needs.prepare.outputs.build_api == 'true'
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend
-    env:
-      LAMPA_API_REQUIRE_DOCKER: "1"
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      matrix:
+        service:
+          - name: web
+            context: .
+            dockerfile: Dockerfile
+          - name: api
+            context: backend
+            dockerfile: backend/Dockerfile
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
         with:
-          ref: ${{ needs.prepare.outputs.commit_sha }}
-
-      - name: Set up Go
-        uses: actions/setup-go@v7
-        with:
-          go-version: "1.26"
-          cache-dependency-path: backend/go.sum
-
-      - name: Lint
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: v2.13.0
-          working-directory: backend
-
-      - name: Test with coverage
-        run: make test
-
-      - name: Race
-        run: make race
-
-  build-web:
-    name: Build web image
-    needs: prepare
-    if: needs.prepare.outputs.build_web == 'true'
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.prepare.outputs.commit_sha }}
-
-      - name: Resolve tags
-        id: tags
-        shell: bash
-        env:
-          DEPLOY: ${{ inputs.deploy }}
-          IMAGE: ${{ needs.prepare.outputs.web_image }}
-        run: |
-          set -euo pipefail
-          {
-            echo "tags<<EOF"
-            echo "$IMAGE"
-            if [ "$DEPLOY" = "true" ]; then echo "${IMAGE%:*}:svtlvtv"; fi
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+          persist-credentials: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -241,92 +137,52 @@ jobs:
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v4
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push web image
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ needs.prepare.outputs.image_prefix }}-${{ matrix.service.name }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # the matrix cannot read secrets, so both images get the union of build args;
+      # buildkit only warns about the ones a Dockerfile does not declare
+      - name: Build and push image
         uses: docker/build-push-action@v7
         with:
-          context: .
-          file: Dockerfile
+          context: ${{ matrix.service.context }}
+          file: ${{ matrix.service.dockerfile }}
           push: true
-          tags: ${{ steps.tags.outputs.tags }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             domain=${{ secrets.LAMPA_DOMAIN }}
             prefix=${{ vars.LAMPA_PREFIX || 'https://' }}
-          cache-from: type=gha,scope=web
-          cache-to: type=gha,mode=max,scope=web
-
-  build-api:
-    name: Build API image
-    needs: [prepare, backend-checks]
-    if: needs.prepare.outputs.build_api == 'true'
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.prepare.outputs.commit_sha }}
-
-      - name: Resolve tags
-        id: tags
-        shell: bash
-        env:
-          DEPLOY: ${{ inputs.deploy }}
-          IMAGE: ${{ needs.prepare.outputs.api_image }}
-        run: |
-          set -euo pipefail
-          {
-            echo "tags<<EOF"
-            echo "$IMAGE"
-            if [ "$DEPLOY" = "true" ]; then echo "${IMAGE%:*}:svtlvtv"; fi
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push API image
-        uses: docker/build-push-action@v7
-        with:
-          context: backend
-          file: backend/Dockerfile
-          push: true
-          tags: ${{ steps.tags.outputs.tags }}
-          build-args: |
             CI=true
-            GIT_BRANCH=svtlvtv
-            GITHUB_SHA=${{ needs.prepare.outputs.commit_sha }}
-          cache-from: type=gha,scope=api
-          cache-to: type=gha,mode=max,scope=api
+            GIT_BRANCH=${{ github.ref_name }}
+            GITHUB_SHA=${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.service.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service.name }}
 
   deploy:
     name: Deploy to Svtlv server
-    needs: [prepare, backend-checks, build-web, build-api]
-    # skipped builds are fine (an existing image tag was requested), failed or cancelled ones are not
-    if: >-
-      always() && inputs.deploy &&
-      needs.prepare.result == 'success' &&
-      !contains(needs.*.result, 'failure') &&
-      !contains(needs.*.result, 'cancelled')
+    needs: [prepare, build]
     runs-on: ubuntu-latest
     env:
       DEPLOY_DIR: ${{ secrets.DEPLOY_DIR }}
+      IMAGE_PREFIX: ${{ needs.prepare.outputs.image_prefix }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
         with:
-          ref: ${{ needs.prepare.outputs.commit_sha }}
+          persist-credentials: false
 
       - name: Install Tailscale
         shell: bash
@@ -334,7 +190,6 @@ jobs:
           TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
           set -euo pipefail
-          : "${TAILSCALE_AUTHKEY:?Repository secret TAILSCALE_AUTHKEY is required}"
           curl -fsSL https://tailscale.com/install.sh | sh
           sudo tailscale up \
             --authkey "$TAILSCALE_AUTHKEY" \
@@ -346,7 +201,6 @@ jobs:
           SERVER_HOST: ${{ secrets.SERVER_HOST }}
         run: |
           set -euo pipefail
-          : "${SERVER_HOST:?Repository secret SERVER_HOST is required}"
           tailscale status
           tailscale ping "$SERVER_HOST"
 
@@ -364,31 +218,60 @@ jobs:
           install -d -m 700 ~/.ssh
           ssh-keyscan -H "$SERVER_HOST" >> ~/.ssh/known_hosts
 
-      - name: Prepare deployment files
+      # the layout rules this relies on are in the header comment of devops/docker-compose.yaml
+      - name: Prepare docker-compose for release
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE_BASE="${REGISTRY}/${IMAGE_PREFIX}"
+          sed -i \
+            -e "s|image: lampa-web:dev|image: ${IMAGE_BASE}-web:latest|g" \
+            -e "s|image: lampa-api:dev|image: ${IMAGE_BASE}-api:latest|g" \
+            devops/docker-compose.yaml
+          sed -i '/build:/,/dockerfile:/d' devops/docker-compose.yaml
+
+          echo "::group::Modified docker-compose.yaml"
+          cat devops/docker-compose.yaml
+          echo "::endgroup::"
+
+      # fail instead of deploying a mangled file when a compose edit breaks the strip rules
+      - name: Verify stripped docker-compose
+        shell: bash
+        run: |
+          set -euo pipefail
+          file=devops/docker-compose.yaml
+          if grep -nE '^\s*(build|context|dockerfile|args):|:dev\s*$' "$file"; then
+            echo "$file still has build keys or dev images after the strip" >&2
+            exit 1
+          fi
+          # a build block without a dockerfile line would strip through the end of the file
+          for line in '^services:' '^  lampa-web:' '^  lampa-db:' '^  lampa-api:' '^networks:' '^volumes:' '^  lampa_db_data:'; do
+            if ! grep -qE "$line" "$file"; then
+              echo "$file lost '$line' in the strip" >&2
+              exit 1
+            fi
+          done
+
+      - name: Prepare deployment env
         shell: bash
         env:
-          WEB_IMAGE: ${{ needs.prepare.outputs.web_image }}
-          API_IMAGE: ${{ needs.prepare.outputs.api_image }}
+          ENVIRONMENT: ${{ inputs.environment }}
           LAMPA_BIND_ADDRESS: ${{ vars.LAMPA_BIND_ADDRESS }}
-          LAMPA_DOMAIN: ${{ secrets.LAMPA_DOMAIN }}
           LAMPA_PORT: ${{ secrets.LAMPA_PORT }}
-          LAMPA_PREFIX: ${{ vars.LAMPA_PREFIX }}
           LAMPA_DB_PASSWORD: ${{ secrets.LAMPA_DB_PASSWORD }}
           LAMPA_API_DATA_KEY: ${{ secrets.LAMPA_API_DATA_KEY }}
         run: |
           set -euo pipefail
           umask 077
-          # compose interpolates every service, so a disabled api without secrets still needs
-          # non-empty values; the placeholders are never used because lampa-db is not started
+          # no COMPOSE_PROJECT_NAME: the project stays the DEPLOY_DIR basename, so volume and
+          # container names are stable across deploys
           {
-            printf 'LAMPA_IMAGE=%s\n' "$WEB_IMAGE"
-            printf 'LAMPA_DOMAIN=%s\n' "$LAMPA_DOMAIN"
-            printf 'LAMPA_PREFIX=%s\n' "${LAMPA_PREFIX:-https://}"
+            printf 'LAMPA_ENVIRONMENT=%s\n' "$ENVIRONMENT"
             printf 'LAMPA_BIND_ADDRESS=%s\n' "${LAMPA_BIND_ADDRESS:-0.0.0.0}"
             printf 'LAMPA_PORT=%s\n' "${LAMPA_PORT:-8092}"
-            printf 'LAMPA_API_IMAGE=%s\n' "$API_IMAGE"
-            printf 'LAMPA_DB_PASSWORD=%s\n' "${LAMPA_DB_PASSWORD:-api-disabled}"
-            printf 'LAMPA_API_DATA_KEY=%s\n' "${LAMPA_API_DATA_KEY:-api-disabled}"
+            printf 'LAMPA_API_PORT=%s\n' 5800
+            printf 'LAMPA_DB_PASSWORD=%s\n' "$LAMPA_DB_PASSWORD"
+            printf 'LAMPA_API_DATA_KEY=%s\n' "$LAMPA_API_DATA_KEY"
           } > deploy.env
 
       - name: Copy deployment files to server
@@ -398,7 +281,6 @@ jobs:
           SSH_USER: ${{ secrets.SSH_USER }}
         run: |
           set -euo pipefail
-          : "${SSH_USER:?Repository secret SSH_USER is required}"
           SSH_TARGET="${SSH_USER}@${SERVER_HOST}"
           # shellcheck disable=SC2029 # validated values expand on the runner on purpose
           ssh "$SSH_TARGET" "mkdir -p '${DEPLOY_DIR}'"
@@ -417,7 +299,6 @@ jobs:
           SSH_USER: ${{ secrets.SSH_USER }}
         run: |
           set -euo pipefail
-          : "${GHCR_PAT:?Repository secret GHCR_PAT is required}"
           # shellcheck disable=SC2029 # validated values expand on the runner on purpose
           printf '%s' "$GHCR_PAT" | ssh "${SSH_USER}@${SERVER_HOST}" \
             "docker login ghcr.io -u '${GHCR_USERNAME}' --password-stdin"
@@ -425,43 +306,43 @@ jobs:
       - name: Deploy containers
         shell: bash
         env:
-          API_ENABLED: ${{ inputs.api_enabled }}
           SERVER_HOST: ${{ secrets.SERVER_HOST }}
           SSH_USER: ${{ secrets.SSH_USER }}
         run: |
           set -euo pipefail
           # shellcheck disable=SC2029 # validated values expand on the runner on purpose
-          ssh "${SSH_USER}@${SERVER_HOST}" "DEPLOY_DIR='${DEPLOY_DIR}' API_ENABLED='${API_ENABLED}' bash -se" <<'REMOTE'
+          ssh "${SSH_USER}@${SERVER_HOST}" "DEPLOY_DIR='${DEPLOY_DIR}' bash -se" <<'REMOTE'
           set -euo pipefail
           cd "$DEPLOY_DIR"
           docker-compose version
           docker-compose config --quiet
 
-          if [ "$API_ENABLED" = "true" ]; then
-            docker-compose pull lampa-web lampa-api
-            docker-compose up -d --no-build --remove-orphans lampa-db lampa-api lampa-web
+          echo '>>> Pulling latest images...'
+          docker-compose pull
+          echo '>>> Stopping existing containers...'
+          docker-compose down
+          echo '>>> Ensuring monitoring external network...'
+          docker network inspect svtlv_monitoring_external >/dev/null 2>&1 ||
+            docker network create svtlv_monitoring_external
+          echo '>>> Starting new containers...'
+          docker-compose up -d --no-build
 
-            status=""
-            for _ in $(seq 1 36); do
-              status=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' svtlvtv_lampa_api 2>/dev/null || echo missing)
-              if [ "$status" = "healthy" ]; then
-                break
-              fi
-              sleep 5
-            done
-
-            if [ "$status" != "healthy" ]; then
-              echo "svtlvtv_lampa_api is not healthy after 3 minutes (status: $status)" >&2
-              docker-compose logs --tail=50 lampa-api >&2
-              exit 1
+          status=""
+          for _ in $(seq 1 36); do
+            status=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' svtlvtv_lampa_api 2>/dev/null || echo missing)
+            if [ "$status" = "healthy" ]; then
+              break
             fi
-            echo "svtlvtv_lampa_api is healthy"
-          else
-            # feature off: stop and remove api + db containers, the lampa_db_data volume is kept
-            docker-compose rm -sf lampa-api lampa-db
-            docker-compose pull lampa-web
-            docker-compose up -d --no-build lampa-web
-          fi
+            sleep 5
+          done
 
+          if [ "$status" != "healthy" ]; then
+            echo "svtlvtv_lampa_api is not healthy after 3 minutes (status: $status)" >&2
+            docker-compose logs --tail=50 lampa-api >&2
+            exit 1
+          fi
+          echo "svtlvtv_lampa_api is healthy"
+
+          echo '>>> Cleaning up old images...'
           docker image prune -f
           REMOTE

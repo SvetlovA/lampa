@@ -424,21 +424,21 @@
 **Files:**
 - Modify: `.github/workflows/deploy-docker.yaml`
 
-- [ ] single input `environment` (choice Development/Test/Production, default Production; the
+- [x] single input `environment` (choice Development/Test/Production, default Production; the
       description notes that Development is for local `go run` only). Drop `deploy`,
       `web_image_tag`, `api_image_tag` and `api_enabled`.
-- [ ] keep `concurrency: {group: lampa-production-deploy, cancel-in-progress: false}`; scope
+- [x] keep `concurrency: {group: lampa-production-deploy, cancel-in-progress: false}`; scope
       `packages: write` to the build job
-- [ ] `prepare`:
+- [x] `prepare`:
   - lowercase image prefix `<owner>/lampa`;
   - fail unless `github.ref_name == github.event.repository.default_branch`;
   - keep "Validate required configuration" without the `api_enabled`/`deploy` branches: all
     required secrets including `LAMPA_DB_PASSWORD` and `LAMPA_API_DATA_KEY`, the `DEPLOY_DIR`
     safety check, the port range check and the format checks for both secrets.
-- [ ] `build` matrix (`web`: context `.`, `Dockerfile`; `api`: context `backend`,
+- [x] `build` matrix (`web`: context `.`, `Dockerfile`; `api`: context `backend`,
       `backend/Dockerfile`) with `metadata-action` tags, gha cache scoped per service, and the
       union of build args
-- [ ] `deploy`, in order:
+- [x] `deploy`, in order:
   1. Tailscale → SSH.
   2. `sed`: swap `lampa-web:dev` / `lampa-api:dev` to `ghcr.io/<prefix>-{web,api}:latest` and
      strip `/build:/,/dockerfile:/`.
@@ -449,11 +449,20 @@
   6. Remote: `config --quiet` → `pull` → `down` → ensure `svtlv_monitoring_external` →
      `up -d --no-build` → 3-minute health wait on `svtlvtv_lampa_api` with a log dump →
      `image prune -f`.
-- [ ] keep the existing secret names (`DEPLOY_DIR`, `GHCR_PAT`, `LAMPA_DOMAIN`, `LAMPA_PORT`,
+- [x] keep the existing secret names (`DEPLOY_DIR`, `GHCR_PAT`, `LAMPA_DOMAIN`, `LAMPA_PORT`,
       `LAMPA_DB_PASSWORD`, `LAMPA_API_DATA_KEY`, `SERVER_HOST`, `SSH_*`, `TAILSCALE_AUTHKEY`,
       `vars.LAMPA_PREFIX` optional)
-- [ ] run `actionlint`; dry-run the `sed` block and guard locally against
+- [x] run `actionlint`; dry-run the `sed` block and guard locally against
       `devops/docker-compose.yaml` and diff the result
+- ➕ the post-`sed` guard also checks that `services:`, the three service keys, `networks:`,
+      `volumes:` and `lampa_db_data:` survive the strip, which closes the Task 4 ⚠️ (a build
+      block without `dockerfile:` stripping to end of file)
+- ➕ the server `.env` keeps `LAMPA_BIND_ADDRESS` from the optional `vars.LAMPA_BIND_ADDRESS`
+      (default `0.0.0.0`), because compose still reads it for the web port
+- verified: actionlint 1.7.12 (with shellcheck) clean on both workflows; the dry run swaps both
+      images, removes exactly the two build blocks, passes the guard and `docker compose config
+      --quiet` with a Production-style `.env` without `LAMPA_DOMAIN`; a build block missing
+      `dockerfile:` and a comment containing the build key are both caught by the guard
 
 ### Task 7: Verify acceptance criteria
 - [ ] each of the six review threads maps to a concrete change (or a reply for the question)
