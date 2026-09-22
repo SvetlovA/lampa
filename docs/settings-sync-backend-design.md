@@ -122,8 +122,25 @@ Follow these Ralphex conventions:
   `go mod tidy` and `go mod vendor`.
 
 Configuration should use typed structs, defaults and startup validation in the
-same style as Ralphex, but read container environment variables rather than
-copying Ralphex's CLI-specific `go-flags` configuration.
+same style as Ralphex, without copying Ralphex's CLI-specific `go-flags`
+configuration. The files follow Svtlv's `appsettings` layering:
+
+- `appsettings.json` holds the shared defaults and `appsettings.<Environment>.json`
+  overrides only what differs (the database host and port). Both are embedded
+  with `//go:embed` and decoded strictly into one struct, so an unknown key is an
+  error;
+- the environment comes from `LAMPA_ENVIRONMENT` (`Development`, `Test` or
+  `Production`, default `Test`). Development is a local `go run` against the
+  database published on loopback `5434`;
+- secrets are `{ENV_VAR}` placeholders (`{LAMPA_DB_PASSWORD}`,
+  `{LAMPA_API_DATA_KEY}`) resolved from the environment. Missing values fail
+  startup naming the variable, never the value. No other environment variable
+  overrides a file setting.
+
+Ports follow the Svtlv series without colliding with it: the API listens on
+`5800` and is published on the same host port, health stays on the
+container-internal `8081`, and PostgreSQL is published only on
+`127.0.0.1:5434` (Svtlv uses `5433`, Keycloak `8080`).
 
 The backend quality contract is:
 
@@ -529,8 +546,8 @@ Deployment work only adds:
 - backend secrets and migration execution;
 - the Svtlv-compatible health endpoints and Docker critical healthcheck;
 - private network reachability from `Svtlv.Monitoring.Service`;
-- Ralphex-style Go build, race-test, coverage and lint gates in the existing
-  manual CI/CD workflow.
+- Ralphex-style Go build, race-test, coverage and lint gates in a `tests.yaml`
+  workflow next to the existing manual CI/CD workflow.
 
 Disabling the API/sync feature must return Lampa to its current anonymous,
 local-only behavior.
@@ -568,15 +585,23 @@ Deviations recorded while implementing Plan 1
   advisory tier and `Degraded` aggregation are implemented and tested with fakes;
 - the Apache `/api` reverse proxy (§13) is deferred to Plan 2, when login needs
   it. `lampa-api` joins the default Compose network so `lampa-web` can reach it,
-  but its port is not published and user-data routes answer `401` until Plan 2
-  plugs in authentication;
+  and user-data routes answer `401` until Plan 2 plugs in authentication;
 - PostgreSQL is pinned to `postgres:18.6`, in Compose and in testcontainers.
   Postgres 18+ images keep data in a versioned subdirectory, so the volume is
   mounted at `/var/lib/postgresql`, not `/var/lib/postgresql/data`;
-- rollback redeploys previously built images by tag (`web_image_tag`,
-  `api_image_tag` workflow inputs) instead of rebuilding old commits;
-  `api_enabled: false` disables the feature by removing `lampa-api` and
-  `lampa-db` while keeping the data volume.
+- rollback reverts the commit and dispatches the workflow again, as in Svtlv;
+  its only input is `environment`. The workflow builds `:latest` images, swaps
+  them for the `:dev` images of `devops/docker-compose.yaml` and strips the
+  `build:` blocks. The backend gates run in the separate `tests.yaml` workflow
+  on every PR and push to `svtlvtv`, not inside the deploy;
+- the API port is published (`5800`) so a Development `go run` and local checks
+  can reach it; user-data routes still answer `401` until Plan 2;
+- the sealed credential set mirrors the secret inputs of the current Lampa
+  settings UI: the TorrServer login and password and the Jackett **and
+  Prowlarr** API keys (`SensitiveSettings`). A drift test parses `app.min.js`
+  and fails when upstream adds or removes a secret input. Settings registered by
+  plugins through `SettingsApi` are unknown to the backend and are stored as
+  plain settings.
 
 ### Plan 2: Add and deploy Keycloak authentication
 

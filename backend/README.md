@@ -2,8 +2,8 @@
 
 Go persistence service for Lampa user data (Plan 1 of
 [`docs/settings-sync-backend-design.md`](../docs/settings-sync-backend-design.md)). It stores
-one JSONB document per user in PostgreSQL, seals TorrServer / Jackett credentials with
-AES-256-GCM, and exposes the Svtlv two-tier health contract.
+one JSONB document per user in PostgreSQL, seals TorrServer, Jackett and Prowlarr credentials
+with AES-256-GCM, and exposes the Svtlv two-tier health contract.
 
 User-data routes are deployed but inert: the only `Authenticator` wired in Plan 1 is
 `api.DenyAll`, so every user-data request answers `401` until Keycloak arrives in Plan 2.
@@ -13,7 +13,7 @@ User-data routes are deployed but inert: the only `Authenticator` wired in Plan 
 ```text
 cmd/lampa-api/     composition root: config → pgx pool → migrations → two listeners → shutdown
 pkg/api/           routes, Authenticator seam, middleware, JSON error contract
-pkg/config/        typed LAMPA_API_* env config
+pkg/config/        layered appsettings files (embedded) with {ENV_VAR} secret placeholders
 pkg/health/        tiered checks, /health and /health/critical
 pkg/storage/       document validation, credential sealing, service, postgres store, migrate
 pkg/storage/pgtest testcontainers postgres:18.6 helper for DB-backed tests
@@ -22,16 +22,57 @@ migrations/        embedded goose SQL migrations (applied on startup)
 
 ## Configuration
 
-| Variable | Default | Rule |
-| --- | --- | --- |
-| `LAMPA_API_LISTEN` | `:8080` | API listener, host:port |
-| `LAMPA_API_HEALTH_LISTEN` | `:8081` | health listener, must differ from the API one |
-| `LAMPA_API_DB_DSN` | — | required, never logged |
-| `LAMPA_API_DATA_KEY` | — | required, base64 of exactly 32 bytes, never logged |
-| `LAMPA_API_MAX_BODY_BYTES` | `2097152` | request body limit, > 0 |
+Settings come from JSON files embedded in the binary (`pkg/config/defaults/`), layered the
+.NET way, as in Svtlv:
 
-Generate secrets with `openssl rand -base64 32` (data key) and `openssl rand -hex 32`
-(DB password, `LAMPA_DB_PASSWORD` in Compose).
+1. `appsettings.json` holds the shared defaults;
+2. `appsettings.<Environment>.json`, when present, overrides only what differs. Test and
+   Production point the DB at `lampa-db:5432`; Development has no file and uses the base one.
+
+Both layers decode strictly into one struct, so an unknown or misspelled key is an error and a
+key the environment file leaves out keeps its base value. There are no other env overrides;
+the files are the single source of non-secret settings.
+
+| Key | Default | Rule |
+| --- | --- | --- |
+| `Api.Listen` | `:5800` | API listener, host:port |
+| `Api.MaxBodyBytes` | `2097152` | request body limit, > 0 |
+| `Health.Listen` | `:8081` | health listener, must differ from the API one |
+| `Database.Host` / `Port` | `localhost` / `5434` | `lampa-db` / `5432` in Test and Production |
+| `Database.Name` / `User` | `lampa` / `lampa` | required |
+| `Database.Password` | `{LAMPA_DB_PASSWORD}` | required, never logged |
+| `Database.SSLMode` | `disable` | a libpq `sslmode` |
+| `DataKey` | `{LAMPA_API_DATA_KEY}` | required, base64 of exactly 32 bytes, never logged |
+
+The environment comes from `LAMPA_ENVIRONMENT`:
+
+| Environment | Where it runs |
+| --- | --- |
+| `Test` (default when unset) | containers from `devops/docker-compose.yaml` |
+| `Production` | containers; only the deploy workflow's `environment` input selects it |
+| `Development` | a local `go run` against the DB published on `localhost:5434`; inside a container it cannot reach the DB |
+
+Secrets are `{ENV_VAR}` placeholders, resolved from the environment in a fixed order
+(`Database.Password`, then `DataKey`). An unset or empty variable fails startup with a message
+naming the variable and the key path, never the value. The startup log prints the environment
+and redacts the DSN and the data key.
+
+Generate secrets with `openssl rand -hex 32` (`LAMPA_DB_PASSWORD`) and
+`openssl rand -base64 32` (`LAMPA_API_DATA_KEY`).
+
+### Sealed settings
+
+`storage.SensitiveSettings` mirrors the secret inputs of the Lampa settings UI:
+`torrserver_login`, `torrserver_password`, `jackett_key`, `jackett_key_two`, `prowlarr_key`
+and `prowlarr_key_two`. They are removed from the `settings` section, sealed with AES-256-GCM
+(bound to the user ID) into `encrypted_connections`, and merged back on read. Settings that
+plugins register through `SettingsApi` are unknown to the backend and are stored as plain
+settings.
+
+`TestSensitiveSettings_matchUI` parses `../app.min.js` and fails when the UI gains a secret
+input (`data-string="true"`) missing from the list, or loses one still in it. An upstream pull
+that adds a secret field therefore fails CI until `SensitiveSettings` is updated. The test
+skips when `app.min.js` is absent (a `backend/`-only checkout).
 
 ## Build, test, lint
 
@@ -72,20 +113,28 @@ WSL `git` cannot resolve this worktree's Windows `.git` path, so `make build` in
 
 ## Local run
 
-`devops/docker-compose.local.yaml` adds `build: ../backend` on top of the production file.
-Compose v1 interpolates each file before merging, so `LAMPA_API_IMAGE` must still be set
-explicitly:
+`devops/docker-compose.yaml` builds both images locally (`lampa-web:dev`, `lampa-api:dev`) and
+reads `devops/.env` (gitignored). Test is the default environment:
 
 ```sh
 cd devops
-docker network create svtlv_monitoring_external   # once
-export LAMPA_API_IMAGE=lampa-api:local LAMPA_DOMAIN=localhost \
-  LAMPA_DB_PASSWORD=$(openssl rand -hex 32) LAMPA_API_DATA_KEY=$(openssl rand -base64 32)
-docker-compose -f docker-compose.yaml -f docker-compose.local.yaml up -d --build lampa-db lampa-api
+cp .env.example .env                               # then replace the placeholder secrets
+docker network create svtlv_monitoring_external    # once
+docker-compose up -d --build
 ```
 
-Neither port is published to the host; query them from a container on the same network, e.g.
+The API is published on `localhost:5800` (`LAMPA_API_PORT`) and answers `401` on user-data
+routes. Health stays container-internal:
 `docker exec svtlvtv_lampa_api curl -s http://localhost:8081/health`.
+
+For Development, start only the DB and run the binary on the host; the base settings already
+point at `localhost:5434` (`LAMPA_DB_PORT`, published on loopback only):
+
+```sh
+cd devops && docker-compose up -d lampa-db
+cd ../backend
+LAMPA_ENVIRONMENT=Development LAMPA_DB_PASSWORD=... LAMPA_API_DATA_KEY=... go run ./cmd/lampa-api
+```
 
 ## API
 
@@ -112,7 +161,8 @@ The user ID comes only from the `Authenticator`; no header, query or body can se
 
 ## Health
 
-Served on `:8081`, never proxied through the public origin.
+Served on `:8081`, container-internal (never published, Svtlv convention) and never proxied
+through the public origin.
 
 - `/health` runs all checks; `Svtlv.Monitoring.Service` polls it.
 - `/health/critical` runs only critical checks; the Docker healthcheck curls it.
@@ -124,8 +174,8 @@ check arrives in Plan 2.
 
 ## Operational caveats
 
-- **Back up `LAMPA_API_DATA_KEY` outside GitHub.** It seals every stored TorrServer / Jackett
-  credential; losing or changing it makes them unreadable (`500 connections_unreadable`).
+- **Back up `LAMPA_API_DATA_KEY` outside GitHub.** It seals every stored TorrServer, Jackett
+  and Prowlarr credential; losing or changing it makes them unreadable (`500 connections_unreadable`).
   Key rotation is not implemented.
 - `POSTGRES_PASSWORD` applies only when the `lampa_db_data` volume is first initialized.
   To rotate `LAMPA_DB_PASSWORD`, run `ALTER ROLE lampa PASSWORD '...'` inside the database
@@ -133,18 +183,18 @@ check arrives in Plan 2.
 - Postgres 18+ images keep data under `/var/lib/postgresql/<major>/...`, so the volume mounts
   `/var/lib/postgresql`, not `.../data`.
 
-## Deployment
+## CI and deployment
 
-`.github/workflows/deploy-docker.yaml` (`workflow_dispatch` only) runs race/coverage/lint
-before building `ghcr.io/<repo>-api:sha-<sha>` and deploying with `docker-compose` over
-Tailscale + SSH. Inputs:
+`.github/workflows/tests.yaml` runs lint, `make test` and `make race` (with
+`LAMPA_API_REQUIRE_DOCKER=1`) plus a compose `config` check against `devops/.env.example` on
+every PR and on pushes to `svtlvtv`.
 
-| Input | Default | Meaning |
-| --- | --- | --- |
-| `deploy` | `true` | `false` = checks and image builds only |
-| `web_image_tag` | empty | deploy an existing `sha-...` web image instead of building |
-| `api_image_tag` | empty | deploy an existing `sha-...` API image, skipping backend checks |
-| `api_enabled` | `true` | `false` = skip backend checks and the API build, remove `lampa-api` / `lampa-db` (volume kept), deploy only `lampa-web` |
+`.github/workflows/deploy-docker.yaml` (`workflow_dispatch` only, default branch only) has one
+input, `environment` (Development / Test / Production, default Production), written into the
+server `.env` as `LAMPA_ENVIRONMENT`. It builds `ghcr.io/<owner>/lampa-web` and
+`ghcr.io/<owner>/lampa-api` (branch, `<branch>-<sha>` and `latest` tags), swaps the `:dev`
+images for `:latest`, strips the `build:` blocks with `sed`, and deploys over Tailscale + SSH,
+waiting up to 3 minutes for `svtlvtv_lampa_api` to be healthy. It does not run the tests
+(same as Svtlv); `tests.yaml` is the gate.
 
-Rollback = dispatch with the previous `api_image_tag` / `web_image_tag`. Disable the feature
-with `api_enabled: false`; because it skips the backend checks, failing tests can never block it.
+There are no rollback inputs: roll back by reverting the commit and dispatching again.

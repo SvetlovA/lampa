@@ -490,23 +490,31 @@
       moved into a `mustSub` helper with `TestMustSub` covering the panic on an invalid dir
 
 ### Task 8: [Final] Update documentation
-- [ ] `backend/README.md`: replace the env table with the appsettings layering, environments
+- [x] `backend/README.md`: replace the env table with the appsettings layering, environments
       (Development = local `go run` only), placeholders, ports, local Test/Development workflow
       with `devops/.env`; list the six sealed settings and the drift test
-- [ ] root `README.md`: file table (no local override), local compose run with `.env.example`,
+- [x] root `README.md`: file table (no local override), local compose run with `.env.example`,
       deploy section (single `environment` input, required secrets, no rollback inputs,
       rollback = revert and redeploy)
-- [ ] `docs/settings-sync-backend-design.md`:
+- [x] `docs/settings-sync-backend-design.md`:
   - config section → appsettings + placeholders, ports;
   - credential wording → TorrServer, Jackett **and Prowlarr**, sealed set mirrors the UI's
     secret inputs;
   - note that plugin-defined settings are stored as plain settings.
-- [ ] `CLAUDE.md` and `AGENTS.md` lampa-api sections: new workflow input, `tests.yaml`, removed
+- [x] `CLAUDE.md` and `AGENTS.md` lampa-api sections: new workflow input, `tests.yaml`, removed
       rollback/`api_enabled`, `.env.example`, no `docker-compose.local.yaml`, ports, the
       `sed`-strip layout rules, the drift test (an upstream pull that adds a secret input fails
       it until `SensitiveSettings` is updated)
-- [ ] ➕ re-run the Task 7 grep for retired names over the docs; it must come back clean
-- [ ] move this plan to `docs/plans/completed/`
+- [x] ➕ re-run the Task 7 grep for retired names over the docs; it must come back clean
+- [x] move this plan to `docs/plans/completed/`
+- ➕ the design doc changes sit in §3.1 (config and ports) and in the Plan 1 deviations (sealed
+      set with Prowlarr, plugin settings stored plain, published API port, revert-and-redeploy
+      rollback, `tests.yaml`); §4 and §12 credential wording was already reworded by the
+      uncommitted storage-ownership edits in that file, which are left out of this commit
+- ➕ CLAUDE.md / AGENTS.md also correct the intro line: the deploy now runs only from the
+      default branch instead of checking out `svtlvtv`
+- verified: the retired-name grep over `backend/` (no vendor, no `.bin`), `devops/`, `.github/`,
+      `docs/` (no `completed/`, no this plan), `README.md`, `CLAUDE.md` and `AGENTS.md` is clean
 
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*
