@@ -13,9 +13,14 @@ import (
 	"slices"
 )
 
-// SensitiveSettings lists the settings keys holding connection credentials. they are never stored
-// in the data column, Sealer moves them into an encrypted blob.
-var SensitiveSettings = []string{"torrserver_login", "torrserver_password", "jackett_key", "jackett_key_two"}
+// SensitiveSettings lists the settings keys holding TorrServer, Jackett and Prowlarr credentials.
+// it mirrors the secret inputs of the Lampa settings UI. they are never stored in the data column,
+// Sealer moves them into an encrypted blob.
+var SensitiveSettings = []string{
+	"torrserver_login", "torrserver_password",
+	"jackett_key", "jackett_key_two",
+	"prowlarr_key", "prowlarr_key_two",
+}
 
 // blobVersion is the first byte of every sealed blob and of its additional authenticated data.
 const blobVersion byte = 0x01

@@ -282,18 +282,18 @@
 - Modify: `backend/pkg/storage/crypto.go`
 - Modify: `backend/pkg/storage/crypto_test.go`
 
-- [ ] add `prowlarr_key` and `prowlarr_key_two` to `SensitiveSettings`; update its doc comment
+- [x] add `prowlarr_key` and `prowlarr_key_two` to `SensitiveSettings`; update its doc comment
       (TorrServer, Jackett and Prowlarr credentials; mirrors the UI's secret inputs)
-- [ ] extend `TestSealer_Split` / `TestSealer_RoundTrip` so both Prowlarr keys are removed from
+- [x] extend `TestSealer_Split` / `TestSealer_RoundTrip` so both Prowlarr keys are removed from
       `settings`, sealed, and restored by `Merge`
-- [ ] add `TestSensitiveSettings_matchUI` (parsing from Technical Details):
+- [x] add `TestSensitiveSettings_matchUI` (parsing from Technical Details):
   - every UI secret input is in `SensitiveSettings`;
   - every `SensitiveSettings` key exists as a UI input;
   - at least one input is found;
   - skip when `app.min.js` is absent.
-- [ ] check that a blob sealed with the old 4-key list still merges (compatibility; `Merge`
+- [x] check that a blob sealed with the old 4-key list still merges (compatibility; `Merge`
       ignores unknown keys)
-- [ ] run `make test` + `make race` + `make lint` in WSL — must pass before task 2
+- [x] run `make test` + `make race` + `make lint` in WSL — must pass before task 2
 
 ### Task 2: File-based config with environments and placeholders
 

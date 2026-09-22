@@ -2,6 +2,11 @@ package storage
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -41,7 +46,8 @@ func docWithSettings(t *testing.T, settings string) Document {
 func sealedDoc(t *testing.T, s *Sealer) (clean Document, blob []byte) {
 	t.Helper()
 	doc := docWithSettings(t, `{"torrserver_login":"admin","torrserver_password":"s3cret-pass",`+
-		`"jackett_key":"jk-one-value","jackett_key_two":"jk-two-value","language":"ru"}`)
+		`"jackett_key":"jk-one-value","jackett_key_two":"jk-two-value",`+
+		`"prowlarr_key":"pk-one-value","prowlarr_key_two":"pk-two-value","language":"ru"}`)
 	clean, blob, err := s.Split(testUserID, doc)
 	require.NoError(t, err)
 	require.NotNil(t, blob)
@@ -58,7 +64,8 @@ func settingsOf(t *testing.T, doc Document) map[string]any {
 func TestSealer_RoundTrip(t *testing.T) {
 	s := newTestSealer(t, 1)
 	doc := docWithSettings(t, `{"torrserver_login":"admin","torrserver_password":"s3cret-pass",`+
-		`"jackett_key":"jk-one-value","jackett_key_two":"jk-two-value","language":"ru","url":"<a&b>"}`)
+		`"jackett_key":"jk-one-value","jackett_key_two":"jk-two-value",`+
+		`"prowlarr_key":"pk-one-value","prowlarr_key_two":"pk-two-value","language":"ru","url":"<a&b>"}`)
 
 	clean, blob, err := s.Split(testUserID, doc)
 	require.NoError(t, err)
@@ -96,7 +103,7 @@ func TestSealer_Split(t *testing.T) {
 	t.Run("clean data never contains plaintext values", func(t *testing.T) {
 		clean, blob := sealedDoc(t, s)
 		for _, raw := range clean.Data {
-			for _, secret := range []string{"admin", "s3cret-pass", "jk-one-value", "jk-two-value"} {
+			for _, secret := range []string{"admin", "s3cret-pass", "jk-one-value", "jk-two-value", "pk-one-value", "pk-two-value"} {
 				assert.NotContains(t, string(raw), secret)
 			}
 			for _, key := range SensitiveSettings {
@@ -247,6 +254,54 @@ func TestSealer_MergeIgnoresUnknownSealedKeys(t *testing.T) {
 	merged, err := s.Merge(testUserID, docWithSettings(t, `{"language":"ru"}`), blob)
 	require.NoError(t, err)
 	assert.Equal(t, map[string]any{"jackett_key": "k", "language": "ru"}, settingsOf(t, merged))
+}
+
+func TestSealer_MergeLegacyBlob(t *testing.T) {
+	// a blob sealed before the prowlarr keys joined SensitiveSettings still merges as is.
+	s := newTestSealer(t, 1)
+	aad, err := additionalData(testUserID)
+	require.NoError(t, err)
+	nonce := make([]byte, s.aead.NonceSize())
+	blob := append([]byte{blobVersion}, nonce...)
+	blob = s.aead.Seal(blob, nonce, []byte(`{"torrserver_login":"admin","torrserver_password":"s3cret-pass",`+
+		`"jackett_key":"jk-one-value","jackett_key_two":"jk-two-value"}`), aad)
+
+	merged, err := s.Merge(testUserID, docWithSettings(t, `{"prowlarr_url":"http://p","language":"ru"}`), blob)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{
+		"torrserver_login": "admin", "torrserver_password": "s3cret-pass",
+		"jackett_key": "jk-one-value", "jackett_key_two": "jk-two-value",
+		"prowlarr_url": "http://p", "language": "ru",
+	}, settingsOf(t, merged))
+}
+
+// uiInputPattern matches a settings input template inside the escaped js string literals of app.min.js.
+var uiInputPattern = regexp.MustCompile(`data-type=\\"input\\" data-name=\\"([a-z0-9_]+)\\"([^>]*)`)
+
+func TestSensitiveSettings_matchUI(t *testing.T) {
+	bundle, err := os.ReadFile(filepath.Join("..", "..", "..", "app.min.js"))
+	if errors.Is(err, fs.ErrNotExist) {
+		t.Skip("app.min.js is not checked out next to backend/")
+	}
+	require.NoError(t, err)
+
+	inputs, secrets := map[string]bool{}, []string{}
+	for _, m := range uiInputPattern.FindAllSubmatch(bundle, -1) {
+		name := string(m[1])
+		inputs[name] = true
+		if strings.Contains(string(m[2]), `data-string=\"true\"`) {
+			secrets = append(secrets, name)
+		}
+	}
+	require.NotEmpty(t, inputs, "no settings inputs found, the template format changed")
+	require.NotEmpty(t, secrets, "no secret settings inputs found, the template format changed")
+
+	for _, name := range secrets {
+		assert.Contains(t, SensitiveSettings, name, "secret ui input %q is not sealed", name)
+	}
+	for _, key := range SensitiveSettings {
+		assert.True(t, inputs[key], "sealed key %q is no longer a ui input", key)
+	}
 }
 
 func TestParseUUID(t *testing.T) {
