@@ -69,9 +69,10 @@ and `prowlarr_key_two`. They are removed from the `settings` section, sealed wit
 plugins register through `SettingsApi` are unknown to the backend and are stored as plain
 settings.
 
-`TestSensitiveSettings_matchUI` parses `../app.min.js` and fails when the UI gains a secret
-input (`data-string="true"`) missing from the list, or loses one still in it. An upstream pull
-that adds a secret field therefore fails CI until `SensitiveSettings` is updated. The test
+`TestSensitiveSettings_matchUI` parses `../app.min.js` and fails when the UI gains a settings
+input that is neither in `SensitiveSettings` nor in the test's list of plain inputs, or loses a
+sealed one. An upstream pull that adds a settings input therefore fails CI until it is
+classified as sealed or plain. The test
 skips when `app.min.js` is absent (a `backend/`-only checkout).
 
 ## Build, test, lint

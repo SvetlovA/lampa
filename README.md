@@ -109,7 +109,7 @@ The Compose services use these values:
 | --- | --- | --- | --- |
 | `LAMPA_DOMAIN` | Yes, to build `lampa-web` | None | MSX host without a protocol |
 | `LAMPA_PREFIX` | No | `https://` | Protocol written to `msx/start.json` |
-| `LAMPA_BIND_ADDRESS` | No | `0.0.0.0` | Published host interface for `lampa-web` |
+| `LAMPA_BIND_ADDRESS` | No | `0.0.0.0` | Published host interface for `lampa-web` and `lampa-api` |
 | `LAMPA_PORT` | No | `8092` | Host port mapped to Apache port 80 |
 | `LAMPA_ENVIRONMENT` | No | `Test` | `lampa-api` environment: `Development`, `Test` or `Production` |
 | `LAMPA_API_PORT` | No | `5800` | Host port mapped to the API port 5800 |
@@ -204,7 +204,8 @@ The target server must have:
 - an SSH user that can create `DEPLOY_DIR` and run Docker commands;
 - Tailscale connectivity from the GitHub Actions runner to `SERVER_HOST`;
 - the configured `LAMPA_PORT` available to bind, or a reverse proxy prepared to
-  use that port.
+  use that port;
+- port `5800` (`lampa-api`) and loopback port `5434` (`lampa-db`) free.
 
 Local Compose and automated deployments default to port `8092` because port
 `8080` is already used by Keycloak on the Svtlv server. The optional
@@ -250,7 +251,7 @@ Variables** when the defaults are not suitable:
 | Variable | Default | Description |
 | --- | --- | --- |
 | `LAMPA_PREFIX` | `https://` | Protocol written to the MSX descriptor |
-| `LAMPA_BIND_ADDRESS` | `0.0.0.0` | Published server interface |
+| `LAMPA_BIND_ADDRESS` | `0.0.0.0` | Published server interface for `lampa-web` and `lampa-api` |
 
 ### Run a deployment
 

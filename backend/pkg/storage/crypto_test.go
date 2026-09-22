@@ -1,12 +1,14 @@
 package storage
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -276,7 +278,25 @@ func TestSealer_MergeLegacyBlob(t *testing.T) {
 }
 
 // uiInputPattern matches a settings input template inside the escaped js string literals of app.min.js.
-var uiInputPattern = regexp.MustCompile(`data-type=\\"input\\" data-name=\\"([a-z0-9_]+)\\"([^>]*)`)
+var uiInputPattern = regexp.MustCompile(`data-type=\\"input\\" data-name=\\"([a-z0-9_]+)\\"`)
+
+// uiInputMarker starts every settings input template; uiDynamicInput is the SettingsApi one whose
+// name comes from a plugin at runtime, so it has no literal name to classify.
+const (
+	uiInputMarker  = `data-type=\"input\"`
+	uiDynamicInput = `data-type=\"input\" data-name=\"".concat(`
+)
+
+// plainUIInputs lists the settings inputs of the Lampa UI that are stored unsealed. every literal
+// input must be either here or in SensitiveSettings, so a new upstream input fails the test until
+// someone decides whether it holds a credential.
+var plainUIInputs = []string{
+	"jackett_url", "jackett_url_two",
+	"prowlarr_url", "prowlarr_url_two",
+	"torrserver_url", "torrserver_url_two",
+	"player_nw_path", "device_name",
+	"tmdb_proxy_api", "tmdb_proxy_image",
+}
 
 func TestSensitiveSettings_matchUI(t *testing.T) {
 	bundle, err := os.ReadFile(filepath.Join("..", "..", "..", "app.min.js"))
@@ -285,22 +305,23 @@ func TestSensitiveSettings_matchUI(t *testing.T) {
 	}
 	require.NoError(t, err)
 
-	inputs, secrets := map[string]bool{}, []string{}
-	for _, m := range uiInputPattern.FindAllSubmatch(bundle, -1) {
+	matches := uiInputPattern.FindAllSubmatch(bundle, -1)
+	require.NotEmpty(t, matches, "no settings inputs found, the template format changed")
+	require.Len(t, matches, bytes.Count(bundle, []byte(uiInputMarker))-bytes.Count(bundle, []byte(uiDynamicInput)),
+		"some settings inputs do not match uiInputPattern, the template format changed")
+
+	inputs := map[string]bool{}
+	for _, m := range matches {
 		name := string(m[1])
 		inputs[name] = true
-		if strings.Contains(string(m[2]), `data-string=\"true\"`) {
-			secrets = append(secrets, name)
-		}
-	}
-	require.NotEmpty(t, inputs, "no settings inputs found, the template format changed")
-	require.NotEmpty(t, secrets, "no secret settings inputs found, the template format changed")
-
-	for _, name := range secrets {
-		assert.Contains(t, SensitiveSettings, name, "secret ui input %q is not sealed", name)
+		assert.NotEqual(t, slices.Contains(SensitiveSettings, name), slices.Contains(plainUIInputs, name),
+			"ui input %q must be listed in exactly one of SensitiveSettings and plainUIInputs", name)
 	}
 	for _, key := range SensitiveSettings {
 		assert.True(t, inputs[key], "sealed key %q is no longer a ui input", key)
+	}
+	for _, key := range plainUIInputs {
+		assert.True(t, inputs[key], "plain key %q is no longer a ui input", key)
 	}
 }
 

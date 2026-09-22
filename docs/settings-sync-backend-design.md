@@ -138,7 +138,7 @@ configuration. The files follow Svtlv's `appsettings` layering:
   overrides a file setting.
 
 Ports follow the Svtlv series without colliding with it: the API listens on
-`5800` and is published on the same host port, health stays on the
+`5800` and is published on the same host port of `LAMPA_BIND_ADDRESS`, health stays on the
 container-internal `8081`, and PostgreSQL is published only on
 `127.0.0.1:5434` (Svtlv uses `5433`, Keycloak `8080`).
 
@@ -594,12 +594,14 @@ Deviations recorded while implementing Plan 1
   them for the `:dev` images of `devops/docker-compose.yaml` and strips the
   `build:` blocks. The backend gates run in the separate `tests.yaml` workflow
   on every PR and push to `svtlvtv`, not inside the deploy;
-- the API port is published (`5800`) so a Development `go run` and local checks
-  can reach it; user-data routes still answer `401` until Plan 2;
+- the API port is published (`5800`, on `LAMPA_BIND_ADDRESS` like the web port)
+  for local and server smoke checks, which departs from §12 until the Plan 2
+  `/api` proxy exists; user-data routes still answer `401` until Plan 2;
 - the sealed credential set mirrors the secret inputs of the current Lampa
   settings UI: the TorrServer login and password and the Jackett **and
   Prowlarr** API keys (`SensitiveSettings`). A drift test parses `app.min.js`
-  and fails when upstream adds or removes a secret input. Settings registered by
+  and fails when upstream adds a settings input classified neither as sealed nor
+  as plain, or removes a sealed one. Settings registered by
   plugins through `SettingsApi` are unknown to the backend and are stored as
   plain settings.
 

@@ -213,8 +213,11 @@ func TestRun_logsEnvironment(t *testing.T) {
 			if tc.env != "" {
 				env[config.EnvEnvironment] = tc.env
 			}
+			// the built dsn has no connect_timeout, so a filtered port would otherwise hang the test
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
 			var out bytes.Buffer
-			err := run(t.Context(), nil, settings, envOf(env), &out)
+			err := run(ctx, nil, settings, envOf(env), &out)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "migrate database")
 			assert.Contains(t, out.String(), "[INFO] config: {Environment:"+tc.want+" ")

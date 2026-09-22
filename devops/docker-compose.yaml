@@ -75,7 +75,7 @@ services:
       LAMPA_API_DATA_KEY: ${LAMPA_API_DATA_KEY:?Set LAMPA_API_DATA_KEY to base64 of 32 random bytes}
     ports:
       # 8081 health stays container-internal and is never published
-      - "${LAMPA_API_PORT:-5800}:5800"
+      - "${LAMPA_BIND_ADDRESS:-0.0.0.0}:${LAMPA_API_PORT:-5800}:5800"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8081/health/critical || exit 1"]
       interval: 30s
