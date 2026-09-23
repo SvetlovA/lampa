@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: "lampa-api environment (appsettings.<env>.json); Development is for a local go run only and cannot reach the DB from a container"
+        description: "lampa-api environment (appsettings.<env>.json); Development is for a local go run only and is rejected before anything is built or stopped"
         required: true
         default: Production
         type: choice
@@ -41,6 +41,19 @@ jobs:
           set -euo pipefail
           if [ "$REF_NAME" != "$DEFAULT_BRANCH" ]; then
             echo "deploy must run from $DEFAULT_BRANCH, got $REF_NAME" >&2
+            exit 1
+          fi
+
+      # Development points the API at localhost:5434, which a container cannot reach, so
+      # deploying it would stop the running stack and leave the API unhealthy
+      - name: Reject the Development environment
+        shell: bash
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          set -euo pipefail
+          if [ "$ENVIRONMENT" = "Development" ]; then
+            echo "Development is for a local go run only; deploy Test or Production" >&2
             exit 1
           fi
 
@@ -85,7 +98,9 @@ jobs:
             exit 1
           fi
 
-          if [[ "$DEPLOY_DIR" = "/" || ! "$DEPLOY_DIR" =~ ^/[-A-Za-z0-9._/]+$ ]]; then
+          # no "." or ".." components: the path must name the deploy directory itself
+          dot_segment='(^|/)\.\.?(/|$)'
+          if [[ "$DEPLOY_DIR" = "/" || ! "$DEPLOY_DIR" =~ ^/[-A-Za-z0-9._/]+$ || "$DEPLOY_DIR" =~ $dot_segment ]]; then
             echo "DEPLOY_DIR must be a safe absolute server path" >&2
             exit 1
           fi

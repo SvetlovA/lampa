@@ -166,7 +166,7 @@ The workflow has a single input:
 
 | Input | Default | Description |
 | --- | --- | --- |
-| `environment` | `Production` | `lampa-api` environment written to the server `.env` as `LAMPA_ENVIRONMENT`: `Development`, `Test` or `Production`. Development is for a local `go run` only and cannot reach the database from a container |
+| `environment` | `Production` | `lampa-api` environment written to the server `.env` as `LAMPA_ENVIRONMENT`: `Development`, `Test` or `Production`. Development is for a local `go run` only (a container cannot reach the database), so the workflow rejects it before building or stopping anything |
 
 The workflow performs the following operations:
 
@@ -334,9 +334,11 @@ The workflow has no rollback inputs. To roll back, revert the offending commit o
   `/` inside the container.
 - **`svtlvtv_lampa_api` is not healthy after 3 minutes** — inspect
   `docker-compose logs --tail 100 lampa-api lampa-db`; the usual causes are a
-  wrong `LAMPA_DB_PASSWORD` for an already initialized database volume, a
-  malformed `LAMPA_API_DATA_KEY`, or `environment: Development`, which points the
-  API at `localhost` inside its container.
+  wrong `LAMPA_DB_PASSWORD` for an already initialized database volume or a
+  malformed `LAMPA_API_DATA_KEY`.
+- **Development is for a local go run only** — the workflow rejects
+  `environment: Development` because it points the API at `localhost` inside its
+  container; deploy Test or Production.
 - **Deploy must run from the default branch** — start the workflow from
   `svtlvtv`; merge the change there first.
 - **Stripped docker-compose check fails** — a Compose edit broke the layout rules

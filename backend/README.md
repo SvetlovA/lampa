@@ -192,7 +192,8 @@ every PR and on pushes to `svtlvtv`.
 
 `.github/workflows/deploy-docker.yaml` (`workflow_dispatch` only, default branch only) has one
 input, `environment` (Development / Test / Production, default Production), written into the
-server `.env` as `LAMPA_ENVIRONMENT`. It builds `ghcr.io/<owner>/lampa-web` and
+server `.env` as `LAMPA_ENVIRONMENT`; Development fails the `prepare` job, since it only works
+for a local `go run`. It builds `ghcr.io/<owner>/lampa-web` and
 `ghcr.io/<owner>/lampa-api` (branch, `<branch>-<sha>` and `latest` tags), swaps the `:dev`
 images for `:latest`, strips the `build:` blocks with `sed`, and deploys over Tailscale + SSH,
 waiting up to 3 minutes for `svtlvtv_lampa_api` to be healthy. It does not run the tests
