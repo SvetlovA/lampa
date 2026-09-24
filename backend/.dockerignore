@@ -1,0 +1,4 @@
+# local artifacts only; vendor/ and all sources stay in the context for -mod=vendor builds
+.bin/
+*.test
+coverage*.out
