@@ -33,12 +33,18 @@ regular web server for use in a compatible browser.
 | `msx/start.json` | MSX application descriptor |
 | `vender/` | Browser libraries loaded by `index.html` |
 | `Dockerfile` | Apache-based production image |
-| `devops/docker-compose.yaml` | Local and server Compose configuration |
+| `devops/docker-compose.yaml` | Local and server Compose configuration (`lampa-web`, `lampa-db`, `lampa-api`); builds both images locally |
+| `devops/.env.example` | Template for the local `devops/.env` (gitignored) |
+| `.github/workflows/tests.yaml` | Backend lint, tests and race plus a Compose config check on PRs and pushes to `svtlvtv` |
 | `.github/workflows/deploy-docker.yaml` | Manual Svtlv deployment workflow |
+| `backend/` | `lampa-api`, a fork-only Go service that stores user data in PostgreSQL; see [`backend/README.md`](backend/README.md) |
+| `docs/` | Design documents and implementation plans for the backend |
 
-Despite its name, `app.min.js` is readable compiled output. There is no package
-manager, build command, test suite, or linter in this repository. Changes to the
+Despite its name, `app.min.js` is readable compiled output. The web application
+has no package manager, build command, test suite, or linter. Changes to the
 application bundle or compiled CSS are made directly and verified in a browser.
+The Go module under `backend/` is the exception: it has its own `Makefile`, tests
+and linter, documented in [`backend/README.md`](backend/README.md).
 
 ## Run locally
 
@@ -76,38 +82,51 @@ values replace the `{domain}` and `{PREFIX}` placeholders in `msx/start.json`.
 
 ### Docker Compose
 
-From PowerShell:
-
-```powershell
-$env:LAMPA_DOMAIN = 'lampa.example.com'
-$env:LAMPA_PREFIX = 'https://'
-docker compose -f devops/docker-compose.yaml up -d --build
-```
-
-From Bash:
+`devops/docker-compose.yaml` defines three services: `lampa-web` (the Apache
+image), `lampa-db` (PostgreSQL) and `lampa-api` (the Go persistence service from
+`backend/`). It builds `lampa-web:dev` and `lampa-api:dev` locally and reads its
+values from `devops/.env`, which is gitignored; `devops/.env.example` is the
+template. Compose interpolates every service even when only one is started, so the
+secrets must be set even for a web-only run; the placeholders from the template
+are enough for that. The file also attaches `lampa-web` and `lampa-api` to the
+external `svtlv_monitoring_external` network, which must exist:
 
 ```bash
-LAMPA_DOMAIN=lampa.example.com \
-LAMPA_PREFIX=https:// \
-docker compose -f devops/docker-compose.yaml up -d --build
+cd devops
+cp .env.example .env                               # adjust values, replace secrets
+docker network create svtlv_monitoring_external    # once
+docker compose up -d --build                       # or: up -d --build lampa-web
 ```
 
-The Compose service uses these values:
+`.env.example` sets `COMPOSE_PROJECT_NAME=lampa`, so a local stack does not share
+Svtlv's `devops` project. The API runs in the `Test` environment by default; see
+"Configuration" and "Local run" in [`backend/README.md`](backend/README.md),
+including the Development mode (a host `go run` against the published database).
+
+The Compose services use these values:
 
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
-| `LAMPA_DOMAIN` | Yes | None | MSX host without a protocol |
+| `LAMPA_DOMAIN` | Yes, to build `lampa-web` | None | MSX host without a protocol |
 | `LAMPA_PREFIX` | No | `https://` | Protocol written to `msx/start.json` |
-| `LAMPA_IMAGE` | No | `lampa-web:local` | Image name used by Compose |
-| `LAMPA_BIND_ADDRESS` | No | `0.0.0.0` | Published host interface |
+| `LAMPA_BIND_ADDRESS` | No | `0.0.0.0` | Published host interface for `lampa-web` and `lampa-api` |
 | `LAMPA_PORT` | No | `8092` | Host port mapped to Apache port 80 |
+| `LAMPA_ENVIRONMENT` | No | `Test` | `lampa-api` environment: `Development`, `Test` or `Production` |
+| `LAMPA_API_PORT` | No | `5800` | Host port mapped to the API port 5800 |
+| `LAMPA_DB_PORT` | No | `5434` | Loopback host port mapped to PostgreSQL 5432 |
+| `LAMPA_DB_PASSWORD` | Yes | None | Password of the `lampa` database role (`openssl rand -hex 32`) |
+| `LAMPA_API_DATA_KEY` | Yes | None | Base64 of 32 bytes that seal stored credentials (`openssl rand -base64 32`) |
 
-Check or stop the local service with:
+The API health port 8081 is container-internal and never published. None of the
+published ports collide with Svtlv's (`8080` is Keycloak, `5433` is Svtlv's
+database).
+
+Check or stop the local services with:
 
 ```bash
-docker compose -f devops/docker-compose.yaml ps
-docker compose -f devops/docker-compose.yaml logs --tail 100 lampa-web
-docker compose -f devops/docker-compose.yaml down
+docker compose ps
+docker compose logs --tail 100 lampa-web lampa-api
+docker compose down
 ```
 
 ## Install in MSX
@@ -136,25 +155,45 @@ The Docker image performs this substitution automatically from its `domain` and
 
 The **Build and Deploy Lampa** GitHub Actions workflow runs only when an operator
 starts it manually. Pushing or merging a commit does not deploy the application.
-The workflow always checks out the latest `svtlvtv` branch before building, even
-if the workflow was started from another branch in the Actions interface.
+It must be started from the default branch (`svtlvtv`) and fails otherwise,
+because the deploy pulls the `latest` images that only the default branch
+publishes.
 
 Deployments are serialized so that two workflow runs cannot update the server at
 the same time.
 
+The workflow has a single input:
+
+| Input | Default | Description |
+| --- | --- | --- |
+| `environment` | `Production` | `lampa-api` environment written to the server `.env` as `LAMPA_ENVIRONMENT`: `Development`, `Test` or `Production`. Development is for a local `go run` only (a container cannot reach the database), so the workflow rejects it before building or stopping anything |
+
 The workflow performs the following operations:
 
-1. Checks out the `svtlvtv` branch and validates all required repository secrets.
-2. Builds the Apache image and publishes it to GitHub Container Registry (GHCR).
-3. Tags the image with the deployed commit's full SHA and the moving `svtlvtv` tag.
-4. Connects the GitHub-hosted runner to the server's tailnet.
-5. Configures SSH using the deployment key.
-6. Copies the Compose file and generated environment file to `DEPLOY_DIR`.
-7. Logs the server in to GHCR and pulls the immutable SHA-tagged image.
-8. Pulls and recreates the Lampa container with `docker-compose`.
+1. Validates the branch and all required repository secrets, including the format
+   of `LAMPA_DB_PASSWORD` and `LAMPA_API_DATA_KEY`.
+2. Builds `ghcr.io/<owner>/lampa-web` and `ghcr.io/<owner>/lampa-api` and publishes
+   them to GitHub Container Registry (GHCR) with the branch, `<branch>-<sha>` and
+   `latest` tags.
+3. Rewrites the Compose file for release: swaps `lampa-web:dev` / `lampa-api:dev`
+   for the `latest` GHCR images and strips the `build:` blocks with `sed`, then
+   fails if a build key or a `:dev` image survives or a section went missing.
+4. Connects the GitHub-hosted runner to the server's tailnet and configures SSH.
+5. Copies the Compose file and a generated `.env` to `DEPLOY_DIR`.
+6. Logs the server in to GHCR, checks the Compose configuration, pulls the images,
+   stops the running containers and starts `lampa-db`, `lampa-api` and `lampa-web`
+   with `docker-compose`.
+7. Waits up to 3 minutes for the `svtlvtv_lampa_api` healthcheck, prints its logs
+   and fails the run when it does not become healthy, then prunes old images.
 
-Container health is tracked by the healthcheck in `devops/docker-compose.yaml`.
-The workflow does not wait for that healthcheck after starting the container.
+The workflow does not wait for the `lampa-web` healthcheck. It does not run the
+backend tests either; the **Tests** workflow (`tests.yaml`) gates PRs and pushes to
+`svtlvtv`, so merge only green changes before deploying.
+
+The Compose layout the `sed` strip depends on is described in the header comment of
+`devops/docker-compose.yaml`: each built service lists `image:` before its `build:`
+block, only `context:` and `args:` sit between `build:` and `dockerfile:`, and no
+other line, comments included, contains `build:`.
 
 ### Server prerequisites
 
@@ -165,11 +204,12 @@ The target server must have:
 - an SSH user that can create `DEPLOY_DIR` and run Docker commands;
 - Tailscale connectivity from the GitHub Actions runner to `SERVER_HOST`;
 - the configured `LAMPA_PORT` available to bind, or a reverse proxy prepared to
-  use that port.
+  use that port;
+- port `5800` (`lampa-api`) and loopback port `5434` (`lampa-db`) free.
 
 Local Compose and automated deployments default to port `8092` because port
 `8080` is already used by Keycloak on the Svtlv server. The optional
-`LAMPA_PORT` secret overrides that default.
+`LAMPA_PORT` secret overrides that default. The API is published on `5800`.
 
 ### Required GitHub Actions secrets
 
@@ -185,9 +225,17 @@ Secrets**:
 | `SSH_USER` | User that performs the remote deployment |
 | `SSH_PRIVATE_KEY` | Private SSH key authorized for `SSH_USER` on the server |
 | `GHCR_PAT` | GitHub personal access token with `read:packages` permission |
+| `LAMPA_DB_PASSWORD` | 64 lowercase hex characters (`openssl rand -hex 32`) |
+| `LAMPA_API_DATA_KEY` | Base64 of exactly 32 bytes (`openssl rand -base64 32`) |
+
+**Back up `LAMPA_API_DATA_KEY` outside GitHub.** It seals every stored TorrServer,
+Jackett and Prowlarr credential; losing or changing it makes them unreadable, and key
+rotation is not implemented. `LAMPA_DB_PASSWORD` applies only when the
+`lampa_db_data` volume is first initialized; see
+[`backend/README.md`](backend/README.md) for rotating it.
 
 `GITHUB_TOKEN` is supplied automatically by GitHub Actions and is used to check
-out the repository and push the image produced by the workflow.
+out the repository and push the images produced by the workflow.
 
 ### Optional GitHub Actions secret
 
@@ -203,7 +251,7 @@ Variables** when the defaults are not suitable:
 | Variable | Default | Description |
 | --- | --- | --- |
 | `LAMPA_PREFIX` | `https://` | Protocol written to the MSX descriptor |
-| `LAMPA_BIND_ADDRESS` | `0.0.0.0` | Published server interface |
+| `LAMPA_BIND_ADDRESS` | `0.0.0.0` | Published server interface for `lampa-web` and `lampa-api` |
 
 ### Run a deployment
 
@@ -226,9 +274,12 @@ With `DEPLOY_DIR=/opt/svtlvtv/lampa-web`, a successful run produces:
 └── docker-compose.yaml
 ```
 
-The generated `.env` file is set to mode `600`. It records the immutable image
-tag and the resolved Compose configuration; SSH, Tailscale, and registry
-credentials are not written into the application image.
+The generated `.env` file is set to mode `600`. It records `LAMPA_ENVIRONMENT`,
+the published ports and bind address, the database password and the data key;
+SSH, Tailscale, and registry credentials are not written into it or into the
+application images. It sets no `COMPOSE_PROJECT_NAME`, so the project name stays
+the `DEPLOY_DIR` basename and container and volume names are stable across
+deployments.
 
 ### Verify a deployment
 
@@ -247,19 +298,24 @@ curl --fail "http://127.0.0.1:${LAMPA_PORT}/"
 If `LAMPA_PORT` or `LAMPA_BIND_ADDRESS` was changed, adjust the `curl` address
 accordingly.
 
-### Roll back
-
-Every deployment publishes an immutable `sha-<commit>` image tag. To restore an
-earlier build, edit `LAMPA_IMAGE` in `$DEPLOY_DIR/.env` to the previous SHA tag
-and recreate the service. For example:
+Also check the API and its database. The health port is not published on the
+host, so query it from inside the container:
 
 ```bash
-DEPLOY_DIR=/opt/svtlvtv/lampa-web
-cd "$DEPLOY_DIR"
-docker-compose pull lampa-web
-docker-compose up -d --no-build lampa-web
-docker-compose ps lampa-web
+docker inspect --format '{{.State.Health.Status}}' svtlvtv_lampa_api svtlvtv_lampa_db
+docker exec svtlvtv_lampa_api curl -s http://localhost:8081/health
+curl -s -w ' %{http_code}\n' http://127.0.0.1:5800/api/v1/user-data
+docker-compose logs lampa-api | grep -m1 Environment
 ```
+
+The user-data request answers `401` until authentication is added in a later
+plan. The startup log names the environment selected by the workflow input.
+
+### Roll back
+
+The workflow has no rollback inputs. To roll back, revert the offending commit on
+`svtlvtv` and start the workflow again; it rebuilds and deploys `latest`. The
+`lampa_db_data` volume survives redeployments.
 
 ### Troubleshooting
 
@@ -276,6 +332,19 @@ docker-compose ps lampa-web
 - **Container is unhealthy** — inspect
   `docker-compose logs --tail 100 lampa-web` and confirm that Apache can serve
   `/` inside the container.
+- **`svtlvtv_lampa_api` is not healthy after 3 minutes** — inspect
+  `docker-compose logs --tail 100 lampa-api lampa-db`; the usual causes are a
+  wrong `LAMPA_DB_PASSWORD` for an already initialized database volume or a
+  malformed `LAMPA_API_DATA_KEY`.
+- **Development is for a local go run only** — the workflow rejects
+  `environment: Development` because it points the API at `localhost` inside its
+  container; deploy Test or Production.
+- **Deploy must run from the default branch** — start the workflow from
+  `svtlvtv`; merge the change there first.
+- **Stripped docker-compose check fails** — a Compose edit broke the layout rules
+  in the header comment of `devops/docker-compose.yaml`; fix the layout.
+- **Tests fail** — run `make lint`, `make test` and `make race` in `backend/` as
+  described in [`backend/README.md`](backend/README.md).
 
 ## Working with this distribution repository
 

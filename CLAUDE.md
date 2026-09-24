@@ -8,12 +8,12 @@ This is the **distribution** repo of Lampa (a media-catalog / player app for TVs
 
 Consequences that shape everything else:
 
-- There is **no package.json, no build system, no tests, no linter**. Nothing to install, nothing to compile.
+- There is **no package.json, no build system, no tests, no linter** for the frontend. Nothing to install, nothing to compile. The one exception is the fork-only Go service under `backend/` (see "lampa-api" below).
 - `app.min.js` (~56k lines) is the whole application. **Despite the name it is not minified** — it is a readable Rollup IIFE bundle passed through Babel (ES5 output, 2-space indent, JSDoc comments in Russian preserved). Edit it directly.
 - `css/app.css` is compiled + autoprefixed SCSS output. Edit it directly too; do not expect a `.scss` source here.
 - Upstream commits (author `yumata`) touch `app.min.js` + `assembly.json`, sometimes `css/app.css` and `lang/*.js`. Follow the same pattern.
 
-Local work happens on the `svtlvtv` branch; `main` mirrors upstream. Two worktrees share this repo: `C:/Users/21art/Projects/lampa` (main) and `.../worktrees/lampa/Lampa-SvtlvTv` (svtlvtv).
+Local work happens on the `svtlvtv` branch; `main` mirrors upstream. Several worktrees share this repo: `C:/Users/21art/Projects/lampa` (main), `.../worktrees/lampa/Lampa-SvtlvTv` (svtlvtv) and `.../worktrees/lampa/lampa-backend` (backend work, branch `lampa-backend`). The deploy workflow runs only from `svtlvtv` (the default branch), so backend work must be merged there before a dispatch can deploy it.
 
 ## Running it
 
@@ -91,7 +91,22 @@ Third-party plugins are remote scripts loaded at boot (`Plugins.load`) from CUB 
 
 ### Backend
 
-There is no server in this repo. The app talks to CUB (`Manifest.cub_site` → `cub.best`, or `cub.black` when `window.vpn_region == 'ru'`) for accounts / sync / plugins, to TMDB for catalog data, and to user-configured TorrServer / Jackett instances for torrents. `Manifest.cub_mirrors` / `old_mirrors` drive mirror failover — when a domain changes, that list plus `Manifest` are what to edit.
+The upstream app has no server of its own. It talks to CUB (`Manifest.cub_site` → `cub.best`, or `cub.black` when `window.vpn_region == 'ru'`) for accounts / sync / plugins, to TMDB for catalog data, and to user-configured TorrServer / Jackett instances for torrents. `Manifest.cub_mirrors` / `old_mirrors` drive mirror failover — when a domain changes, that list plus `Manifest` are what to edit.
+
+### lampa-api (`backend/`)
+
+A fork-only Go module (`go 1.26`, vendored) that stores one user-data document per user in PostgreSQL; design in `docs/settings-sync-backend-design.md`, usage in `backend/README.md`. It follows the Ralphex checkout's style (lowercase comments, `pkg/<responsibility>`, moq into `mocks/`, one `_test.go` per source file, stdlib `log` with `[INFO]`/`[WARN]` prefixes).
+
+- Run `make test` / `make race` / `make lint` / `make fmt` **inside WSL Ubuntu** from `backend/` — the Windows Go has no cgo, so `-race` fails there.
+- DB tests use testcontainers (`postgres:18.6`) and need Docker; they skip without it unless `LAMPA_API_REQUIRE_DOCKER=1` (CI sets it).
+- The root `Dockerfile` does `COPY . htdocs/`, so **any new top-level directory must be added to the root `.dockerignore`** or it ships inside the public `lampa-web` image (`backend`, `docs`, `.codex` and `.ralphex` already are).
+- Config is embedded `backend/pkg/config/defaults/appsettings.json` + `appsettings.<Environment>.json` (Svtlv layering, strict decoding), environment from `LAMPA_ENVIRONMENT` (default `Test`; `Development` = host `go run` against the DB on `127.0.0.1:5434`, not reachable from a container). Secrets are `{LAMPA_DB_PASSWORD}` / `{LAMPA_API_DATA_KEY}` placeholders, resolved only in `Database.Password` and `DataKey` (a new secret field needs its own `resolve` call in `config.Load`); there are no other env overrides. Ports: API `5800` (published on `LAMPA_BIND_ADDRESS`, like the web port), health `8081` (container-internal, never published), DB loopback `5434` — none may collide with Svtlv's published ports.
+- `.github/workflows/tests.yaml` runs lint, `make test`, `make race` and a compose `config` check against `devops/.env.example` on every PR and push to `svtlvtv`; keep `.env.example` in step with the compose file.
+- `.github/workflows/deploy-docker.yaml` is manual-only, runs only from the default branch, and has a single `environment` input (Development / Test / Production, default Production) written to the server `.env`; Development is rejected in `prepare`, before anything is built or stopped. It does not run tests. There are no image-tag or API on/off inputs: roll back by reverting and redeploying. It waits up to 3 minutes for `svtlvtv_lampa_api` to be healthy.
+- `devops/docker-compose.yaml` builds `lampa-web:dev` / `lampa-api:dev` locally (copy `devops/.env.example` to the gitignored `devops/.env`; there is no local override file) and needs the external `svtlv_monitoring_external` network. The deploy swaps the `:dev` images for `ghcr.io/<owner>/lampa-{web,api}:latest` and deletes `build:`…`dockerfile:` with `sed`, so **keep the header-comment layout rules**: `image:` before `build:`, only `context:`/`args:` between `build:` and `dockerfile:`, and no other line (comments included) containing `build:`. A post-strip guard fails the deploy otherwise.
+- `storage.SensitiveSettings` (sealed with `LAMPA_API_DATA_KEY` into `encrypted_connections`) mirrors the secret inputs of the Lampa settings UI: TorrServer login/password, Jackett and Prowlarr keys. `TestSensitiveSettings_matchUI` parses `app.min.js`, so **an upstream pull that adds any settings input fails CI until it is classified** — sealed in `SensitiveSettings` or plain in the test's `plainUIInputs`. `LAMPA_API_DATA_KEY` must be backed up outside GitHub (losing it makes stored credentials unreadable).
+- User-data routes answer `401` until a real `Authenticator` replaces `api.DenyAll` (Plan 2); that is expected, not a bug.
+- Frontend files (`app.min.js`, `css/app.css`, `lang/*`, `index.html`) are never touched by backend work.
 
 ## Conventions and gotchas
 

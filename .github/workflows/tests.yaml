@@ -1,0 +1,71 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - svtlvtv
+  workflow_dispatch:
+
+# cancel superseded runs on the same PR, but never cancel a default-branch run
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend lint, tests and race
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      # db tests must run in CI instead of skipping when docker is missing
+      LAMPA_API_REQUIRE_DOCKER: "1"
+
+    steps:
+      # the whole repo, not just backend/: the sealed-settings drift test reads app.min.js
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+          cache-dependency-path: backend/go.sum
+
+      # the action ignores defaults.run.working-directory, so it needs its own
+      - name: Lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          # pinned: "latest" silently adopts new linters and turns the default branch red
+          version: v2.13.0
+          working-directory: backend
+
+      - name: Test with coverage
+        run: make test
+
+      - name: Race
+        run: make race
+
+  compose:
+    name: Compose config
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # keeps .env.example in step with the compose file; the runner has compose v2 only,
+      # so the server's v1 is first checked by a real deploy
+      - name: Validate compose file
+        run: docker compose -f devops/docker-compose.yaml --env-file devops/.env.example config --quiet

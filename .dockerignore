@@ -1,5 +1,7 @@
+.codex
 .git
 .idea
+.ralphex
 .dockerignore
 .github
 devops
@@ -8,3 +10,5 @@ CLAUDE.md
 Dockerfile
 README.md
 SECURITY.md
+backend
+docs
