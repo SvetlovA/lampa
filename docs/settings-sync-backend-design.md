@@ -2,7 +2,7 @@
 
 Status: Draft
 
-Date: 2026-09-15
+Date: 2026-09-15 (authentication and Account UI decisions added 2026-09-24)
 
 Target branch: `svtlvtv`
 
@@ -66,12 +66,16 @@ flowchart LR
 Components:
 
 - `lampa-web` continues serving the existing static application and proxies
-  `/api` to the Go service.
+  `/api` to the Go service (Apache `mod_proxy_http` inside the `lampa-web`
+  image, added in Plan 2).
 - `lampa-api` handles login, sessions and user-data reads and writes.
 - the existing Svtlv Keycloak identifies the user.
-- PostgreSQL stores the complete user document in JSONB.
-- a small ES5 browser adapter exports data from Lampa, calls the API and imports
-  server data into `localStorage`.
+- PostgreSQL stores the complete user document in JSONB, and the server-side
+  login sessions.
+- a small ES5 Account add-on (`svtlv/account.js`, Plan 2) adds sign-in,
+  sign-out and the header avatar to Lampa through its public API (§10.5).
+- a small ES5 browser adapter (Plan 4) exports data from Lampa, calls the API
+  and imports server data into `localStorage`.
 
 The frontend adapter is required because a backend cannot directly read or
 update browser `localStorage`.
@@ -231,16 +235,141 @@ Svtlv Web application roles. If Lampa-specific roles are ever needed, define
 them as client roles on `svtlv-lampa`, not as dependencies on another client's
 roles.
 
-Recommended flow:
-
-- the browser opens `/api/v1/auth/login`;
-- the Go backend performs the Keycloak Authorization Code flow;
-- the callback creates an opaque `HttpOnly`, `Secure` session cookie;
-- Keycloak tokens and client secrets never enter `localStorage`;
-- `/api/v1/auth/logout` ends the session;
-- `/api/v1/session` reports whether the browser is signed in.
-
 Anonymous use does not require a session.
+
+### 5.1 Supported clients
+
+Login is supported only where Lampa runs as the HTTPS web deployment, same-origin
+with `/api`: a desktop or phone browser, a TV browser, or a TV app that navigates
+its WebView to that HTTPS address. The Android client in use,
+[`lampa-app/LAMPA`](https://github.com/lampa-app/LAMPA), is such an app:
+`MainActivity.onBrowserInitCompleted` calls `browser.loadUrl(LAMPA_URL)` with the
+address typed into its URL dialog, so the document origin is the HTTPS site and
+first-party cookies apply (the app has no cookie code; WebView defaults accept
+and persist them). Its saved address must be `https://`, because a `Secure`
+cookie is never set over `http`.
+
+Shells whose document runs from `file://` or an app origin and only load
+`app.min.js` remotely (`index.html` `AndroidJS.getLampaURL()` branch, packaged
+Tizen/webOS widgets) are not supported: the Account add-on hides itself when
+`location.protocol` is not `https:` (§10.5), and those shells keep working
+anonymously; so do plain `http:` deployments. Supporting file/app origins
+would need a bearer token stored in Lampa storage,
+which every plugin can read; a stolen token returns the decrypted TorrServer,
+Jackett and Prowlarr credentials (`storage.Service.Get` merges
+`encrypted_connections`), so it is deferred to a separate decision with explicit
+risk acceptance. Credentialed CORS and `Origin: null` are never allowed: any site
+can produce a null origin from a sandboxed iframe.
+
+### 5.2 Login flows
+
+Both flows run in the Go backend with `github.com/coreos/go-oidc/v3` and
+`golang.org/x/oauth2` (vendored); no hand-written JWT validation. The browser
+never receives a Keycloak token.
+
+The flow is chosen in the browser with Lampa's `Platform.tv()` — the same split
+CUB's own login uses (QR on TV, mobile layout otherwise). `Platform.screen('tv')`
+is not used: it is also true for non-touch desktop browsers.
+
+- **TV (`Platform.tv()` true): OAuth 2.0 Device Authorization Grant (RFC 8628).**
+  1. `POST /api/v1/auth/device/start` — the backend calls Keycloak's device
+     endpoint and returns `user_code`, `verification_uri`,
+     `verification_uri_complete`, `expires_in` and `interval`. The secret
+     `device_code` never reaches the browser: it is sealed into a short-lived
+     `HttpOnly` cookie scoped to `/api/v1/auth/device`.
+  2. The TV shows a QR code of `verification_uri_complete` and the `user_code`
+     (layout of CUB's `account-modal-split` window, without its keypad) with a
+     pending status and the expiry countdown.
+  3. The user scans the code and signs in to Keycloak on a phone.
+  4. The TV calls `POST /api/v1/auth/device/poll` every `interval` seconds. The
+     backend exchanges the sealed `device_code` at Keycloak's token endpoint:
+     `authorization_pending` → `202 {"status":"pending"}`; `slow_down` → `202`
+     with a larger interval; `expired_token` → `410`; `access_denied` → `403`;
+     success → the ID token is verified, the session is created and the response
+     sets the session cookie.
+- **Phone and computer: Authorization Code flow with PKCE (S256), state and
+  nonce.** `GET /api/v1/auth/login?return=<path>` redirects to Keycloak;
+  state, nonce, PKCE verifier and the return path travel in a sealed,
+  `HttpOnly`, 10-minute cookie scoped to `/api/v1/auth/callback`.
+  `GET /api/v1/auth/callback` verifies them and the ID token, creates the
+  session and redirects to the return path, which must be a local absolute path
+  (no scheme, host or `//`).
+
+Cookie sealing keys are derived from `LAMPA_API_DATA_KEY` with HKDF-SHA256 and a
+distinct purpose label per use, so no new secret is needed and the data-at-rest
+key is never used directly for cookies.
+
+### 5.3 Sessions
+
+Sessions are server-side in PostgreSQL:
+
+```sql
+create table lampa_session (
+    token_hash   bytea primary key,   -- sha-256 of the cookie value
+    user_id      uuid not null,
+    name         text not null,
+    email        text not null,
+    picture      text not null,
+    created_at   timestamptz not null,
+    last_seen_at timestamptz not null,
+    expires_at   timestamptz not null
+);
+```
+
+- the `lampa_session` cookie holds 32 random bytes (base64url); the database
+  stores only their SHA-256, so a database leak exposes no live session;
+- `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/api`, with a real
+  `Max-Age` renewed while the session is used. A session-only cookie could
+  vanish on an app restart while its row is still valid. `GET /api/v1/session`
+  re-sends the cookie with the remaining lifetime (never past the absolute
+  cap), and the add-on calls it at start and every 12 hours, so a TV left
+  running keeps its cookie as long as the server keeps the row;
+- a database error while resolving an existing cookie answers `503`, never
+  "not signed in"; only a missing, unknown or expired cookie is anonymous;
+- lifetime is independent of Keycloak: sliding 30-day idle timeout, 180-day
+  absolute cap. Re-login with a remote is costly, so TV sessions must last;
+- after the ID token is verified the backend keeps only `sub`, `name`
+  (falling back to `preferred_username`), `email` and the optional `picture`.
+  No access or refresh token is stored. Accepted cost: a user disabled in
+  Keycloak stays signed in until expiry or until their rows are deleted; the
+  profile (including the avatar) refreshes on the next login;
+- `POST /api/v1/auth/logout` deletes the row and clears the cookie. It ends the
+  Lampa session only; the Keycloak SSO session is left alone;
+- expired rows are purged periodically by the API;
+- the `Authenticator` seam (`api.Authenticator`) is implemented in `pkg/auth`:
+  it hashes the cookie, looks up an unexpired row, slides `last_seen_at` /
+  `expires_at` and returns the user id. Database errors are not
+  `ErrUnauthenticated`: the `authenticate` middleware logs them and answers
+  `503 session_unavailable`, never `401`, so a client is not told it is signed
+  out because the session store failed.
+
+### 5.4 Avatar
+
+The avatar follows Svtlv: Keycloak's `profile` scope omits `picture` unless a
+client mapper adds it, so its absence is the normal case. With a `picture`
+user-attribute mapper on `svtlv-lampa`, the URL comes from the ID token; without
+it the add-on draws the user's initials.
+
+### 5.5 CSRF
+
+Every state-changing route (`POST`, `PUT`, `DELETE` — logout, device start/poll,
+user data) requires the header `X-Lampa-Csrf: 1`. Any XHR can set it (including
+jQuery on Safari 5.1-era TV engines); a cross-site form cannot, and a cross-origin
+script would need a CORS preflight the API never grants. In addition a request
+whose `Origin` header is present and differs from the configured public origin is
+rejected. A missing `Origin` or `Sec-Fetch-Site` alone never rejects a request,
+because old TV engines send neither. Plugins run same-origin and can set the
+header; CSRF protection cannot isolate them, and SECURITY.md already treats
+plugins as untrusted code.
+
+### 5.6 Keycloak client
+
+`svtlv-lampa` in the `svtlv` realm: confidential client, Standard flow on,
+"OAuth 2.0 Device Authorization Grant" on, direct access grants off, valid
+redirect URI `https://<lampa-domain>/api/v1/auth/callback`, no web origins
+(the browser never calls Keycloak with CORS). Optional: a `picture`
+user-attribute mapper (§5.4). The backend is configured with the realm issuer
+URL, the client ID and the client secret (`{LAMPA_KEYCLOAK_CLIENT_SECRET}`).
 
 ## 6. Synchronization behavior
 
@@ -315,10 +444,12 @@ should be added only if real usage demonstrates the need.
 
 | Method and path | Purpose |
 | --- | --- |
-| `GET /api/v1/auth/login` | Start Keycloak login |
-| `GET /api/v1/auth/callback` | Finish login and create session |
+| `GET /api/v1/auth/login` | Start the Authorization Code login (phone, computer) |
+| `GET /api/v1/auth/callback` | Finish that login and create the session |
+| `POST /api/v1/auth/device/start` | Start the device login (TV); returns the user code and verification links |
+| `POST /api/v1/auth/device/poll` | Poll the device login; creates the session when approved |
 | `POST /api/v1/auth/logout` | End session |
-| `GET /api/v1/session` | Return login status |
+| `GET /api/v1/session` | Return login status and the signed-in profile |
 | `GET /api/v1/user-data` | Return the signed-in user's complete document |
 | `PUT /api/v1/user-data` | Create or replace the complete document |
 | `DELETE /api/v1/user-data` | Delete the signed-in user's cloud document |
@@ -347,9 +478,30 @@ Example successful response:
 }
 ```
 
+`GET /api/v1/session` answers `200` for every valid lookup, anonymous or
+signed in, so an anonymous start logs no error; it answers `503` only when the
+session store fails while resolving an existing cookie (§5.3):
+
+```json
+{ "authenticated": false }
+```
+
+```json
+{
+  "authenticated": true,
+  "user": {
+    "id": "4f1c…",
+    "name": "User Name",
+    "email": "user@example.com",
+    "picture": ""
+  }
+}
+```
+
 The API requires authentication for every user-data and torrent-membership
 operation, limits request size and never accepts a `user_id` from the request
-body or URL. Membership operations must be idempotent.
+body or URL. Membership operations must be idempotent. State-changing routes
+require `X-Lampa-Csrf: 1` (§5.5).
 
 ## 9. Health and Svtlv monitoring
 
@@ -466,6 +618,8 @@ Keep all fork-specific frontend integration outside the generated Lampa files:
 
 ```text
 svtlv/
+├── account.js                # Plan 2, sign-in, sign-out, header avatar
+├── account.css               # Plan 2
 ├── torrserver-ownership.js   # Plan 3, shared TorrServer view
 ├── account-sync.js           # Plan 4, user document sync
 └── account-sync.css
@@ -473,7 +627,7 @@ svtlv/
 
 Add only clearly marked script and stylesheet includes to `index.html`.
 `app.min.js` is loaded asynchronously and may come from the local distribution
-or an Android-provided remote URL, so `account-sync.js` must wait until the
+or an Android-provided remote URL, so every add-on must wait until the
 public `window.Lampa` API is available before initializing.
 
 The adapter must use ES5 syntax and public Lampa/jQuery APIs because the
@@ -498,7 +652,7 @@ become user data.
 ### 10.1 Hard compatibility rules
 
 - Do not edit `app.min.js` for account, login or synchronization behavior.
-- Do not edit compiled `css/app.css`; use `svtlv/account-sync.css`.
+- Do not edit compiled `css/app.css`; use the add-on stylesheets in `svtlv/`.
 - Do not modify upstream language bundles for the first version; keep the small
   Svtlv UI text inside the add-on until upstream-safe localization is designed.
 - Use only stable names exported through `window.Lampa`.
@@ -512,8 +666,9 @@ become user data.
 ### 10.2 Minimal loader seam
 
 The intended frontend conflict surface is limited to the marked includes in
-`index.html`. The add-on initializes itself only after `window.Lampa` is ready
-and catches initialization errors without interrupting Lampa boot.
+`index.html`, first added in Plan 2 for `svtlv/account.js`. Each add-on
+initializes itself only after `window.Lampa` is ready and catches
+initialization errors without interrupting Lampa boot.
 
 This works for both current loader branches:
 
@@ -596,6 +751,57 @@ merge `/viewed` timecodes across users: use Lampa's user-scoped local playback
 progress for signed-in users unless a verified per-user TorrServer namespace is
 available. Verify this behavior before enabling synchronization.
 
+### 10.5 Account add-on (Plan 2)
+
+`svtlv/account.js` is identity-only: it calls `GET /api/v1/session`, the login
+and logout routes, and never the user-data API. The UI copies Lampa's existing
+CUB account screens (same classes, focus styling and remote navigation) and is
+named just **Account**. A mockup of every screen is kept at
+https://claude.ai/artifact/YCNYMgMfV3qbFPZjLPgv5A.
+
+**Settings entry.** `Lampa.SettingsApi.addComponent({component: 'account_lampa',
+name: 'Account', before: 'interface', ...})`. The anchor is `interface`, not
+`account`: when `lampa_settings.account_use` is false Lampa removes the CUB
+`account` folder, and an insert relative to a missing anchor silently drops
+the entry. Inside, it mirrors CUB's account template: a short description,
+then either "Sign in" or "Signed in as <email>" and "Log out".
+
+**Header icon.** The add-on puts its own `head__action selector` icon in the
+slot CUB's profile icon uses (before `.full--screen`) and hides CUB's
+`.open--profile` with one CSS rule. It is the same place and look for the
+user; a separate element is needed because CUB's `Profile.init` does not run
+when `account_use` is false, and CUB's `Profile.update()` empties its own icon
+asynchronously after profile checks. The icon shows, in order: the Account
+avatar (`picture`, else initials), CUB's profile image
+(`Lampa.Account.Profile.icon()`) when only CUB is signed in, else the plain
+profile icon. Pressing it opens a `Lampa.Select` menu:
+
+- nobody signed in: "Sign in" with two choices, **Account** or **CUB**
+  (`Lampa.Account.Modal.account()`);
+- Account signed in: the profile row (avatar, name, email), "Switch CUB
+  profile" (`Lampa.Account.Profile.select()`) or "Sign in to CUB",
+  "Account settings" and "Log out";
+- only CUB signed in: CUB's own profile list, plus "Sign in to Account".
+
+CUB and Account are independent: both can be signed in at once and signing out
+of one never touches the other. The add-on reads CUB state only through
+`Lampa.Account.Permit` and never writes `account*` storage keys.
+
+**Sign-in.** On `Lampa.Platform.tv()` the device flow modal (§5.2) opens with
+`Lampa.Modal` size `full`; elsewhere the browser navigates to
+`/api/v1/auth/login?return=<current path>`. On success a `Lampa.Noty`
+"Signed in as <email>" appears and the icon and settings refresh.
+
+**Sign-out.** A `Lampa.Select` confirmation ("You will be signed out on this
+device only…"), then `POST /api/v1/auth/logout` with `X-Lampa-Csrf: 1`.
+
+Strings (en and ru) live inside the add-on (§10.1). The add-on hides
+everything and leaves CUB's icon visible when `location.protocol` is not
+`https:` (plain `http:` is allowed only for `localhost` development, where
+browsers accept `Secure` cookies) or when `/api/v1/session` is unreachable.
+The session cookie is always `Secure`, so sign-in could not finish on plain
+`http:`.
+
 ## 11. Failure behavior
 
 - No server document: upload current user-scoped local data, read it back and use it.
@@ -613,8 +819,14 @@ available. Verify this behavior before enabling synchronization.
 ## 12. Security
 
 - Serve login and API traffic through HTTPS.
-- Use `HttpOnly`, `Secure` and appropriate `SameSite` session cookies.
-- Protect modifying requests against CSRF.
+- Use opaque, server-side sessions in `HttpOnly`, `Secure`, `SameSite=Lax`
+  cookies; store only the SHA-256 of the cookie value (§5.3).
+- Keep Keycloak access and refresh tokens out of the browser and out of the
+  database.
+- Protect modifying requests against CSRF with `X-Lampa-Csrf` plus the
+  `Origin` check (§5.5); never enable credentialed CORS or trust
+  `Origin: null`.
+- Accept only local absolute paths as login return targets (no open redirect).
 - Derive ownership only from the authenticated Keycloak session.
 - If portable connection profiles are ever enabled, encrypt their credentials
   and API keys before database storage; keep current device-local credentials
@@ -699,14 +911,22 @@ Deviations recorded while implementing Plan 1
 
 ### Plan 2: Add and deploy Keycloak authentication
 
-Create the confidential `svtlv-lampa` client inside the existing `svtlv` realm.
-Implement login, callback, session status and logout. Validate the Keycloak
-`sub` UUID and make it available to authenticated backend handlers, but do not
-connect the Lampa frontend to the user-data API yet. Add the new Keycloak
+Create the confidential `svtlv-lampa` client inside the existing `svtlv` realm
+(§5.6). Implement both login flows (device grant on TV, Authorization Code +
+PKCE elsewhere), the callback, server-side sessions, session status and logout
+(§5.2–§5.5), replace `api.DenyAll` with the session `Authenticator`, and add the
+`keycloak` advisory health check (§9.1). Add the Apache `/api` proxy to the
+`lampa-web` image and stop publishing the API port. Add the first `svtlv/`
+add-on, `account.js`, with its marked `index.html` include: the Account
+settings entry, the header avatar icon that also leads to CUB, sign-in and
+sign-out (§10.5). It does not call the user-data API. Add the Keycloak
 configuration and secret to Compose and the manual deployment workflow, deploy
-the change and verify login, session identity, session expiry and rollback.
+the change and verify login on a browser and on the `lampa-app/LAMPA` TV
+client (both WebView engines), session persistence across an app restart,
+session expiry, CUB coexistence and rollback.
 
-Result: existing Svtlv users can sign in and Lampa can recognize the active
+Result: existing Svtlv users can sign in on a TV with their phone or on a
+browser, see their avatar in the header, and Lampa can recognize the active
 session. Settings, favorites, bookmarks, scores and every other Lampa value
 still read from and write only to the device's existing `localStorage`. Login
 does not download, upload or replace any user data in this plan.
@@ -734,7 +954,7 @@ remains outside this view-level separation.
 ### Plan 4: Synchronize and deploy user-scoped Lampa data
 
 Add the optional ES5 sync adapter under `svtlv/` using the marked loader seam
-established in Plan 3. This plan makes the first frontend calls to the user-data API
+established in Plan 2. This plan makes the first frontend calls to the user-data API
 and connects the authenticated Keycloak `sub` to its server document. Implement
 the server-first login flow for the Plan 3 allowlist: portable preferences,
 favorites, bookmarks, scores, reactions, subscriptions, watched state,
