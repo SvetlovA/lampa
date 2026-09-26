@@ -5,7 +5,7 @@
   decisions recorded in §5.1–§5.6, §8, §10.5 and §12 of that document.
 - Backend: replace `api.DenyAll` with real Keycloak authentication in `lampa-api` — the OAuth 2.0
   Device Authorization Grant for TVs, Authorization Code + PKCE for phones and computers,
-  server-side PostgreSQL sessions behind an opaque `HttpOnly` cookie, `GET /api/v1/session`,
+  stateless sealed `HttpOnly` session cookies (no session table), `GET /api/v1/session`,
   logout, CSRF protection, and the `keycloak` advisory health check.
 - Deployment: Apache `/api` proxy inside the `lampa-web` image (deferred from Plan 1), the API
   port no longer published, new Keycloak configuration and secret in Compose and the manual
@@ -49,7 +49,7 @@
 - **CUB header icon**: created by `Profile.init` (`app.min.js` ~23188) as
   `head__action selector open--profile` before `.full--screen`; not created when
   `lampa_settings.account_use` is false; emptied asynchronously by `Profile.update()`.
-- **TV client**: `github.com/lampa-app/LAMPA` loads the configured HTTPS URL directly
+- **TV client**: `github.com/lampa-app/LAMPA` loads the configured URL directly
   (`MainActivity.onBrowserInitCompleted` → `browser.loadUrl(LAMPA_URL)`), engines SysView
   (Android WebView) and XWalk (Crosswalk); no cookie code, WebView defaults apply.
 - **Toolchain**: all `make` targets run inside WSL Ubuntu from `backend/` (Windows Go has no
@@ -72,8 +72,7 @@
 
 ## Testing Strategy
 - **unit tests**: required for every backend task (see Development Approach)
-- **integration tests**: session store against PostgreSQL via `pkg/storage/pgtest`
-  (testcontainers); OIDC flows against an `httptest` fake Keycloak (discovery, JWKS signed with
+- **integration tests**: OIDC flows against an `httptest` fake Keycloak (discovery, JWKS signed with
   a test RSA key, device-authorization and token endpoints)
 - **frontend**: no e2e framework in this repo. CI parses `svtlv/*.js` as ECMAScript 5; behavior
   is verified manually in a desktop browser, a phone browser and the `lampa-app/LAMPA` TV client
@@ -87,12 +86,14 @@
 - keep plan in sync with actual work done
 
 ## Solution Overview
-- **`pkg/auth`** (new) owns everything identity-related: cookie sealing, the PostgreSQL session
-  store, the Keycloak/OIDC client, the auth HTTP handlers and the session `Authenticator`.
+- **`pkg/auth`** (new) owns everything identity-related: cookie sealing, the stateless session
+  cookie, the Keycloak/OIDC client, the auth HTTP handlers and the session `Authenticator`.
   `pkg/api` keeps owning the middleware chain and mounts the auth handlers next to user data.
-- **Two login flows, one session**: both end in `auth.Sessions.Create(profile)` → random 32-byte
-  cookie value, SHA-256 stored, profile (`sub`, `name`, `email`, `picture`) copied from the
-  verified ID token. No Keycloak token is stored anywhere.
+- **Two login flows, one session**: both end in `auth.IssueSession(w, profile)` → a sealed
+  `lampa_session` cookie carrying the profile (`sub`, `name`, `email`, `picture`) copied from the
+  verified ID token plus its two expiries. **Sessions are stateless (user decision
+  2026-09-26)**: no session table, no purge job, no DB access for auth. No Keycloak token is
+  stored anywhere.
 - **Device grant** (TV): `device_code` never leaves the server — it is sealed into an
   `HttpOnly` cookie scoped to `/api/v1/auth/device`; each poll is one token request (single-shot,
   not `oauth2.Config.DeviceAccessToken`, which blocks until done).
@@ -104,8 +105,12 @@
 - **CSRF**: middleware in `pkg/api` on every non-safe method: require `X-Lampa-Csrf: 1`, reject a
   present `Origin` that differs from the configured public origin; never credentialed CORS.
 - **Frontend**: one ES5 file wired through public `window.Lampa` APIs; CUB stays fully
-  functional and independent; the add-on disables itself on non-HTTPS origins (localhost
-  excepted for development) or when the API is unreachable, leaving CUB's own icon visible.
+  functional and independent; the add-on disables itself on non-HTTP(S) origins (`file://`,
+  app origins) or when the API is unreachable, leaving CUB's own icon visible.
+- **Tailscale over HTTP** (user decision 2026-09-26, design §5.1): Lampa is reached only inside
+  the Tailscale network at `http://<tailscale-ip>:8092`, so every cookie sets `Secure` only when
+  `PublicURL` is `https://`. Keycloak may also be HTTP inside the tailnet; the configured
+  issuer must equal the `iss` Keycloak actually issues (checked by the Task 1 pre-flight).
 
 ## Technical Details
 - **Config** (`appsettings.json`, new `Auth` section):
@@ -117,34 +122,40 @@
     "ClientSecret": "{LAMPA_KEYCLOAK_CLIENT_SECRET}"
   }
   ```
-  `PublicURL` (e.g. `https://lampa.example`) gives the redirect URI
-  (`<PublicURL>/api/v1/auth/callback`) and the allowed `Origin`. `PublicURL` and `Issuer` must
-  be absolute `https` URLs in Production. **Deviation from design §3.1 / CLAUDE.md** ("only
+  `PublicURL` (today `http://<tailscale-ip>:8092`) gives the redirect URI
+  (`<PublicURL>/api/v1/auth/callback`), the allowed `Origin` and whether cookies are `Secure`.
+  `PublicURL` is an absolute `http`/`https` origin (no path); `Issuer` is an absolute
+  `http`/`https` URL that must equal the `iss` Keycloak issues. **Deviation from design §3.1 / CLAUDE.md** ("only
   secrets are placeholders"): `PublicURL` and `Issuer` are not secret but are placeholders
   because the Lampa domain is deliberately kept out of the public repository (`LAMPA_DOMAIN` is a
-  GitHub secret). The deploy workflow derives `LAMPA_PUBLIC_URL=https://${LAMPA_DOMAIN}` so the
-  two can never disagree (a mismatch would 403 every POST through the Origin check);
-  `LAMPA_KEYCLOAK_ISSUER` is a repository variable; only the client secret is a secret.
+  GitHub secret). `LAMPA_PUBLIC_URL` and `LAMPA_KEYCLOAK_ISSUER` are repository variables
+  (`LAMPA_PUBLIC_URL` must equal the address saved on devices — a mismatch would 403 every POST
+  through the Origin check); only the client secret is a secret.
   Recorded under design §14 in Task 14.
 - **Session lifetimes are constants** in `pkg/auth` (30-day idle, 180-day absolute, design
   §5.3), not configuration: tests inject a clock, and embedded config cannot be changed on the
   server without a redeploy anyway.
-- **Migration `00002_create_lampa_session.sql`**: table from design §5.3 plus index on
-  `user_id` and on `expires_at` (purge).
-- **Session cookie**: `lampa_session=<base64url 32 bytes>; Path=/api; HttpOnly; Secure;
-  SameSite=Lax; Max-Age=<idle seconds>`. Sliding: every successful lookup moves
-  `last_seen_at` and `expires_at = min(now + idle, created_at + max)`; `GET /api/v1/session`
-  re-sends the cookie with `Max-Age = expires_at - now` (never past the absolute cap). The
-  add-on calls it on every app start **and every 12 hours while Lampa stays open**, so a TV
-  left running for weeks keeps a live browser cookie. Lookups throttle DB writes (update
-  `last_seen_at` at most once a minute per session).
-- **Session status on failure**: a database error while resolving an existing cookie answers
-  `503 session_unavailable`, never `{"authenticated":false}`; only a missing, unknown or
-  expired cookie is anonymous. The add-on treats `503`/network errors as "service unavailable"
-  (keeps its last state, no sign-out).
+- **Session cookie** (design §5.3): `lampa_session=<base64url(AES-256-GCM(JSON))>; Path=/api;
+  HttpOnly; SameSite=Lax; Max-Age=<seconds to idle expiry>` plus `Secure` when `PublicURL` is
+  https, sealed with the HKDF purpose
+  `lampa-session-v1`. Payload `{sub, name, email, picture, created_at, idle_expires_at}`.
+- **Sliding**: only `GET /api/v1/session` re-issues. It first rejects a cookie past
+  `idle_expires_at` or past `created_at + 180d`, then re-issues with `created_at` preserved,
+  `idle_expires_at = min(now + 30d, created_at + 180d)` and a matching `Max-Age`. Other API
+  requests validate but never re-issue. The add-on calls `/session` on every app start **and
+  every 12 hours while Lampa stays open**, so a TV left running keeps its session.
+- **Size bound**: the final `Set-Cookie` value stays ≤ 3 KB after JSON escaping, sealing and
+  base64; `name`/`email` are length-limited and an over-long `picture` URL is dropped, never
+  truncated.
+- **Revoke all**: bump the purpose label to `lampa-session-v2` in code; never rotate
+  `LAMPA_API_DATA_KEY` (it also seals user data at rest). Accepted costs: logout clears only this
+  device's copy, no per-device revocation, a disabled Keycloak user stays signed in until expiry.
+- **No DB dependency**: sessions, `/session` and logout work with PostgreSQL down.
+- **Unavailable vs signed out**: the add-on treats `503`/network errors from the API as "service
+  unavailable" (keeps its last state, no sign-out).
 - **Cookies for flows**: `lampa_login` (Path `/api/v1/auth/callback`, Max-Age 600) and
   `lampa_device` (Path `/api/v1/auth/device`, Max-Age = device `expires_in`), both
-  `HttpOnly; Secure; SameSite=Lax` (Lax, not Strict: the callback arrives as a cross-site
+  `HttpOnly; SameSite=Lax` plus `Secure` on https (Lax, not Strict: the callback arrives as a cross-site
   top-level redirect from Keycloak), AES-256-GCM sealed JSON with an expiry inside the sealed
   payload.
 - **Browser-facing login failures**: Keycloak down at `/auth/login`, a missing/expired
@@ -153,9 +164,8 @@
   return path with `#svtlv-login=ok`. The add-on reads and removes that fragment to show its
   Noty.
 - **Auth failures on protected routes**: the `authenticate` middleware answers `401` only for
-  `ErrUnauthenticated`; any other error (session store down) is logged and answers
-  `503 session_unavailable`, so a client is never told it is signed out because the database
-  failed (design §5.3; Plan 4's adapter depends on it).
+  `ErrUnauthenticated`; any other error is logged and answers `503 session_unavailable`, so a
+  client is never told it is signed out because a dependency failed (design §5.3).
 - **Responses**: `GET /api/v1/session` → `200 {"authenticated":false}` or
   `200 {"authenticated":true,"user":{id,name,email,picture}}`;
   `POST /api/v1/auth/device/start` → `200 {user_code, verification_uri,
@@ -167,8 +177,6 @@
   `writeError` JSON shape.
 - **Name / picture**: `name` falls back to `preferred_username`, then `email`; `picture` is
   accepted only as an absolute `https` URL, else stored empty.
-- **Purge**: a goroutine in `main` deletes rows with `expires_at < now()` every hour; stops
-  with the process context.
 - **Keycloak health**: advisory check that fetches the issuer's
   `/.well-known/openid-configuration` (short timeout); failure → `/health` `Degraded`,
   `/health/critical` unaffected. Descriptions never include URLs with secrets.
@@ -197,13 +205,13 @@
 - Modify: `backend/pkg/config/config_test.go`
 - Modify: `backend/cmd/lampa-api/main_test.go`
 
-- [ ] **pre-flight (before any code)**: on the server, `docker exec svtlvtv_lampa_api curl -fsS <issuer>/.well-known/openid-configuration` and compare its `issuer` with the realm's public issuer; record the result in Context. If the container cannot reach the public issuer (hairpin NAT, Keycloak only on the Svtlv network), stop and add a separate discovery URL to this plan and design §5.6 before continuing
+- [ ] **pre-flight (before any code)**: decide the Keycloak address (public HTTPS or HTTP on the tailnet), then on the server run `docker exec svtlvtv_lampa_api curl -fsS <issuer>/.well-known/openid-configuration` and check (a) the returned `issuer` equals `<issuer>` exactly (a realm with a fixed public HTTPS hostname returns `https://…` even over a Tailscale address), (b) every advertised endpoint the API calls (`token_endpoint`, `device_authorization_endpoint`, `jwks_uri`) is reachable from the container, (c) the `authorization_endpoint` users open is reachable from a phone and a browser on the tailnet (the device `verification_uri` only comes from a device authorization response, so it is checked after the client exists — Post-Completion). `go-oidc` uses the advertised endpoints as-is, and `oidc.InsecureIssuerURLContext` only changes which issuer is expected, not those URLs. Keep the shared `svtlv` realm's hostname/issuer unchanged (other Svtlv clients depend on it) unless changing it is separately approved. Record the result in Context; if (a)–(c) cannot all hold, stop and design an explicit transport path in this plan and design §5.6 before continuing
 - [ ] add `Auth` settings (PublicURL, Issuer, ClientID, ClientSecret) to `settings`/`Config`, strict decoding unchanged
 - [ ] resolve `{LAMPA_PUBLIC_URL}`, `{LAMPA_KEYCLOAK_ISSUER}` and `{LAMPA_KEYCLOAK_CLIENT_SECRET}` with explicit `resolve` calls; missing values fail naming the variable, never the value
-- [ ] validate: absolute URLs (https required in Production), non-empty client ID/secret; `String()`/`GoString()` redact the client secret
+- [ ] validate: `PublicURL` an absolute `http`/`https` origin without path, `Issuer` an absolute `http`/`https` URL, non-empty client ID/secret; expose `SecureCookies = PublicURL is https`; `String()`/`GoString()` redact the client secret
 - [ ] update `main_test.go`'s `testSettings` fixture with an `Auth` section and its env maps with the three new variables, so the existing run tests keep passing
 - [ ] write tests for successful load per environment (Test, Production) including redaction
-- [ ] write tests for errors: missing variables, http URL in Production, unknown key
+- [ ] write tests for errors: missing variables, `PublicURL` with a path or another scheme, non-http(s) issuer, unknown key
 - [ ] run `make test` and `make lint` - must pass before next task
 
 ### Task 2: Add OIDC dependencies and cookie sealing
@@ -220,20 +228,18 @@
 - [ ] write tests for tampering, truncation, expiry and wrong purpose
 - [ ] run `make test` and `make lint` - must pass before next task
 
-### Task 3: Add the session table and PostgreSQL session store
+### Task 3: Add the stateless session cookie
 
 **Files:**
-- Create: `backend/migrations/00002_create_lampa_session.sql`
-- Modify: `backend/migrations/migrations_test.go`
-- Modify: `backend/pkg/storage/migrate_test.go`
-- Create: `backend/pkg/auth/sessions.go`
-- Create: `backend/pkg/auth/sessions_test.go`
+- Create: `backend/pkg/auth/session.go`
+- Create: `backend/pkg/auth/session_test.go`
 
-- [ ] add the goose migration for `lampa_session` (design §5.3) with indexes on `user_id` and `expires_at`, plus its down section
-- [ ] implement `Sessions` over the pgx pool: `Create(ctx, Profile) (token string, err)`, `Lookup(ctx, token) (Session, error)` with sliding expiry (30-day idle constant) capped by the 180-day absolute constant and write throttling, `Delete(ctx, token)`, `PurgeExpired(ctx) (int64, error)`
-- [ ] store only SHA-256 of the token; generate tokens with `crypto/rand`; return `ErrNoSession` (wrapping `api.ErrUnauthenticated`) for missing/expired rows and wrapped errors for DB failures
-- [ ] write integration tests with `pgtest`: create/lookup, sliding and absolute cap (injected clock), delete, purge, unknown token
-- [ ] write tests for DB failure paths; add the new file to `migrations_test.go`'s `TestFS` expectations; in `pkg/storage/migrate_test.go` exercise up and down of `00002` with a goose provider against `pgtest` (`storage.Migrate` itself only goes up)
+- [ ] define `Profile{UserID, Name, Email, Picture}` and the session payload `{sub, name, email, picture, created_at, idle_expires_at}`; 30-day idle and 180-day absolute constants
+- [ ] implement `IssueSession(w, profile, now)` (new session: `created_at = now`), `OpenSession(r, now) (Session, error)` (rejects missing, tampered, idle-expired and absolute-expired cookies with `ErrNoSession` wrapping `api.ErrUnauthenticated`) and `RenewSession(w, session, now)` (preserves `created_at`, `idle_expires_at = min(now+30d, created_at+180d)`, `Max-Age` matching); sealed with `CookieSealer` purpose `lampa-session-v1`
+- [ ] bound the serialized cookie (≤ 3 KB after escaping, sealing, base64): length-limit `name`/`email`, drop an over-long `picture`, never truncate a URL
+- [ ] set `Secure` from `SecureCookies` on every cookie (session, `lampa_login`, `lampa_device`); add `ClearSession(w)` with the same attributes and `Max-Age=-1`
+- [ ] write tests (injected clock): issue/open round trip, renewal preserves `created_at`, idle expiry, absolute cap reached through repeated renewals, `Max-Age` values, cookie attributes with `Secure` on for https and off for http
+- [ ] write tests for errors: tampered, truncated, wrong purpose label, oversized profile (picture dropped, cookie within bound), non-UUID `sub` rejected
 - [ ] run `make test` and `make lint` - must pass before next task
 
 ### Task 4: Add the Keycloak OIDC client
@@ -251,7 +257,7 @@
 - [ ] write tests for errors: bad signature, wrong audience/issuer, nonce mismatch, non-UUID `sub`, each device error code; lazy discovery: Keycloak down → error → Keycloak back → next call works
 - [ ] run `make test` and `make lint` - must pass before next task
 
-### Task 5: Add the session Authenticator and 503 for store failures
+### Task 5: Add the session Authenticator and 503 for non-auth failures
 
 **Files:**
 - Create: `backend/pkg/auth/authenticator.go`
@@ -261,12 +267,11 @@
 - Modify: `backend/pkg/api/server.go`
 - Modify: `backend/pkg/api/server_test.go`
 
-- [ ] implement `api.Authenticator` over `Sessions`: read the `lampa_session` cookie, `Lookup`, return the user id; missing/invalid/expired → `api.ErrUnauthenticated`; DB errors wrapped
+- [ ] implement `api.Authenticator` over `OpenSession`: return `sub`; missing/tampered/expired → `api.ErrUnauthenticated`; no DB access
 - [ ] change the `authenticate` middleware: `401 unauthenticated` only for `ErrUnauthenticated`; any other error is logged and answers `503 session_unavailable` (design §5.3)
 - [ ] export `api.WriteError` / `api.WriteJSON` (keep the JSON shape) so `pkg/auth` handlers reuse them (`pkg/auth` already imports `pkg/api`, no cycle)
-- [ ] add cookie helpers `SetSessionCookie(w, token, maxAge)` / `ClearSessionCookie(w)` with the attributes from Technical Details
-- [ ] write tests for valid session, no cookie, malformed cookie, expired session, cookie attributes
-- [ ] write tests for DB failure: the authenticator returns a non-`ErrUnauthenticated` error and the middleware answers `503`; update existing `identity_test.go` expectations
+- [ ] write tests for valid session, no cookie, malformed cookie, expired session
+- [ ] write tests for the middleware: `ErrUnauthenticated` → `401`, any other error from a fake authenticator → `503` and logged; update existing `identity_test.go` expectations
 - [ ] run `make test` and `make lint` - must pass before next task
 
 ### Task 6: Add the auth HTTP handlers
@@ -275,12 +280,12 @@
 - Create: `backend/pkg/auth/handlers.go`
 - Create: `backend/pkg/auth/handlers_test.go`
 
-- [ ] `GET /api/v1/session`: anonymous or profile JSON; on a valid session re-send the cookie with `Max-Age` = remaining lifetime (clamped to the absolute cap); a DB error on an existing cookie → `503 session_unavailable`
+- [ ] `GET /api/v1/session`: anonymous or profile JSON; on a valid session `RenewSession` (the only place that slides the idle expiry); always `200`
 - [ ] `GET /api/v1/auth/login?return=`: validate the return path (local absolute path only, default `/`), seal login state into `lampa_login`, redirect to Keycloak; `GET /api/v1/auth/callback`: open the cookie, check state, exchange, create session, set cookie, clear `lampa_login`, redirect to the return path + `#svtlv-login=ok`; every failure redirects to `/#svtlv-login=failed` (Technical Details), never a JSON page
 - [ ] `POST /api/v1/auth/device/start` and `POST /api/v1/auth/device/poll` per Technical Details; success clears `lampa_device` and sets the session cookie
-- [ ] `POST /api/v1/auth/logout`: delete the row if present, clear the cookie, `204` also when already signed out
-- [ ] write tests (fakes for `Sessions` and `Keycloak` via consumer-side interfaces, moq into `mocks/` if useful) for every success path
-- [ ] write tests for errors: open-redirect attempts (`//evil`, `https://evil`, `\\evil`, `/\evil`), state mismatch, missing/expired flow cookies, Keycloak down at login, each device result, DB failures, `GET /session` DB error → `503` (never `authenticated:false`), `Max-Age` clamped near the absolute cap
+- [ ] `POST /api/v1/auth/logout`: `ClearSession`, `204` also when already signed out
+- [ ] write tests (fake `Keycloak` via a consumer-side interface, moq into `mocks/` if useful) for every success path
+- [ ] write tests for errors: open-redirect attempts (`//evil`, `https://evil`, `\\evil`, `/\evil`), state mismatch, missing/expired flow cookies, Keycloak down at login, each device result, expired/tampered session on `/session` → anonymous `200`, `Max-Age` clamped near the absolute cap
 - [ ] run `make test` and `make lint` - must pass before next task
 
 ### Task 7: Add CSRF protection and mount the auth routes
@@ -300,7 +305,7 @@
 - [ ] write tests that the auth routes are reachable through the chain and keep body limits/deadlines
 - [ ] run `make test` and `make lint` - must pass before next task
 
-### Task 8: Wire authentication, purge and the Keycloak health check in main
+### Task 8: Wire authentication and the Keycloak health check in main
 
 **Files:**
 - Modify: `backend/cmd/lampa-api/main.go`
@@ -309,10 +314,9 @@
 - Modify: `backend/pkg/health/health_test.go`
 
 - [ ] add `health.KeycloakCheck` (advisory) fetching the issuer discovery document with a short timeout
-- [ ] in `main`, build `CookieSealer`, `Sessions`, the lazily-discovering `Keycloak`, the handlers and the `Authenticator`; replace `api.DenyAll{}` and the temporary auth handler
-- [ ] start the hourly purge goroutine bound to the process context and **join it before `pool.Close()`**
+- [ ] in `main`, build `CookieSealer`, the lazily-discovering `Keycloak`, the handlers and the `Authenticator`; replace `api.DenyAll{}` and the temporary auth handler
 - [ ] write tests for the Keycloak check (healthy, unreachable, bad status) and its `Degraded` aggregation in `/health`
-- [ ] write tests for main wiring: API starts with Keycloak down, user-data returns `401` without a session and `200` with one (fake Keycloak), purge goroutine exits before the pool closes
+- [ ] write tests for main wiring: API starts with Keycloak down, user-data returns `401` without a session and `200` with one (fake Keycloak), `/session` and logout work with the DB down
 - [ ] run `make test` and `make lint` - must pass before next task
 
 ### Task 9: Add the Apache /api proxy and update Compose
@@ -333,7 +337,8 @@
 **Files:**
 - Modify: `.github/workflows/deploy-docker.yaml`
 
-- [ ] derive `LAMPA_PUBLIC_URL=https://${LAMPA_DOMAIN}`; read `LAMPA_KEYCLOAK_ISSUER` from `vars.LAMPA_KEYCLOAK_ISSUER` and `LAMPA_KEYCLOAK_CLIENT_SECRET` from `secrets`; add them to the required list, validation (`https://` issuer, non-empty secret) and the server `.env`
+- [ ] read `LAMPA_PUBLIC_URL` and `LAMPA_KEYCLOAK_ISSUER` from `vars.*` and `LAMPA_KEYCLOAK_CLIENT_SECRET` from `secrets`; add them to the required list, validation (`PublicURL` an `http(s)://host[:port]` origin, `http(s)://` issuer, non-empty secret) and the server `.env`
+- [ ] add a pre-deploy guard: when `LAMPA_PUBLIC_URL` is `http://`, require `LAMPA_BIND_ADDRESS` to be set explicitly, to be a Tailscale address (`100.64.0.0/10` or `fd7a:115c:a1e0::/48`) and to equal the `PublicURL` host, and `LAMPA_PORT` to equal its port; reject empty, `0.0.0.0`, LAN and public binds before anything is built or stopped (the workflow currently defaults an unset bind to `0.0.0.0`). Local `devops/.env` development is unaffected
 - [ ] drop the `LAMPA_API_PORT=5800` line from the generated server `.env`
 - [ ] keep the post-strip compose guard passing and the 3-minute `svtlvtv_lampa_api` health wait
 - [ ] verify with `actionlint` (or a dry parse) and by running the validation step's bash locally with good and bad values
@@ -349,7 +354,7 @@
 
 - [ ] add a clearly marked `<!-- svtlv:begin -->…<!-- svtlv:end -->` block to `index.html`: the stylesheet as a `<link>`, the script via `putScript('svtlv/account.js?v=' + cache_version, function () {}, function () {})` with a **no-op `onerror`** (without it `putScript` shows the `.no-network` overlay after 3 failed tries, breaking design §10.1) or a plain `<script>` tag
 - [ ] `account.js` (ES5 IIFE) readiness: poll until `window.Lampa` exists, then `if (window.appready) init(); else Lampa.Listener.follow('app', function (e) { if (e.type == 'ready') init(); })`; `try/catch` around init
-- [ ] gate on `location.protocol === 'https:'` (or `http:` with host `localhost`/`127.0.0.1` for local development, where browsers accept `Secure` cookies); `GET /api/v1/session` via `$.ajax` with timeout on start and every 12 hours (cookie heartbeat); if the first call fails disable itself, later failures (`503`, network) keep the last state
+- [ ] gate on `location.protocol` being `http:` or `https:` (file/app origins stay anonymous); `GET /api/v1/session` via `$.ajax` with timeout on start and every 12 hours (cookie heartbeat); if the first call fails disable itself, later failures (`503`, network) keep the last state
 - [ ] register `SettingsApi.addComponent({component: 'account_lampa', name: 'Account', before: 'interface', icon})` and render signed-out / signed-in rows with Lampa's `settings-param` classes from `Lampa.Settings.listener.follow('open', …)` when `e.name == 'account_lampa'` (screens 2 and 4); en/ru strings inside the file
 - [ ] add a `frontend` job to `tests.yaml` that parses `svtlv/*.js` as ECMAScript 5 with an exactly pinned acorn (e.g. `npx --yes acorn@8.14.0 --ecma5 --silent`); the gate checks syntax only, so review for post-ES5 APIs (`fetch`, `Object.assign`, `Array.prototype.includes`, `Promise` outside Lampa's polyfill) by hand
 - [ ] manual check in a desktop browser: entry appears before Interface with CUB on and with `lampa_settings.account_use = false`; API down → no entry, no console errors from boot; rename `svtlv/account.js` → Lampa boots normally with no overlay
@@ -391,14 +396,14 @@
 - Modify: `AGENTS.md`
 - Modify: `docs/settings-sync-backend-design.md`
 
-- [ ] `backend/README.md`: auth routes, config keys and placeholders, cookie/session behavior, 401 vs 503, local testing with a fake or local Keycloak
+- [ ] `backend/README.md`: auth routes, config keys and placeholders, stateless cookie sessions and their accepted costs, 401 vs 503, local testing with a fake or local Keycloak
 - [ ] `CLAUDE.md` and its mirror `AGENTS.md`: remove "user-data routes answer 401 until Plan 2" and the published API port; update "placeholders resolved only in `Database.Password` and `DataKey`"; document the `svtlv/` add-on rules (ES5 gate, marked `index.html` block, no `app.min.js` edits) and that `svtlv/` is a top-level directory that intentionally ships in `lampa-web` (the `.dockerignore` rule); the `/api` proxy
 - [ ] design: update §3.1's "published on the same host port" sentence; record Plan 2 deviations under §14 (non-secret placeholders `LAMPA_PUBLIC_URL`/`LAMPA_KEYCLOAK_ISSUER`, session lifetimes as constants, any others found)
 - [ ] run `make test` and `make lint` - must pass before next task
 
 ### Task 15: Verify acceptance criteria
 - [ ] verify every Overview item is implemented and design §5, §8, §10.5, §12 match the code
-- [ ] verify edge cases: Keycloak down (API up, `/health` Degraded, existing sessions work, login recovers when it returns), expired session, DB down (`503`, not `401`), open-redirect attempts, CSRF rejections, `account_use=false`, missing add-on file
+- [ ] verify edge cases: Keycloak down (API up, `/health` Degraded, existing sessions work, login recovers when it returns), expired session, DB down (sessions still work; user data `503`), open-redirect attempts, CSRF rejections, `account_use=false`, missing add-on file
 - [ ] run full test suite in WSL: `cd backend && make test && make race && make lint`
 - [ ] run the ES5 check and the compose `config` check
 - [ ] verify coverage ≥ 80% for new backend code (excluding mocks)
@@ -416,38 +421,38 @@
 **Keycloak setup** (design §5.6):
 - create the confidential client `svtlv-lampa` in realm `svtlv`: Standard flow on, OAuth 2.0
   Device Authorization Grant on, direct access grants off, PKCE method `S256` required, redirect
-  URI `https://<lampa-domain>/api/v1/auth/callback`, no web origins
+  URI `http://<tailscale-ip>:8092/api/v1/auth/callback` (= `LAMPA_PUBLIC_URL` + `/api/v1/auth/callback`),
+  no web origins
 - optional `picture` user-attribute mapper for avatars
-- the issuer reachability pre-flight is done in Task 1; re-check after the deploy
+- the issuer pre-flight is done in Task 1; re-check after the deploy. Once the client exists,
+  start one device authorization and confirm its `verification_uri` opens on the phone. With an HTTP (tailnet)
+  issuer, the phone used for the TV device login must be on Tailscale
 
 **Deployment**:
-- add repository variable `LAMPA_KEYCLOAK_ISSUER` and secret `LAMPA_KEYCLOAK_CLIENT_SECRET`
-  (`LAMPA_PUBLIC_URL` is derived from `LAMPA_DOMAIN`)
-- confirm the outer TLS proxy forwards `/api/v1/*`, the `Origin` header and `Set-Cookie`
-  unchanged
+- add repository variables `LAMPA_PUBLIC_URL` (`http://<tailscale-ip>:8092`) and
+  `LAMPA_KEYCLOAK_ISSUER`, and secret `LAMPA_KEYCLOAK_CLIENT_SECRET`
+- confirm the server `.env` binds Lampa to the Tailscale address (`LAMPA_BIND_ADDRESS`), and that
+  `http://<server-public-or-lan-ip>:8092` is unreachable: cookies are not `Secure` over HTTP,
+  so the Lampa port must never be exposed outside the tailnet
 - merge to `svtlvtv`, dispatch the deploy workflow (Production), wait for `svtlvtv_lampa_api`
   healthy; confirm `Svtlv.Monitoring.Service` shows the `keycloak` advisory check
 
 **Manual verification**:
 - desktop browser and phone browser: redirect login, avatar/initials in the header, logout
   confirmation, session survives a browser restart
-- `lampa-app/LAMPA` on the Android TV box, with the saved URL `https://<lampa-domain>`: device
+- `lampa-app/LAMPA` on the Android TV box, with the saved URL exactly `LAMPA_PUBLIC_URL`: device
   login via QR and via typed code, denied and expired codes, logout; **restart the app and
   confirm the session persists — on both the SysView (WebView) and XWalk engines**
 - CUB coexistence: sign in to CUB and Account in either order, switch CUB profile from the
   Account menu, sign out of each independently
 - `lampa_settings.account_use = false`: the Account icon and entry still work, no CUB items
 - a file://-origin shell (if available) shows no Account UI and keeps CUB's icon
-- session expiry: `docker exec svtlvtv_lampa_db psql -U lampa -c "update lampa_session set
-  expires_at = now() - interval '1 minute' where user_id = '<id>'"`, reload, confirm re-login is
-  required
-- security review: cookie attributes in devtools, CSRF rejection with a foreign `Origin`, no
+- session expiry: covered by unit tests with an injected clock; on-device, delete the
+  `lampa_session` cookie in devtools and confirm the add-on shows signed out
+- security review: cookie attributes in devtools (`HttpOnly`, `SameSite=Lax`, no `Secure` on the http URL), CSRF rejection with a foreign `Origin`, no
   Keycloak tokens in storage or logs, HTML in the Keycloak display name shown literally
 
 **Rollback drill**:
 - revert the merge commit on `svtlvtv`, redeploy, confirm Lampa works anonymously and CUB's own
-  icon is back. The `lampa_session` table stays: the vendored goose resolver ignores an applied
-  version higher than the embedded set (`vendor/github.com/pressly/goose/v3/internal/gooseutil/
-  resolve.go`), so the Plan 1 image starts against a database at version 2 — confirm it in the
-  drill. Sessions created before the revert become valid again on a Plan 2 redeploy only because
-  the table is retained; running the `00002` down migration would drop them
+  icon is back. Sessions issued by Plan 2 become valid again if Plan 2 is redeployed before they
+  expire (they are stateless cookies)

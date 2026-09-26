@@ -55,7 +55,7 @@ Receiving frontend updates from the fork/upstream must remain routine.
 
 ```mermaid
 flowchart LR
-    L[Lampa browser or TV] -->|HTTPS| W[Existing lampa-web]
+    L[Lampa browser or TV] -->|HTTP over Tailscale| W[Existing lampa-web]
     W -->|/api| A[New Go API]
     A -->|OIDC| K[Existing Svtlv Keycloak]
     A -->|user documents and torrent membership| P[(PostgreSQL)]
@@ -70,8 +70,8 @@ Components:
   image, added in Plan 2).
 - `lampa-api` handles login, sessions and user-data reads and writes.
 - the existing Svtlv Keycloak identifies the user.
-- PostgreSQL stores the complete user document in JSONB, and the server-side
-  login sessions.
+- PostgreSQL stores the complete user document in JSONB (login sessions are
+  stateless cookies, §5.3).
 - a small ES5 Account add-on (`svtlv/account.js`, Plan 2) adds sign-in,
   sign-out and the header avatar to Lampa through its public API (§10.5).
 - a small ES5 browser adapter (Plan 4) exports data from Lampa, calls the API
@@ -239,22 +239,48 @@ Anonymous use does not require a session.
 
 ### 5.1 Supported clients
 
-Login is supported only where Lampa runs as the HTTPS web deployment, same-origin
-with `/api`: a desktop or phone browser, a TV browser, or a TV app that navigates
-its WebView to that HTTPS address. The Android client in use,
+Login is supported only where Lampa runs as the web deployment at the configured
+public URL, same-origin with `/api`: a desktop or phone browser, a TV browser, or
+a TV app that navigates its WebView to that address. The Android client in use,
 [`lampa-app/LAMPA`](https://github.com/lampa-app/LAMPA), is such an app:
 `MainActivity.onBrowserInitCompleted` calls `browser.loadUrl(LAMPA_URL)` with the
-address typed into its URL dialog, so the document origin is the HTTPS site and
+address typed into its URL dialog, so the document origin is the Lampa site and
 first-party cookies apply (the app has no cookie code; WebView defaults accept
-and persist them). Its saved address must be `https://`, because a `Secure`
-cookie is never set over `http`.
+and persist them). Its saved address must equal the configured public URL.
+
+The production deployment is reachable only inside the Tailscale network, at
+`http://<tailscale-ip>:8092` (decided 2026-09-26). WireGuard encrypts that
+link, but browsers treat it as plain HTTP: a `Secure` cookie is never stored
+there. So every Lampa cookie (session, login and device flow) carries `Secure`
+only when the public URL is `https://`; `HttpOnly` and `SameSite=Lax` always
+apply. This is safe only while the Lampa port is bound to the Tailscale address
+(`LAMPA_BIND_ADDRESS`), never to a public or LAN interface; the deploy
+workflow refuses any other bind for an `http://` public URL.
+
+Keycloak may likewise be reached over HTTP inside the tailnet. The configured
+issuer must equal, character for character, the `iss` Keycloak puts in its
+tokens: a realm with a fixed public HTTPS hostname issues `https://…` even when
+it is fetched over a Tailscale address, so the issuer is taken from the
+discovery document the API container actually reads (Plan 2 pre-flight). The
+backend then calls the token, device and JWKS endpoints exactly as that
+document advertises them, and users open its authorization and verification
+URLs, so all of those must be reachable. The shared `svtlv` realm's
+hostname/issuer is not changed for Lampa: other Svtlv clients depend on it. With
+an HTTP issuer the phone used for the TV device login must be on the tailnet
+too, since the QR code points at Keycloak's verification page.
+
+Moving Lampa to HTTPS later (`tailscale cert` / `tailscale serve`, or a real
+certificate) needs TLS set up, the new `https://…/api/v1/auth/callback`
+registered in Keycloak, `LAMPA_PUBLIC_URL` (and possibly host, port and bind)
+changed, and the address saved on every device updated; the `Secure` flag then
+follows automatically.
 
 Shells whose document runs from `file://` or an app origin and only load
 `app.min.js` remotely (`index.html` `AndroidJS.getLampaURL()` branch, packaged
 Tizen/webOS widgets) are not supported: the Account add-on hides itself when
-`location.protocol` is not `https:` (§10.5), and those shells keep working
-anonymously; so do plain `http:` deployments. Supporting file/app origins
-would need a bearer token stored in Lampa storage,
+`location.protocol` is not `http:`/`https:` (§10.5), and those shells keep
+working anonymously. Supporting file/app origins would need a bearer token
+stored in Lampa storage,
 which every plugin can read; a stolen token returns the decrypted TorrServer,
 Jackett and Prowlarr credentials (`storage.Service.Get` merges
 `encrypted_connections`), so it is deferred to a separate decision with explicit
@@ -301,47 +327,44 @@ key is never used directly for cookies.
 
 ### 5.3 Sessions
 
-Sessions are server-side in PostgreSQL:
+Sessions are stateless: the whole session lives in one sealed cookie and the
+server keeps no session state (decided 2026-09-26; no table, no purge job).
 
-```sql
-create table lampa_session (
-    token_hash   bytea primary key,   -- sha-256 of the cookie value
-    user_id      uuid not null,
-    name         text not null,
-    email        text not null,
-    picture      text not null,
-    created_at   timestamptz not null,
-    last_seen_at timestamptz not null,
-    expires_at   timestamptz not null
-);
-```
-
-- the `lampa_session` cookie holds 32 random bytes (base64url); the database
-  stores only their SHA-256, so a database leak exposes no live session;
-- `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/api`, with a real
-  `Max-Age` renewed while the session is used. A session-only cookie could
-  vanish on an app restart while its row is still valid. `GET /api/v1/session`
-  re-sends the cookie with the remaining lifetime (never past the absolute
-  cap), and the add-on calls it at start and every 12 hours, so a TV left
-  running keeps its cookie as long as the server keeps the row;
-- a database error while resolving an existing cookie answers `503`, never
-  "not signed in"; only a missing, unknown or expired cookie is anonymous;
+- the `lampa_session` cookie is AES-256-GCM sealed JSON
+  `{sub, name, email, picture, created_at, idle_expires_at}`; the key is derived
+  from `LAMPA_API_DATA_KEY` with HKDF-SHA256 and the purpose label
+  `lampa-session-v1`, so the browser can neither read nor forge it;
+- `HttpOnly`, `SameSite=Lax`, `Path=/api`, `Secure` only when the public URL
+  is HTTPS (§5.1), with
+  a real `Max-Age`. A session-only cookie could vanish on an app restart;
 - lifetime is independent of Keycloak: sliding 30-day idle timeout, 180-day
   absolute cap. Re-login with a remote is costly, so TV sessions must last;
+- the idle timeout slides only when the cookie is re-issued: `GET
+  /api/v1/session` first rejects a cookie past `idle_expires_at` or past
+  `created_at + 180 days`, then re-issues it with `created_at` preserved and
+  `idle_expires_at = min(now + 30 days, created_at + 180 days)`, `Max-Age`
+  matching. The add-on calls it at start and every 12 hours, so a TV left
+  running keeps its session; other API requests validate but never re-issue;
 - after the ID token is verified the backend keeps only `sub`, `name`
-  (falling back to `preferred_username`), `email` and the optional `picture`.
-  No access or refresh token is stored. Accepted cost: a user disabled in
-  Keycloak stays signed in until expiry or until their rows are deleted; the
-  profile (including the avatar) refreshes on the next login;
-- `POST /api/v1/auth/logout` deletes the row and clears the cookie. It ends the
+  (falling back to `preferred_username`), `email` and the optional `picture`,
+  all inside the cookie. No access or refresh token is stored. The final
+  `Set-Cookie` value is bounded (≤ 3 KB after JSON escaping, sealing and
+  base64); an over-long `picture` URL is dropped, never truncated, and names
+  are length-limited;
+- `POST /api/v1/auth/logout` clears the cookie on this device. It ends the
   Lampa session only; the Keycloak SSO session is left alone;
-- expired rows are purged periodically by the API;
+- accepted costs of stateless sessions: a copied cookie stays valid until its
+  expiry even after logout; there is no per-device revocation; a user disabled
+  in Keycloak stays signed in until expiry; the profile (including the avatar)
+  refreshes on the next login. Revoking every session at once is a code
+  change that bumps the purpose label (`lampa-session-v2`) — never a rotation of
+  `LAMPA_API_DATA_KEY`, which also seals user data at rest;
+- sessions, `GET /api/v1/session` and logout work with the database down;
 - the `Authenticator` seam (`api.Authenticator`) is implemented in `pkg/auth`:
-  it hashes the cookie, looks up an unexpired row, slides `last_seen_at` /
-  `expires_at` and returns the user id. Database errors are not
-  `ErrUnauthenticated`: the `authenticate` middleware logs them and answers
-  `503 session_unavailable`, never `401`, so a client is not told it is signed
-  out because the session store failed.
+  it opens the cookie, checks both expiries and returns `sub`. A missing,
+  tampered or expired cookie is `ErrUnauthenticated`; the `authenticate`
+  middleware answers `401` for it and `503 session_unavailable` for any other
+  error, so a client is never told it is signed out because a dependency failed.
 
 ### 5.4 Avatar
 
@@ -366,7 +389,8 @@ plugins as untrusted code.
 
 `svtlv-lampa` in the `svtlv` realm: confidential client, Standard flow on,
 "OAuth 2.0 Device Authorization Grant" on, direct access grants off, valid
-redirect URI `https://<lampa-domain>/api/v1/auth/callback`, no web origins
+redirect URI `<public URL>/api/v1/auth/callback` (today
+`http://<tailscale-ip>:8092/api/v1/auth/callback`), no web origins
 (the browser never calls Keycloak with CORS). Optional: a `picture`
 user-attribute mapper (§5.4). The backend is configured with the realm issuer
 URL, the client ID and the client secret (`{LAMPA_KEYCLOAK_CLIENT_SECRET}`).
@@ -478,9 +502,9 @@ Example successful response:
 }
 ```
 
-`GET /api/v1/session` answers `200` for every valid lookup, anonymous or
-signed in, so an anonymous start logs no error; it answers `503` only when the
-session store fails while resolving an existing cookie (§5.3):
+`GET /api/v1/session` always answers `200`, anonymous or signed in, so an
+anonymous start logs no error; a missing, tampered or expired cookie is simply
+anonymous (sessions are stateless, §5.3):
 
 ```json
 { "authenticated": false }
@@ -797,10 +821,7 @@ device only…"), then `POST /api/v1/auth/logout` with `X-Lampa-Csrf: 1`.
 
 Strings (en and ru) live inside the add-on (§10.1). The add-on hides
 everything and leaves CUB's icon visible when `location.protocol` is not
-`https:` (plain `http:` is allowed only for `localhost` development, where
-browsers accept `Secure` cookies) or when `/api/v1/session` is unreachable.
-The session cookie is always `Secure`, so sign-in could not finish on plain
-`http:`.
+`http:`/`https:` or when `/api/v1/session` is unreachable.
 
 ## 11. Failure behavior
 
@@ -818,9 +839,11 @@ The session cookie is always `Secure`, so sign-in could not finish on plain
 
 ## 12. Security
 
-- Serve login and API traffic through HTTPS.
-- Use opaque, server-side sessions in `HttpOnly`, `Secure`, `SameSite=Lax`
-  cookies; store only the SHA-256 of the cookie value (§5.3).
+- Serve login and API traffic through HTTPS, or through HTTP only inside the
+  Tailscale network with the Lampa port bound to the Tailscale address (§5.1);
+  the same holds for Keycloak, whose configured issuer must equal its `iss`.
+- Use sealed, stateless session cookies (`HttpOnly`, `SameSite=Lax`, `Secure`
+  when the public URL is HTTPS) that the browser can neither read nor forge (§5.3).
 - Keep Keycloak access and refresh tokens out of the browser and out of the
   database.
 - Protect modifying requests against CSRF with `X-Lampa-Csrf` plus the
@@ -913,8 +936,8 @@ Deviations recorded while implementing Plan 1
 
 Create the confidential `svtlv-lampa` client inside the existing `svtlv` realm
 (§5.6). Implement both login flows (device grant on TV, Authorization Code +
-PKCE elsewhere), the callback, server-side sessions, session status and logout
-(§5.2–§5.5), replace `api.DenyAll` with the session `Authenticator`, and add the
+PKCE elsewhere), the callback, stateless cookie sessions, session status and
+logout (§5.2–§5.5), replace `api.DenyAll` with the session `Authenticator`, and add the
 `keycloak` advisory health check (§9.1). Add the Apache `/api` proxy to the
 `lampa-web` image and stop publishing the API port. Add the first `svtlv/`
 add-on, `account.js`, with its marked `index.html` include: the Account
