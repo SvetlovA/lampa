@@ -39,53 +39,53 @@ func NewSessionAuthenticator(cookies *Cookies, keycloak *Keycloak, logger api.Lo
 
 // Authenticate returns the user id of the session cookie of r. a missing, tampered or expired
 // cookie fails with ErrNoSession; a session keycloak ended is cleared and fails with
-// ErrSessionRevoked. a keycloak failure keeps the session: auth fails open.
+// ErrSessionRevoked. a refresh re-issues the cookie with created_at and the idle expiry kept.
+// a keycloak failure keeps the session: auth fails open.
 func (a *SessionAuthenticator) Authenticate(w http.ResponseWriter, r *http.Request) (string, error) {
-	s, err := a.session(w, r)
+	now := a.now()
+	s, err := a.cookies.OpenSession(r, now)
 	if err != nil {
 		return "", err
+	}
+	tokens, refreshed, err := revalidate(r.Context(), a.keycloak, a.logger, s, now)
+	if err != nil {
+		a.cookies.ClearSession(w)
+		return "", err
+	}
+	if refreshed {
+		if _, err := a.cookies.ReplaceTokens(w, s, tokens, now); err != nil {
+			// nothing was written: the old cookie and its refresh token stay in use
+			a.logger.Printf("[WARN] refreshed session not written, session kept: %v", err)
+		}
 	}
 	return s.UserID, nil
 }
 
-// session opens and revalidates the session cookie of r: a refresh grant when the refresh token
-// is due (re-issuing the cookie with created_at and the idle expiry kept), introspection
-// otherwise. it returns the session as it now stands in the cookie.
-func (a *SessionAuthenticator) session(w http.ResponseWriter, r *http.Request) (Session, error) {
-	now := a.now()
-	s, err := a.cookies.OpenSession(r, now)
-	if err != nil {
-		return Session{}, err
-	}
-
+// revalidate asks keycloak about the refresh token of s: a refresh grant when it is due,
+// introspection otherwise (design §5.3.1). refreshed reports that tokens are new ones keycloak
+// issued; ErrSessionRevoked means keycloak ended the session. a keycloak failure is logged and
+// keeps the session. it writes no cookie.
+func revalidate(ctx context.Context, kc revalidator, logger api.Logger, s Session, now time.Time) (tokens Tokens, refreshed bool, err error) {
 	if !refreshDue(s, now) {
-		verdict, ierr := a.keycloak.Introspect(r.Context(), s.RefreshToken)
+		verdict, ierr := kc.Introspect(ctx, s.RefreshToken)
 		switch {
 		case ierr != nil:
-			a.logger.Printf("[WARN] session introspection failed, session kept: %v", ierr)
+			logger.Printf("[WARN] session introspection failed, session kept: %v", ierr)
 		case verdict == VerdictRevoked:
-			a.cookies.ClearSession(w)
-			return Session{}, ErrSessionRevoked
+			return Tokens{}, false, ErrSessionRevoked
 		}
-		return s, nil
+		return Tokens{}, false, nil
 	}
 
-	tokens, verdict, err := a.keycloak.Refresh(r.Context(), s.RefreshToken)
+	tokens, verdict, rerr := kc.Refresh(ctx, s.RefreshToken)
 	switch {
-	case err != nil:
-		a.logger.Printf("[WARN] session refresh failed, session kept: %v", err)
-		return s, nil
+	case rerr != nil:
+		logger.Printf("[WARN] session refresh failed, session kept: %v", rerr)
+		return Tokens{}, false, nil
 	case verdict == VerdictRevoked:
-		a.cookies.ClearSession(w)
-		return Session{}, ErrSessionRevoked
+		return Tokens{}, false, ErrSessionRevoked
 	}
-	refreshed, err := a.cookies.ReplaceTokens(w, s, tokens, now)
-	if err != nil {
-		// nothing was written: the old cookie and its refresh token stay in use
-		a.logger.Printf("[WARN] refreshed session not written, session kept: %v", err)
-		return s, nil
-	}
-	return refreshed, nil
+	return tokens, true, nil
 }
 
 // refreshDue reports whether the refresh token of s should be refreshed rather than

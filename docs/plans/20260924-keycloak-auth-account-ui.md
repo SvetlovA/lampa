@@ -93,12 +93,20 @@
   one-slot channel instead of a mutex, so a queued caller still honors its own context during an
   outage. Errors from `oauth2.RetrieveError` are rewritten to status and error code only.
 - **Authenticator as implemented (Task 5)**: `auth.SessionAuthenticator`
-  (`NewSessionAuthenticator(cookies, keycloak, logger)`) with an unexported
-  `session(w, r) (Session, error)` that Task 6's `/session` handler reuses before `RenewSession`
-  (it returns the session as re-issued after a refresh). Revoked sessions fail with
+  (`NewSessionAuthenticator(cookies, keycloak, logger)`). Task 6 replaced its unexported
+  `session(w, r)` with the writer-free `revalidate(ctx, kc, logger, s, now) (Tokens, refreshed,
+  error)`, so `/session` writes a single `Set-Cookie` (refreshed tokens folded into
+  `RenewSession`). Revoked sessions fail with
   `ErrSessionRevoked` (wraps `api.ErrUnauthenticated`) after `ClearSession`. `api.Authenticator` is
   now `Authenticate(w, r)`; `api.WriteError` / `api.WriteJSON` are exported; the middleware answers
   `503 session_unavailable` for any non-`ErrUnauthenticated` error.
+- **Auth handlers as implemented (Task 6)**: `auth.Handlers` (`NewHandlers(cookies, keycloak,
+  logger)`) is one `http.Handler` with its own mux for `SessionRoute`, `LoginRoute`,
+  `CallbackRoute`, `DeviceStartRoute`, `DevicePollRoute` and `LogoutRoute` (exported constants
+  for Task 7's mount); wrong methods answer `405` with `Allow`, HEAD never starts a login or
+  slides a session, unknown `/api/v1/auth/*` paths answer `404` JSON. Keycloak failures at device
+  start/poll answer `503 keycloak_unavailable`; a device session that cannot be written answers
+  `500 login_failed`. `slow_down` adds 5 s to the interval kept in the re-sealed `lampa_device`.
 
 ## Development Approach
 - **testing approach**: Regular (code first, then tests in the same task)
@@ -361,13 +369,13 @@
 - Create: `backend/pkg/auth/handlers.go`
 - Create: `backend/pkg/auth/handlers_test.go`
 
-- [ ] `GET /api/v1/session`: anonymous or profile JSON; revalidate like the `Authenticator` (revoked → clear cookie, anonymous); on a valid session `RenewSession` (the only place that slides the idle expiry), carrying a refreshed token when one was issued; always `200`
-- [ ] `GET /api/v1/auth/login?return=`: validate the return path (local absolute path only, default `/`), seal login state into `lampa_login`, redirect to Keycloak; `GET /api/v1/auth/callback`: open the cookie, check state, exchange, create session, set cookie, clear `lampa_login`, redirect to the return path + `#svtlv-login=ok`; every failure redirects to `/#svtlv-login=failed` (Technical Details), never a JSON page
-- [ ] `POST /api/v1/auth/device/start` and `POST /api/v1/auth/device/poll` per Technical Details; success clears `lampa_device` and sets the session cookie with the returned refresh token
-- [ ] `POST /api/v1/auth/logout`: `ClearSession`, `204` also when already signed out
-- [ ] write tests (fake `Keycloak` via a consumer-side interface, moq into `mocks/` if useful) for every success path
-- [ ] write tests for errors: open-redirect attempts (`//evil`, `https://evil`, `\\evil`, `/\evil`), state mismatch, missing/expired flow cookies, Keycloak down at login, each device result, expired/tampered/revoked session on `/session` → anonymous `200` and a cleared cookie, Keycloak failure on `/session` → still signed in, `Max-Age` clamped near the absolute cap, a login whose cookie cannot fit → failure redirect
-- [ ] run `make test` and `make lint` - must pass before next task
+- [x] `GET /api/v1/session`: anonymous or profile JSON; revalidate like the `Authenticator` (revoked → clear cookie, anonymous); on a valid session `RenewSession` (the only place that slides the idle expiry), carrying a refreshed token when one was issued; always `200`
+- [x] `GET /api/v1/auth/login?return=`: validate the return path (local absolute path only, default `/`), seal login state into `lampa_login`, redirect to Keycloak; `GET /api/v1/auth/callback`: open the cookie, check state, exchange, create session, set cookie, clear `lampa_login`, redirect to the return path + `#svtlv-login=ok`; every failure redirects to `/#svtlv-login=failed` (Technical Details), never a JSON page
+- [x] `POST /api/v1/auth/device/start` and `POST /api/v1/auth/device/poll` per Technical Details; success clears `lampa_device` and sets the session cookie with the returned refresh token
+- [x] `POST /api/v1/auth/logout`: `ClearSession`, `204` also when already signed out
+- [x] write tests (fake `Keycloak` via a consumer-side interface, moq into `mocks/` if useful) for every success path
+- [x] write tests for errors: open-redirect attempts (`//evil`, `https://evil`, `\\evil`, `/\evil`), state mismatch, missing/expired flow cookies, Keycloak down at login, each device result, expired/tampered/revoked session on `/session` → anonymous `200` and a cleared cookie, Keycloak failure on `/session` → still signed in, `Max-Age` clamped near the absolute cap, a login whose cookie cannot fit → failure redirect
+- [x] run `make test` and `make lint` - must pass before next task
 
 ### Task 7: Add CSRF protection and mount the auth routes
 
