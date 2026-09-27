@@ -104,7 +104,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 func (s *Server) routes() http.Handler {
 	methodNotAllowed := func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Allow", "GET, PUT, DELETE")
-		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+userDataPath, s.authenticate(s.getUserData))
@@ -115,7 +115,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("HEAD "+userDataPath, methodNotAllowed)
 	mux.HandleFunc(userDataPath, methodNotAllowed)
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		writeError(w, http.StatusNotFound, "not_found", "not found")
+		WriteError(w, http.StatusNotFound, "not_found", "not found")
 	})
 	return s.accessLog(s.recoverPanic(s.limitBody(s.withDeadline(mux))))
 }
@@ -173,19 +173,19 @@ type errorBody struct {
 	} `json:"error"`
 }
 
-// writeError writes the json error contract. message must be a fixed string, never request input.
-func writeError(w http.ResponseWriter, status int, code, message string) {
+// WriteError writes the json error contract. message must be a fixed string, never request input.
+func WriteError(w http.ResponseWriter, status int, code, message string) {
 	var body errorBody
 	body.Error.Code, body.Error.Message = code, message
-	writeJSON(w, status, body)
+	WriteJSON(w, status, body)
 }
 
 // internalErrorBody is sent when a response cannot be encoded.
 const internalErrorBody = `{"error":{"code":"internal_error","message":"internal error"}}` + "\n"
 
-// writeJSON writes v as a json response without html escaping. v is encoded before the header
+// WriteJSON writes v as a json response without html escaping. v is encoded before the header
 // is sent, so an encoding failure still answers 500 internal_error.
-func writeJSON(w http.ResponseWriter, status int, v any) {
+func WriteJSON(w http.ResponseWriter, status int, v any) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
@@ -256,7 +256,7 @@ func (s *Server) recoverPanic(next http.Handler) http.Handler {
 				panic(p)
 			}
 			s.logger.Printf("[ERROR] panic serving %q %q: %v\n%s", r.Method, r.URL.Path, p, debug.Stack())
-			writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
+			WriteError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		}()
 		next.ServeHTTP(w, r)
 	})

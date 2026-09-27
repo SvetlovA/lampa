@@ -92,6 +92,13 @@
   error). Every method bounds its call (discovery included) to 3 s; discovery waits on a
   one-slot channel instead of a mutex, so a queued caller still honors its own context during an
   outage. Errors from `oauth2.RetrieveError` are rewritten to status and error code only.
+- **Authenticator as implemented (Task 5)**: `auth.SessionAuthenticator`
+  (`NewSessionAuthenticator(cookies, keycloak, logger)`) with an unexported
+  `session(w, r) (Session, error)` that Task 6's `/session` handler reuses before `RenewSession`
+  (it returns the session as re-issued after a refresh). Revoked sessions fail with
+  `ErrSessionRevoked` (wraps `api.ErrUnauthenticated`) after `ClearSession`. `api.Authenticator` is
+  now `Authenticate(w, r)`; `api.WriteError` / `api.WriteJSON` are exported; the middleware answers
+  `503 session_unavailable` for any non-`ErrUnauthenticated` error.
 
 ## Development Approach
 - **testing approach**: Regular (code first, then tests in the same task)
@@ -340,13 +347,13 @@
 - Modify: `backend/pkg/api/server.go`
 - Modify: `backend/pkg/api/server_test.go`
 
-- [ ] change the seam to `Authenticate(w http.ResponseWriter, r *http.Request) (string, error)` (it must clear or re-issue the cookie); update `DenyAll` and the middleware
-- [ ] implement `api.Authenticator` over `OpenSession` plus revalidation (Technical Details): return `sub`; missing/tampered/expired → `api.ErrUnauthenticated`; revoked → clear the cookie and `api.ErrUnauthenticated`; refreshed → `ReplaceTokens`; Keycloak failure → `sub` plus a `[WARN]`; no DB access
-- [ ] change the `authenticate` middleware: `401 unauthenticated` only for `ErrUnauthenticated`; any other error is logged and answers `503 session_unavailable` (design §5.3)
-- [ ] export `api.WriteError` / `api.WriteJSON` (keep the JSON shape) so `pkg/auth` handlers reuse them (`pkg/auth` already imports `pkg/api`, no cycle)
-- [ ] write tests (fake Keycloak via a consumer-side interface, injected clock) for valid session with introspection, refresh due (cookie re-issued, `created_at` kept), no cookie, malformed cookie, expired session, revoked by introspection and by `invalid_grant` (cookie cleared), Keycloak failure (session kept, no cookie change), a refreshed cookie that no longer fits (session kept), a cookie without a refresh token (rejected); two parallel requests with one due cookie against a fake with rotation off: both refresh, both keep `created_at`, and requests with the old and the new refresh token are both accepted
-- [ ] write tests for the middleware: `ErrUnauthenticated` → `401`, any other error from a fake authenticator → `503` and logged; update existing `identity_test.go` expectations
-- [ ] run `make test` and `make lint` - must pass before next task
+- [x] change the seam to `Authenticate(w http.ResponseWriter, r *http.Request) (string, error)` (it must clear or re-issue the cookie); update `DenyAll` and the middleware
+- [x] implement `api.Authenticator` over `OpenSession` plus revalidation (Technical Details): return `sub`; missing/tampered/expired → `api.ErrUnauthenticated`; revoked → clear the cookie and `api.ErrUnauthenticated`; refreshed → `ReplaceTokens`; Keycloak failure → `sub` plus a `[WARN]`; no DB access
+- [x] change the `authenticate` middleware: `401 unauthenticated` only for `ErrUnauthenticated`; any other error is logged and answers `503 session_unavailable` (design §5.3)
+- [x] export `api.WriteError` / `api.WriteJSON` (keep the JSON shape) so `pkg/auth` handlers reuse them (`pkg/auth` already imports `pkg/api`, no cycle)
+- [x] write tests (fake Keycloak via a consumer-side interface, injected clock) for valid session with introspection, refresh due (cookie re-issued, `created_at` kept), no cookie, malformed cookie, expired session, revoked by introspection and by `invalid_grant` (cookie cleared), Keycloak failure (session kept, no cookie change), a refreshed cookie that no longer fits (session kept), a cookie without a refresh token (rejected); two parallel requests with one due cookie against a fake with rotation off: both refresh, both keep `created_at`, and requests with the old and the new refresh token are both accepted
+- [x] write tests for the middleware: `ErrUnauthenticated` → `401`, any other error from a fake authenticator → `503` and logged; update existing `identity_test.go` expectations
+- [x] run `make test` and `make lint` - must pass before next task
 
 ### Task 6: Add the auth HTTP handlers
 

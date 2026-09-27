@@ -21,12 +21,14 @@ import (
 const testUserID = "0b5c8a6e-3f7d-4a51-9c1e-2d4f6a8b0c1d"
 
 // authFunc is a fake Authenticator.
-type authFunc func(r *http.Request) (string, error)
+type authFunc func(w http.ResponseWriter, r *http.Request) (string, error)
 
-func (f authFunc) Authenticate(r *http.Request) (string, error) { return f(r) }
+func (f authFunc) Authenticate(w http.ResponseWriter, r *http.Request) (string, error) {
+	return f(w, r)
+}
 
 func allowAll(id string) Authenticator {
-	return authFunc(func(*http.Request) (string, error) { return id, nil })
+	return authFunc(func(http.ResponseWriter, *http.Request) (string, error) { return id, nil })
 }
 
 // newTestServer creates a Server with a 1 KiB body limit, logging into the returned buffer.
@@ -48,7 +50,7 @@ func decodeError(t *testing.T, resp *http.Response) errorBody {
 }
 
 func TestDenyAll_Authenticate(t *testing.T) {
-	id, err := DenyAll{}.Authenticate(httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+	id, err := DenyAll{}.Authenticate(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", http.NoBody))
 	require.ErrorIs(t, err, ErrUnauthenticated)
 	assert.Empty(t, id)
 }
@@ -71,17 +73,30 @@ func TestServer_authenticate(t *testing.T) {
 		auth    Authenticator
 		status  int
 		logged  string
+		cookie  string // expected Set-Cookie prefix, empty for none
 		reached bool
 	}{
 		{name: "authenticated", auth: allowAll(testUserID), status: http.StatusNoContent, reached: true},
 		{name: "unauthenticated", auth: DenyAll{}, status: http.StatusUnauthorized},
 		{name: "wrapped unauthenticated", status: http.StatusUnauthorized,
-			auth: authFunc(func(*http.Request) (string, error) {
+			auth: authFunc(func(http.ResponseWriter, *http.Request) (string, error) {
 				return "", errors.Join(errors.New("no token"), ErrUnauthenticated)
 			})},
 		{name: "empty id", auth: allowAll(""), status: http.StatusUnauthorized},
-		{name: "provider failure", status: http.StatusUnauthorized, logged: `[WARN] authenticate "GET" "/x": jwks unreachable`,
-			auth: authFunc(func(*http.Request) (string, error) { return "", errors.New("jwks unreachable") })},
+		{name: "provider failure", status: http.StatusServiceUnavailable, logged: `[WARN] authenticate "GET" "/x": jwks unreachable`,
+			auth: authFunc(func(http.ResponseWriter, *http.Request) (string, error) { return "", errors.New("jwks unreachable") })},
+		{name: "provider failure with id", status: http.StatusServiceUnavailable, logged: `[WARN] authenticate "GET" "/x": partial`,
+			auth: authFunc(func(http.ResponseWriter, *http.Request) (string, error) { return testUserID, errors.New("partial") })},
+		{name: "cookie written by authenticator", status: http.StatusNoContent, reached: true, cookie: "lampa_session=new",
+			auth: authFunc(func(w http.ResponseWriter, _ *http.Request) (string, error) {
+				http.SetCookie(w, &http.Cookie{Name: "lampa_session", Value: "new", HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
+				return testUserID, nil
+			})},
+		{name: "cookie cleared on unauthenticated", status: http.StatusUnauthorized, cookie: "lampa_session=;",
+			auth: authFunc(func(w http.ResponseWriter, _ *http.Request) (string, error) {
+				http.SetCookie(w, &http.Cookie{Name: "lampa_session", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
+				return "", ErrUnauthenticated
+			})},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -102,8 +117,16 @@ func TestServer_authenticate(t *testing.T) {
 
 			assert.Equal(t, tc.status, resp.StatusCode)
 			assert.Equal(t, tc.reached, reached)
-			if tc.status == http.StatusUnauthorized {
+			switch tc.status {
+			case http.StatusUnauthorized:
 				assert.Equal(t, "unauthenticated", decodeError(t, resp).Error.Code)
+			case http.StatusServiceUnavailable:
+				assert.Equal(t, "session_unavailable", decodeError(t, resp).Error.Code)
+			}
+			if tc.cookie == "" {
+				assert.Empty(t, resp.Header.Get("Set-Cookie"))
+			} else {
+				assert.True(t, strings.HasPrefix(resp.Header.Get("Set-Cookie"), tc.cookie), resp.Header.Get("Set-Cookie"))
 			}
 			if tc.logged == "" {
 				assert.Empty(t, logs.String())

@@ -155,7 +155,7 @@ func TestServer_AccessLogImplicitStatus(t *testing.T) {
 
 func TestWriteJSON_EncodeFailure(t *testing.T) {
 	w := httptest.NewRecorder()
-	writeJSON(w, http.StatusOK, map[string]any{"bad": func() {}})
+	WriteJSON(w, http.StatusOK, map[string]any{"bad": func() {}})
 	resp := w.Result()
 	defer resp.Body.Close()
 
