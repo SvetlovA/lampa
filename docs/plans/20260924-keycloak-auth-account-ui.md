@@ -65,6 +65,14 @@
   no default port), so the Task 7 Origin check can compare strings. `Issuer` keeps its path and
   any trailing slash as given (go-oidc compares it byte for byte) and rejects user, query and
   fragment.
+- **Cookie sealing as implemented (Task 2)**: `auth.CookieSealer` (`NewCookieSealer(dataKey)`,
+  `Seal(purpose, payload, expiresAt)`, `Open(purpose, value, now, out)`). A key is derived per
+  `Purpose` in the package's `purposes` list (Task 3 adds `lampa-session-v1` there). Value =
+  unpadded base64url of `0x01 | 4-byte SHA-256(label) tag | 12-byte nonce | GCM(JSON {exp, data})`;
+  the cleartext header is authenticated as additional data and exists only so a cross-purpose
+  value fails as `ErrCookieWrongPurpose` instead of `ErrCookieTampered` (the fixed overhead is
+  ~45 bytes before base64, which counts against the 4000-byte cookie bound). All open failures
+  wrap `ErrCookieInvalid`; an authentic payload of the wrong JSON shape does not (caller bug).
 
 ## Development Approach
 - **testing approach**: Regular (code first, then tests in the same task)
@@ -262,12 +270,12 @@
 - Create: `backend/pkg/auth/seal.go`
 - Create: `backend/pkg/auth/seal_test.go`
 
-- [ ] add `github.com/coreos/go-oidc/v3` and `golang.org/x/oauth2`; `go mod tidy && go mod vendor`
-- [ ] create `CookieSealer` (named apart from `storage.Sealer`, both are built in `main`) in `pkg/auth/seal.go`: HKDF-SHA256 (`crypto/hkdf`) key per purpose label (`lampa-login-v1`, `lampa-device-v1`) from the data key, AES-256-GCM seal/open of JSON payloads with an embedded expiry
-- [ ] reject expired, tampered, truncated and cross-purpose values with distinct wrapped errors
-- [ ] write tests for round trip and per-purpose key separation
-- [ ] write tests for tampering, truncation, expiry and wrong purpose
-- [ ] run `make test` and `make lint` - must pass before next task
+- [x] add `github.com/coreos/go-oidc/v3` and `golang.org/x/oauth2`; `go mod tidy && go mod vendor` (added with `go get` + `go mod vendor`: both are still `// indirect` and `go mod tidy` would drop them until Task 4 imports them; run `go mod tidy && go mod vendor` there)
+- [x] create `CookieSealer` (named apart from `storage.Sealer`, both are built in `main`) in `pkg/auth/seal.go`: HKDF-SHA256 (`crypto/hkdf`) key per purpose label (`lampa-login-v1`, `lampa-device-v1`) from the data key, AES-256-GCM seal/open of JSON payloads with an embedded expiry
+- [x] reject expired, tampered, truncated and cross-purpose values with distinct wrapped errors
+- [x] write tests for round trip and per-purpose key separation
+- [x] write tests for tampering, truncation, expiry and wrong purpose
+- [x] run `make test` and `make lint` - must pass before next task
 
 ### Task 3: Add the stateless session cookie
 
@@ -297,6 +305,7 @@
 - [ ] implement `Refresh(ctx, refreshToken) (Tokens, Verdict, error)` with **`golang.org/x/oauth2`** (the Go team's OAuth 2.0 library, outside the standard library; user decision 2026-09-27 to use established libraries): `Config.TokenSource(ctx, &oauth2.Token{RefreshToken: rt, Expiry: <past>}).Token()` so the grant always runs; `Endpoint.AuthStyle` set explicitly to `oauth2.AuthStyleInHeader` (auto-detection would retry with the other style and break the one-call rule); `Revoked` only when `errors.As(err, *oauth2.RetrieveError)` has **both** `Response.StatusCode == 400` and `ErrorCode == "invalid_grant"` (the library also returns `RetrieveError` for 5xx and for a `200` error body); the new refresh token read from the raw `tok.Extra("refresh_token")` and required non-empty (the library falls back to the old token when the response has none); `refresh_expires_in` from `tok.Extra` (a JSON number arrives as `float64`) required finite, positive, integral and ≤ 3650 days; never log `err`, `RetrieveError.Body` or `ErrorDescription` (they embed response data)
 - [ ] implement `Introspect(ctx, refreshToken) (Verdict, error)` as a **narrow `net/http` adapter** (`net/http` is the Go standard library): `golang.org/x/oauth2` does not expose RFC 7662 introspection, and the `github.com/zitadel/oidc/v3` `rs.Introspect` helper sends only `token`; smaller RFC 7662 libraries exist but none established enough to add a dependency for one request — without `token_type_hint=refresh_token` Keycloak 26.5.7 (`TokenIntrospectionEndpoint`) introspects it as an access token. One form `POST` (`token`, `token_type_hint=refresh_token`) to the discovery `introspection_endpoint` with the same Basic client authentication, body read through `io.LimitReader` and rejected over 64 KiB, `active` decoded as `*bool` so a missing, `null`, string or number value is an error (Go's zero `false` must never sign anyone out); `Active`/`Revoked` only for a `200` with a real boolean
 - [ ] shared by both: one `http.Client` reused and passed to `x/oauth2` via the `oauth2.HTTPClient` context value, the overall 3-second timeout from the request context, `CheckRedirect` returning `http.ErrUseLastResponse`, and a transport wrapper that fails any response body over 64 KiB (`x/oauth2`'s own 1 MiB `LimitReader` truncates rather than rejects); every other outcome is an error (Keycloak failure); error messages never contain token values
+- [ ] ➕ run `go mod tidy && go mod vendor` once `go-oidc`/`oauth2` are imported (Task 2 left them `// indirect`, which pulls `go-jose` in)
 - [ ] write tests against an `httptest` fake Keycloak (discovery, JWKS with a test RSA key, device and token endpoints) for the success paths of both flows; the fake **rejects device and token requests without the client secret**, as a confidential client in Keycloak does
 - [ ] write tests for errors: bad signature, wrong audience/issuer, nonce mismatch, non-UUID `sub`, each device error code; lazy discovery: Keycloak down → error → Keycloak back → next call works
 - [ ] write tests for revalidation against the fake (which rejects introspection and refresh requests without client authentication, and records every request so the one-call rule and `token_type_hint` are asserted): introspection `active` true/false, refresh success, `invalid_grant` → `Revoked`; and failures: `5xx`, `401 invalid_client`, a `302` (not followed), timeout, non-JSON body, an over-limit body, `active` missing/`null`/`"false"`/`0`, refresh `200` with an empty or missing refresh token (not silently replaced by the old one), a zero, negative, fractional, non-numeric or overflowing `refresh_expires_in`, a `5xx` or `200` error body from the token endpoint (not `Revoked`), a token response over 64 KiB
