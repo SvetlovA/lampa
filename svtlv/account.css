@@ -43,3 +43,33 @@ body.svtlv-account--active .head .open--profile {
   background-color: rgba(0, 0, 0, 0.15);
   color: #000;
 }
+
+/* device sign-in (screen 3A): Lampa's account-modal-split layout plus the code and status */
+.svtlv-account-device__uri {
+  font-size: 1.3em;
+  color: #D8C39A;
+  margin-bottom: 1em;
+  word-break: break-all;
+}
+.svtlv-account-device__code {
+  margin-bottom: 1em;
+}
+.svtlv-account-device__code > span {
+  display: inline-block;
+  font-size: 2.6em;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  padding: 0.2em 0.4em;
+  margin-right: 0.3em;
+  -webkit-border-radius: 0.2em;
+     -moz-border-radius: 0.2em;
+          border-radius: 0.2em;
+  background-color: rgba(255, 255, 255, 0.06);
+}
+.svtlv-account-device__status {
+  font-size: 1.2em;
+}
+.svtlv-account-device__timer {
+  opacity: 0.6;
+  margin-bottom: 2em;
+}

@@ -1,7 +1,8 @@
 /*
  * Svtlv Account add-on (Plan 2, design §10.5).
  *
- * Identity only: reads GET /api/v1/session and never calls the user-data API.
+ * Identity only: reads GET /api/v1/session, runs sign-in and sign-out, and never
+ * calls the user-data API.
  * ES5 only (old TV browsers), public window.Lampa APIs only, never app.min.js
  * internals. Any failure leaves anonymous Lampa and CUB working as before.
  */
@@ -9,6 +10,11 @@
   'use strict';
 
   var SESSION_URL = '/api/v1/session';
+  var LOGIN_URL = '/api/v1/auth/login';
+  var DEVICE_START_URL = '/api/v1/auth/device/start';
+  var DEVICE_POLL_URL = '/api/v1/auth/device/poll';
+  var LOGOUT_URL = '/api/v1/auth/logout';
+  var DEVICE_INTERVAL = 5; // seconds, when the server sends none
   var REQUEST_TIMEOUT = 15000;
   var HEARTBEAT_INTERVAL = 12 * 60 * 60 * 1000; // keeps the session cookie sliding on a TV left open
   var READY_POLL = 200;
@@ -38,7 +44,22 @@
       signin_to_account: 'Sign in to Account',
       signin_to_cub: 'Sign in to CUB',
       switch_cub_profile: 'Switch CUB profile',
-      account_settings: 'Account settings'
+      account_settings: 'Account settings',
+      cancel: 'Cancel',
+      signin_failed: 'Sign-in failed',
+      signin_unavailable: 'Sign-in is unavailable, try again later',
+      device_title: 'Sign in to Account',
+      device_qr: 'Scan the QR code with your phone',
+      device_text: 'Or open this address on your phone or computer and enter the code:',
+      device_waiting: 'Waiting for confirmation…',
+      device_retrying: 'No connection to the server, retrying…',
+      device_expires: 'The code expires in',
+      device_denied: 'Sign-in was denied',
+      device_expired: 'The code has expired, start again',
+      logout_confirm: 'Log out of Account?',
+      logout_descr: 'CUB and the settings on this device are not affected',
+      logout_failed: 'Could not log out, try again',
+      logged_out: 'Signed out of Account'
     },
     ru: {
       title: 'Аккаунт',
@@ -57,7 +78,22 @@
       signin_to_account: 'Войти в Аккаунт',
       signin_to_cub: 'Войти в CUB',
       switch_cub_profile: 'Сменить профиль CUB',
-      account_settings: 'Настройки аккаунта'
+      account_settings: 'Настройки аккаунта',
+      cancel: 'Отмена',
+      signin_failed: 'Не удалось войти',
+      signin_unavailable: 'Вход сейчас недоступен, попробуйте позже',
+      device_title: 'Вход в Аккаунт',
+      device_qr: 'Отсканируйте QR-код телефоном',
+      device_text: 'Или откройте этот адрес на телефоне или компьютере и введите код:',
+      device_waiting: 'Ожидаем подтверждения…',
+      device_retrying: 'Нет связи с сервером, повторяем…',
+      device_expires: 'Код действует ещё',
+      device_denied: 'Вход отклонён',
+      device_expired: 'Срок действия кода истёк, начните заново',
+      logout_confirm: 'Выйти из Аккаунта?',
+      logout_descr: 'CUB и настройки на этом устройстве не затрагиваются',
+      logout_failed: 'Не удалось выйти, попробуйте ещё раз',
+      logged_out: 'Вы вышли из Аккаунта'
     }
   };
 
@@ -65,6 +101,12 @@
   var user = null;
   // the header icon, created once the add-on activates
   var headIcon = null;
+  // the Account settings page container while it is rendered
+  var settingsBody = null;
+  // the TV device login in progress, if any
+  var device = null;
+  // 'ok' or 'failed' from the #svtlv-login fragment of a redirect login
+  var loginResult = '';
 
   function t(key) {
     var dict = strings[Lampa.Storage.get('language', 'ru')] || strings.en;
@@ -89,12 +131,49 @@
     });
   }
 
+  // POST with the CSRF header; done(status, body) gets status 0 on a network error or timeout
+  function post(url, done) {
+    return $.ajax({
+      url: url,
+      type: 'POST',
+      dataType: 'text',
+      cache: false,
+      timeout: REQUEST_TIMEOUT,
+      headers: {
+        'X-Lampa-Csrf': '1'
+      },
+      complete: function (xhr) {
+        var body = null;
+
+        try {
+          body = xhr.responseText ? JSON.parse(xhr.responseText) : null;
+        } catch (err) {
+          body = null;
+        }
+
+        done(xhr.status || 0, body);
+      }
+    });
+  }
+
+  // Noty, Select and settings rows render HTML
+  function esc(v) {
+    return $('<i>').text(v || '').html();
+  }
+
   function applySession(data) {
     var before = user ? user.id : '';
 
     user = data.authenticated && data.user ? data.user : null;
 
-    if ((user ? user.id : '') != before) updateHeadIcon();
+    if ((user ? user.id : '') != before) {
+      updateHeadIcon();
+      refreshSettings();
+    }
+  }
+
+  function signedInNoty() {
+    Lampa.Noty.show(t('signed_in_as') + ' ' + esc(user.email || user.name));
   }
 
   // read at call time: a build variant may turn CUB off before or after the add-on loads
@@ -173,13 +252,217 @@
     Lampa.Settings.create(COMPONENT);
   }
 
-  // until the sign-in and sign-out flows exist they start from the Account settings page
-  function signIn() {
-    openSettings();
+  // returns focus to the controller active now; the settings rows start flows from there
+  function restoreHere() {
+    var name = Lampa.Controller.enabled().name;
+
+    return function () {
+      Lampa.Controller.toggle(name);
+    };
   }
 
-  function logOut() {
-    openSettings();
+  // re-render the Account page only while it has focus; otherwise it is current when next opened
+  function refreshSettings() {
+    if (!settingsBody || !$('body').hasClass('settings--open')) return;
+    if (!$.contains(document.documentElement, settingsBody[0])) return;
+    if (Lampa.Controller.enabled().name != 'settings_component') return;
+
+    Lampa.Settings.update();
+  }
+
+  // the server accepts only a local path without a fragment and falls back to / otherwise
+  function redirectSignIn() {
+    window.location.href = LOGIN_URL + '?return=' + encodeURIComponent(window.location.pathname + window.location.search);
+  }
+
+  function codeGroups(code) {
+    var parts = String(code).split('-');
+
+    if (parts.length > 1) return parts;
+
+    return String(code).match(/.{1,4}/g) || [String(code)];
+  }
+
+  function pad(n) {
+    return n < 10 ? '0' + n : '' + n;
+  }
+
+  // screen 3A; every server string goes in through .text()
+  function deviceView(start) {
+    var html = $('<div class="account-modal-split svtlv-account-device">' +
+      '<div class="account-modal-split__qr"><div class="account-modal-split__qr-code"></div>' +
+      '<div class="account-modal-split__qr-text"></div></div>' +
+      '<div class="account-modal-split__info"><div class="account-modal-split__title"></div>' +
+      '<div class="account-modal-split__text"></div>' +
+      '<div class="svtlv-account-device__uri"></div><div class="svtlv-account-device__code"></div>' +
+      '<div class="svtlv-account-device__status"></div><div class="svtlv-account-device__timer"></div>' +
+      '<div class="simple-button simple-button--inline selector"></div>' +
+      '</div></div>');
+    var code = html.find('.svtlv-account-device__code');
+
+    html.addClass('layer--' + (Lampa.Platform.mouse() ? 'wheight' : 'height'));
+    html.find('.account-modal-split__qr-text').text(t('device_qr'));
+    html.find('.account-modal-split__title').text(t('device_title'));
+    html.find('.account-modal-split__text').text(t('device_text'));
+    html.find('.svtlv-account-device__uri').text(start.verification_uri);
+    html.find('.svtlv-account-device__status').text(t('device_waiting'));
+    html.find('.simple-button').text(t('cancel'));
+
+    codeGroups(start.user_code).forEach(function (group) {
+      code.append($('<span></span>').text(group));
+    });
+
+    Lampa.Utils.qrcode(start.verification_uri_complete || start.verification_uri, html.find('.account-modal-split__qr-code'), function () {
+      html.find('.account-modal-split__qr').remove();
+    });
+
+    return html;
+  }
+
+  // stops the timers and the request in flight; a late answer sees flow.done and is dropped
+  function finishDevice(flow, message) {
+    if (flow.done) return;
+
+    flow.done = true;
+    clearTimeout(flow.poll);
+    clearInterval(flow.countdown);
+
+    if (flow.xhr) flow.xhr.abort();
+    if (device === flow) device = null;
+    if (flow.modal) Lampa.Modal.close();
+
+    flow.restore();
+
+    if (message) Lampa.Noty.show(message);
+  }
+
+  function tick(flow) {
+    var left = Math.ceil((flow.expiresAt - new Date().getTime()) / 1000);
+
+    if (left <= 0) return finishDevice(flow, t('device_expired'));
+
+    flow.timer.text(t('device_expires') + ' ' + Math.floor(left / 60) + ':' + pad(left % 60));
+  }
+
+  // slow_down arrives as a longer interval from the server; otherwise keep the last one
+  function schedulePoll(flow, seconds) {
+    if (seconds > 0) flow.interval = seconds;
+
+    flow.poll = setTimeout(function () {
+      pollDevice(flow);
+    }, flow.interval * 1000);
+  }
+
+  function pollDevice(flow) {
+    flow.xhr = post(DEVICE_POLL_URL, function (status, body) {
+      if (flow.done) return;
+
+      if (status == 200 && body && body.authenticated === true && body.user) {
+        finishDevice(flow);
+        applySession(body);
+        signedInNoty();
+      } else if (status == 202) {
+        flow.status.text(t('device_waiting'));
+        schedulePoll(flow, body && body.interval);
+      } else if (status == 403) finishDevice(flow, t('device_denied'));
+      else if (status == 410 || status == 400) finishDevice(flow, t('device_expired'));
+      else if (status == 0 || status >= 502) {
+        // Keycloak or the API is briefly unavailable: no answer yet, keep polling until the code expires
+        flow.status.text(t('device_retrying'));
+        schedulePoll(flow);
+      } else finishDevice(flow, t('signin_failed'));
+    });
+  }
+
+  function openDevice(flow, start) {
+    var html = deviceView(start);
+
+    flow.modal = true;
+    flow.interval = start.interval > 0 ? start.interval : DEVICE_INTERVAL;
+    flow.expiresAt = new Date().getTime() + start.expires_in * 1000;
+    flow.status = html.find('.svtlv-account-device__status');
+    flow.timer = html.find('.svtlv-account-device__timer');
+
+    Lampa.Modal.open({
+      title: '',
+      html: html,
+      size: 'full',
+      scroll: {
+        nopadding: true
+      },
+      // the only selector is Cancel
+      onSelect: function () {
+        finishDevice(flow);
+      },
+      onBack: function () {
+        finishDevice(flow);
+      }
+    });
+
+    tick(flow);
+    flow.countdown = setInterval(function () {
+      tick(flow);
+    }, 1000);
+    schedulePoll(flow);
+  }
+
+  function deviceSignIn(restore) {
+    var flow;
+
+    if (device) return;
+
+    flow = device = {
+      restore: restore
+    };
+
+    flow.xhr = post(DEVICE_START_URL, function (status, body) {
+      if (flow.done) return;
+
+      if (status == 200 && body && body.user_code && body.verification_uri && body.expires_in > 0) openDevice(flow, body);
+      else finishDevice(flow, t(status == 0 || status >= 502 ? 'signin_unavailable' : 'signin_failed'));
+    });
+  }
+
+  // TVs get the device grant (screen 3A); phones and computers go through Keycloak's page (3B)
+  function signIn(restore) {
+    if (Lampa.Platform.tv()) deviceSignIn(restore);
+    else redirectSignIn();
+  }
+
+  function signInFromHead() {
+    signIn(backToHead);
+  }
+
+  // 204 also when already signed out; anything else keeps the current state
+  function doLogOut() {
+    post(LOGOUT_URL, function (status) {
+      if (status == 204) {
+        applySession({
+          authenticated: false
+        });
+        Lampa.Noty.show(t('logged_out'));
+      } else Lampa.Noty.show(t('logout_failed'));
+    });
+  }
+
+  // screen 5
+  function logOut(restore) {
+    Lampa.Select.show({
+      title: t('logout_confirm'),
+      items: [{
+        title: t('logout'),
+        subtitle: t('logout_descr'),
+        logout: true
+      }, {
+        title: t('cancel')
+      }],
+      onSelect: function (item) {
+        restore();
+
+        if (item.logout) doLogOut();
+      },
+      onBack: restore
+    });
   }
 
   // the modal returns focus to the controller active when it opened, so leave the closed Select first
@@ -222,7 +505,7 @@
     var items = [{
       title: t('signin_account'),
       subtitle: t('signin_account_descr'),
-      onSelect: signIn
+      onSelect: signInFromHead
     }];
 
     if (cubEnabled()) {
@@ -248,7 +531,7 @@
       // the list loads asynchronously and may fail; only CUB's own Select gets the item
       if (e.active.title != Lampa.Lang.translate('account_profiles')) return;
 
-      e.active.items.push(action('signin_to_account', signIn));
+      e.active.items.push(action('signin_to_account', signInFromHead));
     };
 
     Lampa.Select.listener.follow('preshow', extra);
@@ -271,7 +554,9 @@
     } else if (cubEnabled()) items.push(action('signin_to_cub', cubSignIn));
 
     items.push(action('account_settings', openSettings));
-    items.push(action('logout', logOut));
+    items.push(action('logout', function () {
+      logOut(backToHead);
+    }));
 
     Lampa.Select.show({
       title: t('menu_title'),
@@ -326,16 +611,21 @@
   }
 
   function renderSettings(body) {
+    settingsBody = body;
     body.empty();
     body.append($('<div class="settings-param-text"></div>').text(t('descr')));
 
     if (user) {
       body.append(title(t('user_title')));
       body.append(row(t('signed_in_as'), user.email || user.name).addClass('svtlv-account__user'));
-      body.append(row(t('logout')).addClass('svtlv-account__logout'));
+      body.append(row(t('logout')).addClass('svtlv-account__logout').on('hover:enter', function () {
+        logOut(restoreHere());
+      }));
     } else {
       body.append(title(t('signin_title')));
-      body.append(row(t('signin_button')).addClass('settings-param--button svtlv-account__signin'));
+      body.append(row(t('signin_button')).addClass('settings-param--button svtlv-account__signin').on('hover:enter', function () {
+        signIn(restoreHere());
+      }));
     }
 
     // rows added after the component built its focus handlers; rebind so scroll follows focus
@@ -368,6 +658,13 @@
     createHeadIcon();
   }
 
+  function showLoginResult() {
+    if (loginResult == 'ok' && user) signedInNoty();
+    else if (loginResult) Lampa.Noty.show(t('signin_failed'));
+
+    loginResult = '';
+  }
+
   function heartbeat() {
     // 503 or a network error keeps the last known state: unavailable is not signed out
     fetchSession(applySession, function () {});
@@ -377,8 +674,11 @@
     fetchSession(function (data) {
       applySession(data);
       activate();
+      showLoginResult();
       setInterval(heartbeat, HEARTBEAT_INTERVAL);
     }, function () {
+      if (loginResult) Lampa.Noty.show(t('signin_failed'));
+
       console.log('Account', 'session unavailable, add-on disabled');
     });
   }
@@ -389,6 +689,19 @@
     } catch (err) {
       console.log('Account', 'init failed', err && err.message);
     }
+  }
+
+  // the callback redirect ends in #svtlv-login=ok|failed; drop it so a reload does not repeat the Noty
+  function takeLoginResult() {
+    var match = /^#svtlv-login=(ok|failed)$/.exec(window.location.hash);
+
+    if (!match) return '';
+
+    if (window.history && window.history.replaceState) {
+      window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    }
+
+    return match[1];
   }
 
   function whenReady() {
@@ -410,6 +723,9 @@
 
   if (window.svtlv_account_loaded) return;
   window.svtlv_account_loaded = true;
+
+  // read at load, before Lampa's first pushState rewrites the address and drops the fragment
+  loginResult = takeLoginResult();
 
   whenReady();
 })();

@@ -167,6 +167,18 @@
   `Account.Modal.account()`, because the modal restores the controller active when it opened.
   All four states, `account_use = false`, a hostile name and a `javascript:` picture were
   smoke-tested with a throwaway jsdom harness; the on-device check is still manual.
+- **Sign-in and sign-out as implemented (Task 13)**: every flow takes a `restore` callback
+  (`backToHead` from the header menus, the controller active at the click from the settings
+  rows) that runs when it ends. The device modal keeps one flow object; `finishDevice` clears
+  its timers, aborts the request in flight and drops late answers. Polls follow the server's
+  `interval` (slow_down arrives as a longer one); `0`/`5xx ≥ 502` answers keep polling with a
+  "retrying" status until the local countdown ends; `403` → denied, `410`/`400` → expired, others
+  → failed. The `#svtlv-login` fragment is read when `account.js` loads (before Lampa's first
+  `pushState` drops it) and removed with `history.replaceState`; `ok` with no session shows the
+  failure Noty. `Settings.update()` runs only while the Account page has focus
+  (`settings_component`), so a heartbeat under an open menu never steals focus; the page is
+  current when next opened. Smoke-tested (42 checks) with a throwaway jsdom harness; the
+  browser and TV checks are still manual.
 
 ## Development Approach
 - **testing approach**: Regular (code first, then tests in the same task)
@@ -530,12 +542,12 @@
 - Modify: `svtlv/account.js`
 - Modify: `svtlv/account.css`
 
-- [ ] TV (`Lampa.Platform.tv()`): `POST /api/v1/auth/device/start` with `X-Lampa-Csrf: 1`, open `Lampa.Modal` (`size: 'full'`) using the `account-modal-split` layout: `Lampa.Utils.qrcode(verification_uri_complete, …)`, grouped `user_code`, pending status and countdown (screen 3A); poll at the server interval; handle pending/slow_down/denied/expired; back cancels polling
-- [ ] elsewhere: navigate to `/api/v1/auth/login?return=<current path>` (screen 3B / 6); on start, read and remove a `#svtlv-login=ok|failed` fragment and show the matching Noty
-- [ ] on success: `Lampa.Noty.show` "Signed in as <escaped email>" (Noty renders HTML), refresh icon and settings (`Lampa.Settings.update()` when open)
-- [ ] log out: `Lampa.Select` confirmation (screen 5) → `POST /api/v1/auth/logout` with the CSRF header → refresh; network failure shows a Noty and keeps state
-- [ ] manual check in desktop and phone browsers against a local Keycloak or the Test realm: redirect login, a failed login, logout, CUB untouched; a display name containing HTML is shown literally
-- [ ] run the ES5 check - must pass before next task
+- [x] TV (`Lampa.Platform.tv()`): `POST /api/v1/auth/device/start` with `X-Lampa-Csrf: 1`, open `Lampa.Modal` (`size: 'full'`) using the `account-modal-split` layout: `Lampa.Utils.qrcode(verification_uri_complete, …)`, grouped `user_code`, pending status and countdown (screen 3A); poll at the server interval; handle pending/slow_down/denied/expired; back cancels polling
+- [x] elsewhere: navigate to `/api/v1/auth/login?return=<current path>` (screen 3B / 6); on start, read and remove a `#svtlv-login=ok|failed` fragment and show the matching Noty
+- [x] on success: `Lampa.Noty.show` "Signed in as <escaped email>" (Noty renders HTML), refresh icon and settings (`Lampa.Settings.update()` when open)
+- [x] log out: `Lampa.Select` confirmation (screen 5) → `POST /api/v1/auth/logout` with the CSRF header → refresh; network failure shows a Noty and keeps state
+- [x] ⚠️ manual check (skipped - not automatable: no browser, Keycloak or backend in the automated run; listed under Post-Completion) in desktop and phone browsers against a local Keycloak or the Test realm: redirect login, a failed login, logout, CUB untouched; a display name containing HTML is shown literally
+- [x] run the ES5 check - must pass before next task
 
 ### Task 14: Update backend and repository documentation
 
@@ -594,6 +606,13 @@
   false`; signed-out and signed-in rows match screens 2 and 4
 - API down (stop `svtlvtv_lampa_api`) → no Account entry, no console errors from boot
 - rename `svtlv/account.js` → Lampa boots normally with no `.no-network` overlay
+
+**Sign-in flow check** (Task 13, not run in the automated run), desktop and phone browsers
+against a local Keycloak or the Test realm:
+- redirect login returns to the same page with the "Signed in as" Noty and no `#svtlv-login`
+  left in the address; a failed login (cancel on Keycloak's page) shows "Sign-in failed"
+- logout confirmation, then signed out; CUB untouched throughout; a display name containing
+  HTML is shown literally
 
 **Deployment**:
 - add repository variables `LAMPA_PUBLIC_URL` (`http://<tailscale-ip>:8092`) and
