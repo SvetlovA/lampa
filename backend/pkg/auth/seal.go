@@ -22,12 +22,13 @@ type Purpose string
 
 // cookie purposes.
 const (
-	PurposeLogin  Purpose = "lampa-login-v1"
-	PurposeDevice Purpose = "lampa-device-v1"
+	PurposeLogin   Purpose = "lampa-login-v1"
+	PurposeDevice  Purpose = "lampa-device-v1"
+	PurposeSession Purpose = "lampa-session-v1"
 )
 
 // purposes lists every label a CookieSealer derives a key for.
-var purposes = []Purpose{PurposeLogin, PurposeDevice}
+var purposes = []Purpose{PurposeLogin, PurposeDevice, PurposeSession}
 
 // sealVersion is the first byte of every sealed value.
 const sealVersion byte = 0x01

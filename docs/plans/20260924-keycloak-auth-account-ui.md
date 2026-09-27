@@ -73,6 +73,16 @@
   value fails as `ErrCookieWrongPurpose` instead of `ErrCookieTampered` (the fixed overhead is
   ~45 bytes before base64, which counts against the 4000-byte cookie bound). All open failures
   wrap `ErrCookieInvalid`; an authentic payload of the wrong JSON shape does not (caller bug).
+- **Session cookie as implemented (Task 3)**: `auth.Cookies` (`NewCookies(sealer, secure)`) owns
+  every auth cookie: `IssueSession`/`ReplaceTokens`/`RenewSession` return the `Session` actually
+  written (picture possibly dropped), `OpenSession`, `ClearSession`, and the unexported
+  `newCookie(name, path, value, maxAge)` Task 6 uses for `lampa_login`/`lampa_device` (constants
+  `LoginCookie`/`LoginPath`/`DeviceCookie`/`DevicePath`). Session times are second-precision UTC.
+  Name is cut to 64 runes; an email over 254 bytes is dropped rather than truncated (like the
+  picture). Errors: `ErrNoSession` (wraps `api.ErrUnauthenticated`, and the sealer error),
+  `ErrSessionTooLarge` (nothing written), `ErrInvalidSession` (non-UUID sub, missing refresh token
+  or expiry, or already expired, on write). A session with under a second of idle time left is
+  treated as expired so `Max-Age` is never 0.
 
 ## Development Approach
 - **testing approach**: Regular (code first, then tests in the same task)
@@ -283,13 +293,13 @@
 - Create: `backend/pkg/auth/session.go`
 - Create: `backend/pkg/auth/session_test.go`
 
-- [ ] define `Profile{UserID, Name, Email, Picture}`, `Tokens{RefreshToken, RefreshExpiresAt}` and the session payload `{sub, name, email, picture, created_at, idle_expires_at, refresh_token, refreshed_at, refresh_expires_at}`; 30-day idle and 180-day absolute constants
-- [ ] implement `IssueSession(w, profile, tokens, now)` (new session: `created_at = refreshed_at = now`), `ReplaceTokens(w, session, tokens, now)` (after a refresh: new refresh token, `refreshed_at = now`, `created_at`/`idle_expires_at` unchanged), `OpenSession(r, now) (Session, error)` (rejects missing, tampered, idle-expired, absolute-expired and refresh-token-less cookies with `ErrNoSession` wrapping `api.ErrUnauthenticated`) and `RenewSession(w, session, now)` (preserves `created_at`, `idle_expires_at = min(now+30d, created_at+180d)`, `Max-Age` matching); sealed with `CookieSealer` purpose `lampa-session-v1`
-- [ ] bound the serialized cookie (`Cookie.String()` ≤ 4000 bytes, attributes included) on issue, `ReplaceTokens` and renewal: length-limit `name`/`email`, drop an over-long `picture`, never truncate a URL, never drop or truncate the refresh token (fail with a distinct error instead)
-- [ ] set `Secure` from `SecureCookies` on every cookie (session, `lampa_login`, `lampa_device`); add `ClearSession(w)` with the same attributes and `Max-Age=-1`
-- [ ] write tests (injected clock): issue/open round trip, renewal preserves `created_at`, `ReplaceTokens` keeps both expiries, idle expiry, absolute cap reached through repeated renewals, `Max-Age` values, cookie attributes with `Secure` on for https and off for http
-- [ ] write tests for errors: tampered, truncated, wrong purpose label, oversized profile (picture dropped, cookie within bound with a realistic ~1 KB refresh token), cookie that cannot fit, missing refresh token, non-UUID `sub` rejected
-- [ ] run `make test` and `make lint` - must pass before next task
+- [x] define `Profile{UserID, Name, Email, Picture}`, `Tokens{RefreshToken, RefreshExpiresAt}` and the session payload `{sub, name, email, picture, created_at, idle_expires_at, refresh_token, refreshed_at, refresh_expires_at}`; 30-day idle and 180-day absolute constants
+- [x] implement `IssueSession(w, profile, tokens, now)` (new session: `created_at = refreshed_at = now`), `ReplaceTokens(w, session, tokens, now)` (after a refresh: new refresh token, `refreshed_at = now`, `created_at`/`idle_expires_at` unchanged), `OpenSession(r, now) (Session, error)` (rejects missing, tampered, idle-expired, absolute-expired and refresh-token-less cookies with `ErrNoSession` wrapping `api.ErrUnauthenticated`) and `RenewSession(w, session, now)` (preserves `created_at`, `idle_expires_at = min(now+30d, created_at+180d)`, `Max-Age` matching); sealed with `CookieSealer` purpose `lampa-session-v1`
+- [x] bound the serialized cookie (`Cookie.String()` ≤ 4000 bytes, attributes included) on issue, `ReplaceTokens` and renewal: length-limit `name`/`email`, drop an over-long `picture`, never truncate a URL, never drop or truncate the refresh token (fail with a distinct error instead)
+- [x] set `Secure` from `SecureCookies` on every cookie (session, `lampa_login`, `lampa_device`); add `ClearSession(w)` with the same attributes and `Max-Age=-1`
+- [x] write tests (injected clock): issue/open round trip, renewal preserves `created_at`, `ReplaceTokens` keeps both expiries, idle expiry, absolute cap reached through repeated renewals, `Max-Age` values, cookie attributes with `Secure` on for https and off for http
+- [x] write tests for errors: tampered, truncated, wrong purpose label, oversized profile (picture dropped, cookie within bound with a realistic ~1 KB refresh token), cookie that cannot fit, missing refresh token, non-UUID `sub` rejected
+- [x] run `make test` and `make lint` - must pass before next task
 
 ### Task 4: Add the Keycloak OIDC client
 
