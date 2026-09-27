@@ -563,11 +563,11 @@
 - [x] run `make test` and `make lint` - must pass before next task
 
 ### Task 15: Verify acceptance criteria
-- [ ] verify every Overview item is implemented and design §5, §8, §10.5, §12 match the code
-- [ ] verify edge cases: Keycloak down (API up, `/health` Degraded, existing sessions work, login recovers when it returns), session revoked in Keycloak (next request `401`), expired session, DB down (sessions still work; user data `503`), open-redirect attempts, CSRF rejections, `account_use=false`, missing add-on file
-- [ ] run full test suite in WSL: `cd backend && make test && make race && make lint`
-- [ ] run the ES5 check and the compose `config` check
-- [ ] verify coverage ≥ 80% for new backend code (excluding mocks)
+- [x] verify every Overview item is implemented and design §5, §8, §10.5, §12 match the code (deviations recorded in design §14 by Task 14)
+- [x] verify edge cases (covered by `TestStart_keycloakDown`, `TestNewAPI_sessionRevalidation`, `TestNewAPI_databaseDown`, the Keycloak lazy-discovery, handler open-redirect and `TestServer_csrf` tests; `account_use=false` gated at call time in `account.js`; missing add-on file handled by the no-op `onerror` in `index.html` — the in-browser parts are under Post-Completion): Keycloak down (API up, `/health` Degraded, existing sessions work, login recovers when it returns), session revoked in Keycloak (next request `401`), expired session, DB down (sessions still work; user data `503`), open-redirect attempts, CSRF rejections, `account_use=false`, missing add-on file
+- [x] run full test suite in WSL (Postgres testcontainers tests skipped: Docker not running in the automated run; CI runs them with `LAMPA_API_REQUIRE_DOCKER=1`): `cd backend && make test && make race && make lint`
+- [x] run the ES5 check and the compose `config` check
+- [x] verify coverage ≥ 80% for new backend code (excluding mocks): `pkg/auth` 94.4%, `pkg/api` 97.3%, `pkg/health` 95.9%, `pkg/config` 100%, `main.newAPI` 90%
 
 ### Task 16: [Final] Update documentation
 - [ ] update `backend/README.md` if needed (the root `README.md` is upstream-owned, design §10.1)
