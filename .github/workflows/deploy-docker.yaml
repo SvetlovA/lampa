@@ -77,6 +77,10 @@ jobs:
           LAMPA_PORT: ${{ secrets.LAMPA_PORT }}
           LAMPA_DB_PASSWORD: ${{ secrets.LAMPA_DB_PASSWORD }}
           LAMPA_API_DATA_KEY: ${{ secrets.LAMPA_API_DATA_KEY }}
+          LAMPA_KEYCLOAK_CLIENT_SECRET: ${{ secrets.LAMPA_KEYCLOAK_CLIENT_SECRET }}
+          LAMPA_BIND_ADDRESS: ${{ vars.LAMPA_BIND_ADDRESS }}
+          LAMPA_PUBLIC_URL: ${{ vars.LAMPA_PUBLIC_URL }}
+          LAMPA_KEYCLOAK_ISSUER: ${{ vars.LAMPA_KEYCLOAK_ISSUER }}
           SERVER_HOST: ${{ secrets.SERVER_HOST }}
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
           SSH_USER: ${{ secrets.SSH_USER }}
@@ -84,6 +88,7 @@ jobs:
         run: |
           set -euo pipefail
           required=(DEPLOY_DIR GHCR_PAT LAMPA_DOMAIN LAMPA_DB_PASSWORD LAMPA_API_DATA_KEY
+            LAMPA_KEYCLOAK_CLIENT_SECRET LAMPA_PUBLIC_URL LAMPA_KEYCLOAK_ISSUER
             SERVER_HOST SSH_PRIVATE_KEY SSH_USER TAILSCALE_AUTHKEY)
 
           missing=()
@@ -94,7 +99,7 @@ jobs:
           done
 
           if [ "${#missing[@]}" -ne 0 ]; then
-            printf 'Missing required repository secret: %s\n' "${missing[@]}" >&2
+            printf 'Missing required repository secret or variable: %s\n' "${missing[@]}" >&2
             exit 1
           fi
 
@@ -120,6 +125,60 @@ jobs:
             [ "$(printf '%s' "$LAMPA_API_DATA_KEY" | base64 -d 2>/dev/null | wc -c)" -ne 32 ]; then
             echo "LAMPA_API_DATA_KEY must be standard base64 of exactly 32 bytes (openssl rand -base64 32)" >&2
             exit 1
+          fi
+
+          # the values below land unquoted in the server .env, so only characters compose reads
+          # literally are accepted (no whitespace, quotes, "$" or "#")
+          if [[ ! "$LAMPA_KEYCLOAK_CLIENT_SECRET" =~ ^[A-Za-z0-9._~+/=-]+$ ]]; then
+            echo "LAMPA_KEYCLOAK_CLIENT_SECRET must be the svtlv-lampa client secret from Keycloak" >&2
+            exit 1
+          fi
+
+          # same rule as lampa-api's config: the exact lowercase origin a browser sends, without
+          # the scheme's default port
+          origin_re='^(https?)://([a-z0-9]([-a-z0-9.]*[a-z0-9])?|\[[0-9a-f:.]+\])(:([1-9][0-9]{0,4}))?$'
+          if [[ ! "$LAMPA_PUBLIC_URL" =~ $origin_re ]]; then
+            echo "LAMPA_PUBLIC_URL must be a lowercase origin scheme://host[:port] without a trailing slash" >&2
+            exit 1
+          fi
+          public_scheme="${BASH_REMATCH[1]}"
+          public_host="${BASH_REMATCH[2]}"
+          public_port="${BASH_REMATCH[5]}"
+          if [ -n "$public_port" ] && { (( public_port > 65535 )) ||
+            [ "$public_scheme:$public_port" = "http:80" ] || [ "$public_scheme:$public_port" = "https:443" ]; }; then
+            echo "LAMPA_PUBLIC_URL must have a port 1-65535 other than its scheme's default" >&2
+            exit 1
+          fi
+
+          issuer_re='^https?://([A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(:[0-9]{1,5})?(/[A-Za-z0-9._~%/-]*)?$'
+          if [[ ! "$LAMPA_KEYCLOAK_ISSUER" =~ $issuer_re ]]; then
+            echo "LAMPA_KEYCLOAK_ISSUER must be the http(s):// realm issuer URL, without user, query or fragment" >&2
+            exit 1
+          fi
+
+          # an http origin carries session cookies in clear text, so it must only be reachable
+          # over Tailscale: bind the web port to the tailnet address the origin names, never to
+          # 0.0.0.0 (the default for an unset bind), a LAN or a public address
+          if [ "$public_scheme" = "http" ]; then
+            octet='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
+            tailnet_v4="^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.${octet}\.${octet}$"
+            tailnet_v6='^\[fd7a:115c:a1e0:[0-9a-f:]*\]$'
+            if [ -z "${LAMPA_BIND_ADDRESS:-}" ]; then
+              echo "an http LAMPA_PUBLIC_URL needs the LAMPA_BIND_ADDRESS variable set to its Tailscale address" >&2
+              exit 1
+            fi
+            if [[ ! "$LAMPA_BIND_ADDRESS" =~ $tailnet_v4 && ! "$LAMPA_BIND_ADDRESS" =~ $tailnet_v6 ]]; then
+              echo "an http LAMPA_PUBLIC_URL needs LAMPA_BIND_ADDRESS to be a Tailscale address (100.64.0.0/10, or [fd7a:115c:a1e0::/48] in brackets)" >&2
+              exit 1
+            fi
+            if [ "$LAMPA_BIND_ADDRESS" != "$public_host" ]; then
+              echo "LAMPA_BIND_ADDRESS must equal the LAMPA_PUBLIC_URL host" >&2
+              exit 1
+            fi
+            if [ "$PORT_TO_VALIDATE" != "${public_port:-80}" ]; then
+              echo "LAMPA_PORT must equal the LAMPA_PUBLIC_URL port" >&2
+              exit 1
+            fi
           fi
 
   build:
@@ -275,6 +334,9 @@ jobs:
           LAMPA_PORT: ${{ secrets.LAMPA_PORT }}
           LAMPA_DB_PASSWORD: ${{ secrets.LAMPA_DB_PASSWORD }}
           LAMPA_API_DATA_KEY: ${{ secrets.LAMPA_API_DATA_KEY }}
+          LAMPA_PUBLIC_URL: ${{ vars.LAMPA_PUBLIC_URL }}
+          LAMPA_KEYCLOAK_ISSUER: ${{ vars.LAMPA_KEYCLOAK_ISSUER }}
+          LAMPA_KEYCLOAK_CLIENT_SECRET: ${{ secrets.LAMPA_KEYCLOAK_CLIENT_SECRET }}
         run: |
           set -euo pipefail
           umask 077
@@ -284,9 +346,11 @@ jobs:
             printf 'LAMPA_ENVIRONMENT=%s\n' "$ENVIRONMENT"
             printf 'LAMPA_BIND_ADDRESS=%s\n' "${LAMPA_BIND_ADDRESS:-0.0.0.0}"
             printf 'LAMPA_PORT=%s\n' "${LAMPA_PORT:-8092}"
-            printf 'LAMPA_API_PORT=%s\n' 5800
+            printf 'LAMPA_PUBLIC_URL=%s\n' "$LAMPA_PUBLIC_URL"
+            printf 'LAMPA_KEYCLOAK_ISSUER=%s\n' "$LAMPA_KEYCLOAK_ISSUER"
             printf 'LAMPA_DB_PASSWORD=%s\n' "$LAMPA_DB_PASSWORD"
             printf 'LAMPA_API_DATA_KEY=%s\n' "$LAMPA_API_DATA_KEY"
+            printf 'LAMPA_KEYCLOAK_CLIENT_SECRET=%s\n' "$LAMPA_KEYCLOAK_CLIENT_SECRET"
           } > deploy.env
 
       - name: Copy deployment files to server

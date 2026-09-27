@@ -133,6 +133,15 @@
   `LAMPA_API_PORT` (harmless now; dropped in Task 10). ⚠️ The local-stack proxy checks (curl
   `/api/v1/session` through `:8092`, `:8081` not proxied, API restart without 502) were not run:
   Docker Desktop does not start in the automated run. They are listed under Post-Completion.
+- **Deploy workflow as implemented (Task 10)**: `LAMPA_PUBLIC_URL` / `LAMPA_KEYCLOAK_ISSUER` are
+  repository variables, `LAMPA_KEYCLOAK_CLIENT_SECRET` a secret; all three are required and land in
+  the server `.env`. Validation mirrors lampa-api's origin rule (lowercase, no trailing slash, no
+  default port) and, since the values are written unquoted, restricts the issuer and the secret to
+  characters compose reads literally (no whitespace, quotes, `$`, `#`). For an `http://` origin the
+  `LAMPA_BIND_ADDRESS` variable must equal the origin host literally, so an IPv6 tailnet address is
+  written in brackets in both (`[fd7a:115c:a1e0::…]`, which the compose port string needs anyway);
+  an `https://` origin keeps the old `0.0.0.0` default. Checked with actionlint (shellcheck) and a
+  36-case local harness of the step's bash; there is no committed test for workflow bash.
 
 ## Development Approach
 - **testing approach**: Regular (code first, then tests in the same task)
@@ -452,12 +461,12 @@
 **Files:**
 - Modify: `.github/workflows/deploy-docker.yaml`
 
-- [ ] read `LAMPA_PUBLIC_URL` and `LAMPA_KEYCLOAK_ISSUER` from `vars.*` and `LAMPA_KEYCLOAK_CLIENT_SECRET` from `secrets`; add them to the required list, validation (`PublicURL` an `http(s)://host[:port]` origin, `http(s)://` issuer, non-empty secret) and the server `.env`
-- [ ] add a pre-deploy guard: when `LAMPA_PUBLIC_URL` is `http://`, require `LAMPA_BIND_ADDRESS` to be set explicitly, to be a Tailscale address (`100.64.0.0/10` or `fd7a:115c:a1e0::/48`) and to equal the `PublicURL` host, and `LAMPA_PORT` to equal its port; reject empty, `0.0.0.0`, LAN and public binds before anything is built or stopped (the workflow currently defaults an unset bind to `0.0.0.0`). Local `devops/.env` development is unaffected
-- [ ] drop the `LAMPA_API_PORT=5800` line from the generated server `.env`
-- [ ] keep the post-strip compose guard passing and the 3-minute `svtlvtv_lampa_api` health wait
-- [ ] verify with `actionlint` (or a dry parse) and by running the validation step's bash locally with good and bad values
-- [ ] run the compose `config` check again - must pass before next task
+- [x] read `LAMPA_PUBLIC_URL` and `LAMPA_KEYCLOAK_ISSUER` from `vars.*` and `LAMPA_KEYCLOAK_CLIENT_SECRET` from `secrets`; add them to the required list, validation (`PublicURL` an `http(s)://host[:port]` origin, `http(s)://` issuer, non-empty secret) and the server `.env`
+- [x] add a pre-deploy guard: when `LAMPA_PUBLIC_URL` is `http://`, require `LAMPA_BIND_ADDRESS` to be set explicitly, to be a Tailscale address (`100.64.0.0/10` or `fd7a:115c:a1e0::/48`) and to equal the `PublicURL` host, and `LAMPA_PORT` to equal its port; reject empty, `0.0.0.0`, LAN and public binds before anything is built or stopped (the workflow currently defaults an unset bind to `0.0.0.0`). Local `devops/.env` development is unaffected
+- [x] drop the `LAMPA_API_PORT=5800` line from the generated server `.env`
+- [x] keep the post-strip compose guard passing and the 3-minute `svtlvtv_lampa_api` health wait
+- [x] verify with `actionlint` (or a dry parse) and by running the validation step's bash locally with good and bad values
+- [x] run the compose `config` check again - must pass before next task
 
 ### Task 11: Add the add-on loader seam, settings entry and ES5 CI gate
 
