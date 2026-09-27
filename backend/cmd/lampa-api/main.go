@@ -106,8 +106,12 @@ func start(ctx context.Context, cfg config.Config, logger *log.Logger, listen li
 	if err != nil {
 		return fmt.Errorf("create service: %w", err)
 	}
-	// user-data routes deny everything until keycloak authentication arrives in plan 2
-	apiSrv, err := api.NewServer(api.ServerConfig{Addr: cfg.Listen, MaxBodyBytes: cfg.MaxBodyBytes}, svc, api.DenyAll{}, logger)
+	// user-data routes deny everything and the auth routes answer 404 until task 8 wires keycloak
+	apiCfg := api.ServerConfig{Addr: cfg.Listen, MaxBodyBytes: cfg.MaxBodyBytes, PublicOrigin: cfg.Auth.PublicURL}
+	notFound := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		api.WriteError(w, http.StatusNotFound, "not_found", "not found")
+	})
+	apiSrv, err := api.NewServer(apiCfg, svc, api.DenyAll{}, notFound, logger)
 	if err != nil {
 		return fmt.Errorf("create api server: %w", err)
 	}

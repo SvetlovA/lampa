@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -31,13 +32,37 @@ func allowAll(id string) Authenticator {
 	return authFunc(func(http.ResponseWriter, *http.Request) (string, error) { return id, nil })
 }
 
+// testOrigin is the public origin of test servers.
+const testOrigin = "http://100.64.0.1:8092"
+
+// notFoundRoutes stands in for the auth handler where the auth routes are not under test.
+func notFoundRoutes() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		WriteError(w, http.StatusNotFound, "not_found", "not found")
+	})
+}
+
 // newTestServer creates a Server with a 1 KiB body limit, logging into the returned buffer.
 func newTestServer(t *testing.T, svc UserData, auth Authenticator) (*Server, *bytes.Buffer) {
 	t.Helper()
+	return newTestServerWithRoutes(t, svc, auth, notFoundRoutes())
+}
+
+// newTestServerWithRoutes is newTestServer with the given auth routes.
+func newTestServerWithRoutes(t *testing.T, svc UserData, auth Authenticator, authRoutes http.Handler) (*Server, *bytes.Buffer) {
+	t.Helper()
 	var buf bytes.Buffer
-	srv, err := NewServer(ServerConfig{Addr: "127.0.0.1:0", MaxBodyBytes: 1 << 10}, svc, auth, log.New(&buf, "", 0))
+	cfg := ServerConfig{Addr: "127.0.0.1:0", MaxBodyBytes: 1 << 10, PublicOrigin: testOrigin}
+	srv, err := NewServer(cfg, svc, auth, authRoutes, log.New(&buf, "", 0))
 	require.NoError(t, err)
 	return srv, &buf
+}
+
+// newRequest is httptest.NewRequest with the csrf header the add-on sends on every request.
+func newRequest(method, target string, body io.Reader) *http.Request {
+	req := httptest.NewRequest(method, target, body)
+	req.Header.Set(CSRFHeader, "1")
+	return req
 }
 
 // decodeError reads the json error contract of resp.
@@ -142,7 +167,7 @@ func TestServer_DenyAllRoutes(t *testing.T) {
 	srv, _ := newTestServer(t, svc, DenyAll{})
 	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
 		t.Run(method, func(t *testing.T) {
-			req := httptest.NewRequest(method, userDataPath, strings.NewReader(`{"schema_version":1,"data":{}}`))
+			req := newRequest(method, userDataPath, strings.NewReader(`{"schema_version":1,"data":{}}`))
 			req.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()
 			srv.Handler().ServeHTTP(w, req)
@@ -168,7 +193,7 @@ func TestServer_UserIDFromRequestIgnored(t *testing.T) {
 	srv, _ := newTestServer(t, svc, allowAll(testUserID))
 
 	body := `{"schema_version":1,"user_id":"` + otherID + `","data":{}}`
-	req := httptest.NewRequest(http.MethodPut, userDataPath+"?user_id="+otherID, strings.NewReader(body))
+	req := newRequest(http.MethodPut, userDataPath+"?user_id="+otherID, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-User-Id", otherID)
 	req.AddCookie(&http.Cookie{Name: "user_id", Value: otherID, Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode})

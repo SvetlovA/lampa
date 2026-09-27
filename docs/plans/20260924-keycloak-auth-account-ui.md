@@ -107,6 +107,13 @@
   slides a session, unknown `/api/v1/auth/*` paths answer `404` JSON. Keycloak failures at device
   start/poll answer `503 keycloak_unavailable`; a device session that cannot be written answers
   `500 login_failed`. `slow_down` adds 5 s to the interval kept in the re-sealed `lampa_device`.
+- **CSRF and mount as implemented (Task 7)**: `api.NewServer(cfg, svc, auth, authRoutes, logger)`
+  with `ServerConfig.PublicOrigin` (required). `csrf` sits innermost in the chain, before routing,
+  so a rejected request never reaches a handler or the authenticator; it requires
+  `api.CSRFHeader` (`X-Lampa-Csrf`) equal to `1` and at most one `Origin`, equal to the public
+  origin when present. `authRoutes` is mounted on `/api/v1/auth/` and `/api/v1/session`; the bare
+  `/api/v1/auth` answers JSON `404` instead of ServeMux's plain-text redirect. `main` passes
+  `cfg.Auth.PublicURL` and a JSON `404` handler until Task 8.
 
 ## Development Approach
 - **testing approach**: Regular (code first, then tests in the same task)
@@ -386,13 +393,13 @@
 - Modify: `backend/pkg/api/server_test.go`, `backend/pkg/api/userdata_test.go`, `backend/pkg/api/flow_test.go`
 - Modify: `backend/cmd/lampa-api/main.go`, `backend/cmd/lampa-api/main_test.go`
 
-- [ ] add middleware: for non-GET/HEAD/OPTIONS require `X-Lampa-Csrf: 1` and reject a present `Origin` differing from `ServerConfig.PublicOrigin` (`403 csrf_rejected`); absent `Origin` alone is allowed; no CORS headers are ever emitted
-- [ ] extend `ServerConfig`/`NewServer` to accept the public origin and an auth `http.Handler`, mounted for `/api/v1/auth/` and `/api/v1/session` inside the existing middleware chain
-- [ ] keep `main` compiling and green: pass `cfg.Auth.PublicURL` and a temporary not-found auth handler (replaced in Task 8)
-- [ ] update existing user-data tests to send the header
-- [ ] write tests for accepted requests (header present, same origin, no origin) and rejections (no header, wrong value, foreign origin, `Origin: null`)
-- [ ] write tests that the auth routes are reachable through the chain and keep body limits/deadlines
-- [ ] run `make test` and `make lint` - must pass before next task
+- [x] add middleware: for non-GET/HEAD/OPTIONS require `X-Lampa-Csrf: 1` and reject a present `Origin` differing from `ServerConfig.PublicOrigin` (`403 csrf_rejected`); absent `Origin` alone is allowed; no CORS headers are ever emitted
+- [x] extend `ServerConfig`/`NewServer` to accept the public origin and an auth `http.Handler`, mounted for `/api/v1/auth/` and `/api/v1/session` inside the existing middleware chain
+- [x] keep `main` compiling and green: pass `cfg.Auth.PublicURL` and a temporary not-found auth handler (replaced in Task 8)
+- [x] update existing user-data tests to send the header
+- [x] write tests for accepted requests (header present, same origin, no origin) and rejections (no header, wrong value, foreign origin, `Origin: null`)
+- [x] write tests that the auth routes are reachable through the chain and keep body limits/deadlines
+- [x] run `make test` and `make lint` - must pass before next task
 
 ### Task 8: Wire authentication and the Keycloak health check in main
 

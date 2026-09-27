@@ -79,7 +79,10 @@ func fakeListen(lns map[string]net.Listener, errs map[string]error) listenFunc {
 }
 
 func testConfig(dsn string) config.Config {
-	return config.Config{Listen: "api", HealthListen: "health", DBDSN: dsn, DataKey: [config.DataKeySize]byte{7}, MaxBodyBytes: 1 << 20}
+	return config.Config{
+		Listen: "api", HealthListen: "health", DBDSN: dsn, DataKey: [config.DataKeySize]byte{7}, MaxBodyBytes: 1 << 20,
+		Auth: config.Auth{PublicURL: "http://100.64.0.1:8092", Issuer: "http://100.64.0.2:8080/realms/svtlv", ClientID: "svtlv-lampa", ClientSecret: "s"},
+	}
 }
 
 // testSettings returns an appsettings.json with the given database and listeners; the password
@@ -296,6 +299,9 @@ func TestStart_servesUntilCanceled(t *testing.T) {
 	code, body = get(t, "http://"+apiLn.Addr().String()+"/api/v1/user-data")
 	assert.Equal(t, http.StatusUnauthorized, code)
 	assert.Contains(t, string(body), `"unauthenticated"`)
+
+	code, _ = get(t, "http://"+apiLn.Addr().String()+"/api/v1/session")
+	assert.Equal(t, http.StatusNotFound, code, "auth routes are mounted but not wired yet")
 
 	cancel()
 	require.NoError(t, requireDone(t, done))

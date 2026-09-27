@@ -73,7 +73,7 @@ func newFlowServer(t *testing.T) (*Server, *fakeStore) {
 	svc, err := storage.NewService(store, sealer, limits, logger)
 	require.NoError(t, err)
 	auth := authFunc(func(_ http.ResponseWriter, r *http.Request) (string, error) { return r.Header.Get("X-Test-User"), nil })
-	srv, err := NewServer(ServerConfig{MaxBodyBytes: limits.MaxBodyBytes}, svc, auth, logger)
+	srv, err := NewServer(ServerConfig{MaxBodyBytes: limits.MaxBodyBytes, PublicOrigin: testOrigin}, svc, auth, notFoundRoutes(), logger)
 	require.NoError(t, err)
 	return srv, store
 }
@@ -81,7 +81,7 @@ func newFlowServer(t *testing.T) (*Server, *fakeStore) {
 // call sends one request as user and returns the status and body.
 func call(t *testing.T, srv *Server, method, user, body string) (int, string) {
 	t.Helper()
-	req := httptest.NewRequest(method, userDataPath, strings.NewReader(body))
+	req := newRequest(method, userDataPath, strings.NewReader(body))
 	req.Header.Set("X-Test-User", user)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
