@@ -142,6 +142,18 @@
   written in brackets in both (`[fd7a:115c:a1e0::…]`, which the compose port string needs anyway);
   an `https://` origin keeps the old `0.0.0.0` default. Checked with actionlint (shellcheck) and a
   36-case local harness of the step's bash; there is no committed test for workflow bash.
+- **Add-on seam as implemented (Task 11)**: one marked `<!-- svtlv:begin -->…<!-- svtlv:end -->`
+  block at the end of `index.html` `<body>` appends the `account.css` `<link>` (with
+  `?v=cache_version`, so no second block in `<head>`) and `putScript`s `account.js` with a no-op
+  `onerror`. `account.js` sets `window.svtlv_account_loaded` against double loads; it replaces
+  the component's template with `<div class="svtlv-account"></div>` so the `open` handler has a
+  stable container, then sends `Lampa.Params.listener` `update_scroll` so scroll follows focus
+  on the rows it adds after the component was built. A `/session` answer counts only with a
+  boolean `authenticated`. The rows carry `svtlv-account__signin` / `__user` / `__logout` classes
+  for Task 13 to bind; they have no action yet. `account.css` rules must stay scoped to
+  add-on-owned classes because the file loads even when the add-on disables itself. The stubbed
+  boot logic (protocol gate, readiness poll, first-call failure) was smoke-tested with a
+  throwaway Node harness; the browser check is still manual.
 
 ## Development Approach
 - **testing approach**: Regular (code first, then tests in the same task)
@@ -476,13 +488,13 @@
 - Modify: `index.html`
 - Modify: `.github/workflows/tests.yaml`
 
-- [ ] add a clearly marked `<!-- svtlv:begin -->…<!-- svtlv:end -->` block to `index.html`: the stylesheet as a `<link>`, the script via `putScript('svtlv/account.js?v=' + cache_version, function () {}, function () {})` with a **no-op `onerror`** (without it `putScript` shows the `.no-network` overlay after 3 failed tries, breaking design §10.1) or a plain `<script>` tag
-- [ ] `account.js` (ES5 IIFE) readiness: poll until `window.Lampa` exists, then `if (window.appready) init(); else Lampa.Listener.follow('app', function (e) { if (e.type == 'ready') init(); })`; `try/catch` around init
-- [ ] gate on `location.protocol` being `http:` or `https:` (file/app origins stay anonymous); `GET /api/v1/session` via `$.ajax` with timeout on start and every 12 hours (cookie heartbeat); if the first call fails disable itself, later failures (`503`, network) keep the last state
-- [ ] register `SettingsApi.addComponent({component: 'account_lampa', name: 'Account', before: 'interface', icon})` and render signed-out / signed-in rows with Lampa's `settings-param` classes from `Lampa.Settings.listener.follow('open', …)` when `e.name == 'account_lampa'` (screens 2 and 4); en/ru strings inside the file
-- [ ] add a `frontend` job to `tests.yaml` that parses `svtlv/*.js` as ECMAScript 5 with an exactly pinned acorn (e.g. `npx --yes acorn@8.14.0 --ecma5 --silent`); the gate checks syntax only, so review for post-ES5 APIs (`fetch`, `Object.assign`, `Array.prototype.includes`, `Promise` outside Lampa's polyfill) by hand
-- [ ] manual check in a desktop browser: entry appears before Interface with CUB on and with `lampa_settings.account_use = false`; API down → no entry, no console errors from boot; rename `svtlv/account.js` → Lampa boots normally with no overlay
-- [ ] run the ES5 check locally - must pass before next task
+- [x] add a clearly marked `<!-- svtlv:begin -->…<!-- svtlv:end -->` block to `index.html`: the stylesheet as a `<link>`, the script via `putScript('svtlv/account.js?v=' + cache_version, function () {}, function () {})` with a **no-op `onerror`** (without it `putScript` shows the `.no-network` overlay after 3 failed tries, breaking design §10.1) or a plain `<script>` tag
+- [x] `account.js` (ES5 IIFE) readiness: poll until `window.Lampa` exists, then `if (window.appready) init(); else Lampa.Listener.follow('app', function (e) { if (e.type == 'ready') init(); })`; `try/catch` around init
+- [x] gate on `location.protocol` being `http:` or `https:` (file/app origins stay anonymous); `GET /api/v1/session` via `$.ajax` with timeout on start and every 12 hours (cookie heartbeat); if the first call fails disable itself, later failures (`503`, network) keep the last state
+- [x] register `SettingsApi.addComponent({component: 'account_lampa', name: 'Account', before: 'interface', icon})` and render signed-out / signed-in rows with Lampa's `settings-param` classes from `Lampa.Settings.listener.follow('open', …)` when `e.name == 'account_lampa'` (screens 2 and 4); en/ru strings inside the file
+- [x] add a `frontend` job to `tests.yaml` that parses `svtlv/*.js` as ECMAScript 5 with an exactly pinned acorn (e.g. `npx --yes acorn@8.14.0 --ecma5 --silent`); the gate checks syntax only, so review for post-ES5 APIs (`fetch`, `Object.assign`, `Array.prototype.includes`, `Promise` outside Lampa's polyfill) by hand
+- [x] ⚠️ manual check (skipped - not automatable: no browser/backend in the automated run; listed under Post-Completion) in a desktop browser: entry appears before Interface with CUB on and with `lampa_settings.account_use = false`; API down → no entry, no console errors from boot; rename `svtlv/account.js` → Lampa boots normally with no overlay
+- [x] run the ES5 check locally - must pass before next task
 
 ### Task 12: Add the header avatar icon and its menu
 
@@ -563,6 +575,12 @@
   proxy; `curl http://localhost:8092/health` is Lampa's static 404, not the API health;
   `docker restart svtlvtv_lampa_api`, wait until healthy, and the same `/session` curl still
   answers `200` (no stale backend IP)
+
+**Add-on boot check** (Task 11, not run in the automated run), desktop browser:
+- the Account entry appears before Interface with CUB on and with `lampa_settings.account_use =
+  false`; signed-out and signed-in rows match screens 2 and 4
+- API down (stop `svtlvtv_lampa_api`) → no Account entry, no console errors from boot
+- rename `svtlv/account.js` → Lampa boots normally with no `.no-network` overlay
 
 **Deployment**:
 - add repository variables `LAMPA_PUBLIC_URL` (`http://<tailscale-ip>:8092`) and
