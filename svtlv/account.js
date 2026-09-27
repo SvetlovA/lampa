@@ -28,7 +28,17 @@
       signin_button: 'Sign in',
       user_title: 'Account',
       signed_in_as: 'Signed in as',
-      logout: 'Log out'
+      logout: 'Log out',
+      menu_title: 'Profile',
+      signin_menu: 'Sign in',
+      signin_account: 'Account',
+      signin_account_descr: 'Svtlv account',
+      signin_cub: 'CUB',
+      signin_cub_descr: 'Bookmarks and history sync',
+      signin_to_account: 'Sign in to Account',
+      signin_to_cub: 'Sign in to CUB',
+      switch_cub_profile: 'Switch CUB profile',
+      account_settings: 'Account settings'
     },
     ru: {
       title: 'Аккаунт',
@@ -37,12 +47,24 @@
       signin_button: 'Войти',
       user_title: 'Аккаунт',
       signed_in_as: 'Вы вошли как',
-      logout: 'Выйти'
+      logout: 'Выйти',
+      menu_title: 'Профиль',
+      signin_menu: 'Войти',
+      signin_account: 'Аккаунт',
+      signin_account_descr: 'Аккаунт Svtlv',
+      signin_cub: 'CUB',
+      signin_cub_descr: 'Синхронизация закладок и истории',
+      signin_to_account: 'Войти в Аккаунт',
+      signin_to_cub: 'Войти в CUB',
+      switch_cub_profile: 'Сменить профиль CUB',
+      account_settings: 'Настройки аккаунта'
     }
   };
 
   // null while signed out; {id, name, email, picture} from /api/v1/session otherwise
   var user = null;
+  // the header icon, created once the add-on activates
+  var headIcon = null;
 
   function t(key) {
     var dict = strings[Lampa.Storage.get('language', 'ru')] || strings.en;
@@ -68,7 +90,220 @@
   }
 
   function applySession(data) {
+    var before = user ? user.id : '';
+
     user = data.authenticated && data.user ? data.user : null;
+
+    if ((user ? user.id : '') != before) updateHeadIcon();
+  }
+
+  // read at call time: a build variant may turn CUB off before or after the add-on loads
+  function cubEnabled() {
+    return !!window.lampa_settings.account_use;
+  }
+
+  // CUB state is read only through Permit; its access already implies account_use
+  function cubSignedIn() {
+    return cubEnabled() && !!Lampa.Account.Permit.access;
+  }
+
+  function initials(u) {
+    var words = $.trim(u.name || u.email || '').split(/\s+/);
+    var letters = words[0].charAt(0) + (words.length > 1 ? words[1].charAt(0) : '');
+
+    return letters.toUpperCase();
+  }
+
+  function plainIcon() {
+    return $(Lampa.Template.string('icon_profile'));
+  }
+
+  // src is set only through img.src, never through HTML, so a URL cannot inject markup
+  function imageIcon(src, fallback) {
+    var img = document.createElement('img');
+
+    img.onerror = function () {
+      img.onerror = null;
+      $(img).replaceWith(fallback());
+    };
+    img.src = src;
+
+    return $(img);
+  }
+
+  function initialsIcon(u) {
+    var letters = initials(u);
+
+    if (!letters) return plainIcon();
+
+    return $('<div class="svtlv-account__initials"></div>').text(letters);
+  }
+
+  function userAvatar(u) {
+    var fallback = function () {
+      return initialsIcon(u);
+    };
+
+    if (u.picture && /^https:\/\//i.test(u.picture)) return imageIcon(u.picture, fallback);
+
+    return fallback();
+  }
+
+  // Account avatar, else CUB's profile image, else the plain profile icon
+  function avatar() {
+    if (user) return userAvatar(user);
+
+    var cub = cubSignedIn() ? Lampa.Account.Profile.icon() : '';
+
+    if (cub) return imageIcon(cub, plainIcon);
+
+    return plainIcon();
+  }
+
+  function updateHeadIcon() {
+    if (headIcon) headIcon.empty().append(avatar());
+  }
+
+  function backToHead() {
+    Lampa.Controller.toggle('head');
+  }
+
+  function openSettings() {
+    Lampa.Controller.toggle('settings');
+    Lampa.Settings.create(COMPONENT);
+  }
+
+  // until the sign-in and sign-out flows exist they start from the Account settings page
+  function signIn() {
+    openSettings();
+  }
+
+  function logOut() {
+    openSettings();
+  }
+
+  // the modal returns focus to the controller active when it opened, so leave the closed Select first
+  function cubSignIn() {
+    backToHead();
+    Lampa.Account.Modal.account();
+  }
+
+  // built from DOM nodes, not a template: Template.get would parse name and email as HTML
+  // and expand "$&"-style sequences in them as replacement patterns
+  function profileRow() {
+    var name = user.name || user.email || '';
+    var email = user.email && user.email != name ? user.email : '';
+    var item = $('<div class="selectbox-item selectbox-item--icon selector svtlv-account__profile">' +
+      '<div class="selectbox-item__icon"></div><div>' +
+      '<div class="selectbox-item__title"></div><div class="selectbox-item__subtitle"></div>' +
+      '</div></div>');
+
+    item.find('.selectbox-item__icon').append(userAvatar(user));
+    item.find('.selectbox-item__title').text(name);
+    item.find('.selectbox-item__subtitle').text(email);
+
+    // Select drops the subtitle node when the item has no subtitle; it never renders these
+    return {
+      title: $('<i>').text(name).html(),
+      subtitle: $('<i>').text(email).html(),
+      html: item,
+      noenter: true
+    };
+  }
+
+  function action(key, run) {
+    return {
+      title: t(key),
+      onSelect: run
+    };
+  }
+
+  function signInChooser() {
+    var items = [{
+      title: t('signin_account'),
+      subtitle: t('signin_account_descr'),
+      onSelect: signIn
+    }];
+
+    if (cubEnabled()) {
+      items.push({
+        title: t('signin_cub'),
+        subtitle: t('signin_cub_descr'),
+        onSelect: cubSignIn
+      });
+    }
+
+    Lampa.Select.show({
+      title: t('signin_menu'),
+      items: items,
+      onBack: backToHead
+    });
+  }
+
+  // CUB's own profile list, with "Sign in to Account" added on its way to the screen
+  function cubProfiles() {
+    var extra = function (e) {
+      Lampa.Select.listener.remove('preshow', extra);
+
+      // the list loads asynchronously and may fail; only CUB's own Select gets the item
+      if (e.active.title != Lampa.Lang.translate('account_profiles')) return;
+
+      e.active.items.push(action('signin_to_account', signIn));
+    };
+
+    Lampa.Select.listener.follow('preshow', extra);
+    Lampa.Account.Profile.select(backToHead);
+  }
+
+  function openMenu() {
+    var cub = cubSignedIn();
+    var items;
+
+    if (!user && !cub) return signInChooser();
+    if (!user) return cubProfiles();
+
+    items = [profileRow()];
+
+    if (cub) {
+      items.push(action('switch_cub_profile', function () {
+        Lampa.Account.Profile.select(backToHead);
+      }));
+    } else if (cubEnabled()) items.push(action('signin_to_cub', cubSignIn));
+
+    items.push(action('account_settings', openSettings));
+    items.push(action('logout', logOut));
+
+    Lampa.Select.show({
+      title: t('menu_title'),
+      items: items,
+      onBack: backToHead
+    });
+  }
+
+  function createHeadIcon() {
+    var head = Lampa.Head.render();
+    var slot = head.find('.full--screen');
+
+    headIcon = $('<div class="head__action selector open--account"></div>');
+    headIcon.on('hover:enter', function () {
+      try {
+        openMenu();
+      } catch (err) {
+        console.log('Account', 'menu failed', err && err.message);
+      }
+    });
+
+    // CUB's profile icon slot; account.css hides CUB's own icon once the body class is set
+    if (slot.length) slot.before(headIcon);
+    else head.find('.head__actions').append(headIcon);
+
+    $('body').addClass('svtlv-account--active');
+
+    updateHeadIcon();
+
+    Lampa.Storage.listener.follow('change', function (e) {
+      if (e.name == 'account') updateHeadIcon();
+    });
   }
 
   function row(name, value) {
@@ -129,6 +364,8 @@
         console.log('Account', 'settings render failed', err && err.message);
       }
     });
+
+    createHeadIcon();
   }
 
   function heartbeat() {

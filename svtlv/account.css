@@ -7,3 +7,39 @@
 .svtlv-account .settings-param-text {
   opacity: 0.7;
 }
+
+/* the add-on's icon takes CUB's header slot; CUB stays reachable from its menu */
+body.svtlv-account--active .head .open--profile {
+  display: none !important;
+}
+
+.head__action.open--account {
+  padding: 0.2em;
+}
+.head__action.open--account img,
+.head__action.open--account svg,
+.svtlv-account__profile .selectbox-item__icon img {
+  -webkit-border-radius: 100%;
+     -moz-border-radius: 100%;
+          border-radius: 100%;
+  width: 2.4em !important;
+  height: 2.4em !important;
+}
+.svtlv-account__initials {
+  width: 2.4em;
+  height: 2.4em;
+  line-height: 2.4em;
+  -webkit-border-radius: 100%;
+     -moz-border-radius: 100%;
+          border-radius: 100%;
+  background-color: rgba(255, 255, 255, 0.2);
+  color: #fff;
+  font-weight: 600;
+  text-align: center;
+  overflow: hidden;
+}
+.head__action.open--account.focus .svtlv-account__initials,
+.head__action.open--account.hover .svtlv-account__initials {
+  background-color: rgba(0, 0, 0, 0.15);
+  color: #000;
+}

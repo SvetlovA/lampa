@@ -154,6 +154,19 @@
   add-on-owned classes because the file loads even when the add-on disables itself. The stubbed
   boot logic (protocol gate, readiness poll, first-call failure) was smoke-tested with a
   throwaway Node harness; the browser check is still manual.
+- **Header icon and menu as implemented (Task 12)**: `createHeadIcon` runs from `activate()`, so
+  the icon exists only once the first `/session` answered; it sets `body.svtlv-account--active`,
+  the only thing `account.css` hides CUB's icon on. `signIn()` / `logOut()` are placeholders that
+  open the Account settings page; Task 13 replaces their bodies. The Account profile row is built
+  from DOM nodes with `.text()` and passed as Select's `html`, not through `selectbox_icon`:
+  `Template.get` substitutes with `String.replace`, so even an HTML-escaped name would still
+  expand `$&`-style patterns (the escaped `title`/`subtitle` are kept only because Select reads
+  them). "Sign in to Account" joins CUB's own profile list through a one-shot
+  `Lampa.Select.listener` `preshow` handler that only touches a Select titled
+  `Lang.translate('account_profiles')`. CUB sign-in toggles `head` before
+  `Account.Modal.account()`, because the modal restores the controller active when it opened.
+  All four states, `account_use = false`, a hostile name and a `javascript:` picture were
+  smoke-tested with a throwaway jsdom harness; the on-device check is still manual.
 
 ## Development Approach
 - **testing approach**: Regular (code first, then tests in the same task)
@@ -502,14 +515,14 @@
 - Modify: `svtlv/account.js`
 - Modify: `svtlv/account.css`
 
-- [ ] create a `head__action selector open--account` icon before `.full--screen` (same slot as CUB) and hide `.head .open--profile` via `account.css` only while the add-on is active
-- [ ] render the icon: Account `picture` (set only via `img.src` after the https check) → initials → `Lampa.Account.Profile.icon()` when only CUB is signed in → plain profile icon; refresh on sign-in/out and on `Lampa.Storage.listener` `account` changes
-- [ ] on `hover:enter` open a `Lampa.Select` menu per design §10.5, for every state: none (sign-in chooser Account / CUB), Account only (profile row, "Sign in to CUB", "Account settings", "Log out"), CUB only (CUB's own profile list via `Lampa.Account.Profile.select()` plus "Sign in to Account"), both (profile row, "Switch CUB profile", "Account settings", "Log out"); return focus to `head` on back
-- [ ] gate every CUB item on `window.lampa_settings.account_use`, read at call time (CLAUDE.md), so a build with CUB disabled never offers CUB
-- [ ] escape every server-provided string (`name`, `email`) with `$('<i>').text(v).html()` before it reaches `Select`, `Template` or settings rows (they render HTML)
-- [ ] never write `account*` storage keys; read CUB state only via `Lampa.Account.Permit`
-- [ ] manual check: all four states match screens 7–8; CUB profile switching still works; `account_use = false` shows no CUB items
-- [ ] run the ES5 check - must pass before next task
+- [x] create a `head__action selector open--account` icon before `.full--screen` (same slot as CUB) and hide `.head .open--profile` via `account.css` only while the add-on is active
+- [x] render the icon: Account `picture` (set only via `img.src` after the https check) → initials → `Lampa.Account.Profile.icon()` when only CUB is signed in → plain profile icon; refresh on sign-in/out and on `Lampa.Storage.listener` `account` changes
+- [x] on `hover:enter` open a `Lampa.Select` menu per design §10.5, for every state: none (sign-in chooser Account / CUB), Account only (profile row, "Sign in to CUB", "Account settings", "Log out"), CUB only (CUB's own profile list via `Lampa.Account.Profile.select()` plus "Sign in to Account"), both (profile row, "Switch CUB profile", "Account settings", "Log out"); return focus to `head` on back
+- [x] gate every CUB item on `window.lampa_settings.account_use`, read at call time (CLAUDE.md), so a build with CUB disabled never offers CUB
+- [x] escape every server-provided string (`name`, `email`) with `$('<i>').text(v).html()` before it reaches `Select`, `Template` or settings rows (they render HTML)
+- [x] never write `account*` storage keys; read CUB state only via `Lampa.Account.Permit`
+- [x] ⚠️ manual check (skipped - not automatable: no browser/backend in the automated run; listed under Post-Completion): all four states match screens 7–8; CUB profile switching still works; `account_use = false` shows no CUB items
+- [x] run the ES5 check - must pass before next task
 
 ### Task 13: Add sign-in and sign-out flows to the add-on
 
