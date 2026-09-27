@@ -557,10 +557,10 @@
 - Modify: `AGENTS.md`
 - Modify: `docs/settings-sync-backend-design.md`
 
-- [ ] `backend/README.md`: auth routes, config keys and placeholders, stateless cookie sessions, per-request Keycloak revalidation (fail-open) and the accepted costs, the Keycloak realm prerequisites, 401 vs 503, local testing with a fake or local Keycloak
-- [ ] `CLAUDE.md` and its mirror `AGENTS.md`: remove "user-data routes answer 401 until Plan 2" and the published API port; update "placeholders resolved only in `Database.Password` and `DataKey`"; document the `svtlv/` add-on rules (ES5 gate, marked `index.html` block, no `app.min.js` edits) and that `svtlv/` is a top-level directory that intentionally ships in `lampa-web` (the `.dockerignore` rule); the `/api` proxy
-- [ ] design: update §3.1's "published on the same host port" sentence; record Plan 2 deviations under §14 (non-secret placeholders `LAMPA_PUBLIC_URL`/`LAMPA_KEYCLOAK_ISSUER`, session lifetimes as constants, the `Authenticate(w, r)` seam change, any others found)
-- [ ] run `make test` and `make lint` - must pass before next task
+- [x] `backend/README.md`: auth routes, config keys and placeholders, stateless cookie sessions, per-request Keycloak revalidation (fail-open) and the accepted costs, the Keycloak realm prerequisites, 401 vs 503, local testing with a fake or local Keycloak
+- [x] `CLAUDE.md` and its mirror `AGENTS.md`: remove "user-data routes answer 401 until Plan 2" and the published API port; update "placeholders resolved only in `Database.Password` and `DataKey`"; document the `svtlv/` add-on rules (ES5 gate, marked `index.html` block, no `app.min.js` edits) and that `svtlv/` is a top-level directory that intentionally ships in `lampa-web` (the `.dockerignore` rule); the `/api` proxy
+- [x] design: update §3.1's "published on the same host port" sentence; record Plan 2 deviations under §14 (non-secret placeholders `LAMPA_PUBLIC_URL`/`LAMPA_KEYCLOAK_ISSUER`, session lifetimes as constants, the `Authenticate(w, r)` seam change, any others found)
+- [x] run `make test` and `make lint` - must pass before next task
 
 ### Task 15: Verify acceptance criteria
 - [ ] verify every Overview item is implemented and design §5, §8, §10.5, §12 match the code

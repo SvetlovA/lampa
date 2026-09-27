@@ -141,12 +141,16 @@ configuration. The files follow Svtlv's `appsettings` layering:
   `Production`, default `Test`). Development is a local `go run` against the
   database published on loopback `5434`;
 - secrets are `{ENV_VAR}` placeholders (`{LAMPA_DB_PASSWORD}`,
-  `{LAMPA_API_DATA_KEY}`) resolved from the environment. Missing values fail
-  startup naming the variable, never the value. No other environment variable
-  overrides a file setting.
+  `{LAMPA_API_DATA_KEY}`, `{LAMPA_KEYCLOAK_CLIENT_SECRET}`) resolved from the
+  environment; so are the non-secret `{LAMPA_PUBLIC_URL}` and
+  `{LAMPA_KEYCLOAK_ISSUER}`, which keep the Lampa and Keycloak addresses out of
+  the public repository (§14, Plan 2 deviations). Missing values fail startup
+  naming the variable, never the value. No other environment variable overrides
+  a file setting.
 
 Ports follow the Svtlv series without colliding with it: the API listens on
-`5800` and is published on the same host port of `LAMPA_BIND_ADDRESS`, health stays on the
+`5800` inside the Compose network and is reached only through the `lampa-web`
+`/api/v1/` proxy (not published since Plan 2), health stays on the
 container-internal `8081`, and PostgreSQL is published only on
 `127.0.0.1:5434` (Svtlv uses `5433`, Keycloak `8080`).
 
@@ -1023,6 +1027,43 @@ browser, see their avatar in the header, and Lampa can recognize the active
 session. Settings, favorites, bookmarks, scores and every other Lampa value
 still read from and write only to the device's existing `localStorage`. Login
 does not download, upload or replace any user data in this plan.
+
+Deviations recorded while implementing Plan 2
+(`docs/plans/20260924-keycloak-auth-account-ui.md`):
+
+- `Auth.PublicURL` and `Auth.Issuer` are `{LAMPA_PUBLIC_URL}` /
+  `{LAMPA_KEYCLOAK_ISSUER}` placeholders although they are not secret (§3.1
+  said only secrets are placeholders): the Lampa domain is deliberately kept out
+  of the public repository. They are GitHub repository variables; only
+  `LAMPA_KEYCLOAK_CLIENT_SECRET` is a secret. `PublicURL` is stricter than an
+  origin "without path": it must be exactly the lowercase `scheme://host[:port]`
+  a browser sends as `Origin` (no trailing slash, no default port), so the CSRF
+  check compares strings. With an `http://` public URL the deploy requires
+  `LAMPA_BIND_ADDRESS` to be a Tailscale address equal to its host;
+- session lifetimes (30 days idle, 180 days absolute, §5.3) are constants in
+  `pkg/auth`, not configuration: tests inject a clock, and embedded settings
+  cannot change on the server without a redeploy anyway;
+- the Plan 1 seam `Authenticator.Authenticate(*http.Request)` became
+  `Authenticate(http.ResponseWriter, *http.Request)`, so the authenticator can
+  clear a revoked cookie or write a refreshed one. Any error other than
+  `ErrUnauthenticated` answers `503 session_unavailable` (§5.3); `api.DenyAll`
+  remains only for `pkg/api` tests;
+- the CSRF check accepts a request without `Origin` when it carries
+  `X-Lampa-Csrf: 1`, because old TV WebViews omit `Origin` on same-origin
+  requests; `Origin: null` is rejected;
+- the `keycloak` advisory check (§9.1) passes only when the discovery document's
+  `issuer` equals the configured one (redirects not followed), so a wrong issuer
+  shows as `Degraded` before any login fails;
+- Apache proxies only `/api/v1/` (not all of `/api`), with `disablereuse=On`
+  because the old httpd resolves `lampa-api` once per worker and would return
+  `502` after an API restart with a new IP;
+- the add-on seam is a single marked block at the end of `index.html`'s
+  `<body>` whose script also appends the `account.css` link, instead of
+  separate stylesheet and script includes (§10, §10.2); a missing add-on file
+  is ignored rather than showing Lampa's `.no-network` overlay;
+- the Keycloak pre-flight (issuer equality and endpoint reachability from the
+  container and from phones, §5.6) needs server access and was moved to the
+  production deploy checklist.
 
 ### Plan 3: Classify storage and separate shared TorrServer data
 
