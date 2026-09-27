@@ -114,6 +114,16 @@
   origin when present. `authRoutes` is mounted on `/api/v1/auth/` and `/api/v1/session`; the bare
   `/api/v1/auth` answers JSON `404` instead of ServeMux's plain-text redirect. `main` passes
   `cfg.Auth.PublicURL` and a JSON `404` handler until Task 8.
+- **Wiring as implemented (Task 8)**: `main.newAPI(cfg, svc, logger)` builds the cookie sealer,
+  the lazily-discovering `Keycloak` (redirect URL `PublicURL + auth.CallbackRoute`), the handlers
+  and the `SessionAuthenticator`; it never contacts Keycloak or the database, so the revalidation,
+  revocation, fail-open and DB-down scenarios are tested on it with a fake Keycloak and a mocked
+  store (no Docker). `health.KeycloakCheck(issuer)` (advisory) passes only on a `200` discovery
+  document whose `issuer` equals the configured one (redirects not followed, 64 KiB cap), so a
+  wrong issuer shows as `Degraded` before any login fails. `api.DenyAll` stays for pkg/api tests.
+  ⚠️ Docker Desktop could not be started in the automated run, so the testcontainers tests
+  (`TestStart_keycloakDown`, the updated `TestStart_servesUntilCanceled`) compiled and linted but
+  were skipped locally; CI runs them with `LAMPA_API_REQUIRE_DOCKER=1`.
 
 ## Development Approach
 - **testing approach**: Regular (code first, then tests in the same task)
@@ -409,11 +419,11 @@
 - Modify: `backend/pkg/health/health.go`
 - Modify: `backend/pkg/health/health_test.go`
 
-- [ ] add `health.KeycloakCheck` (advisory) fetching the issuer discovery document with a short timeout
-- [ ] in `main`, build `CookieSealer`, the lazily-discovering `Keycloak`, the handlers and the `Authenticator`; replace `api.DenyAll{}` and the temporary auth handler
-- [ ] write tests for the Keycloak check (healthy, unreachable, bad status) and its `Degraded` aggregation in `/health`
-- [ ] write tests for main wiring: API starts with Keycloak down, user-data returns `401` without a session and `200` with one (fake Keycloak), the next request after the fake revokes the session returns `401`, an existing session keeps working when the fake Keycloak is stopped, `/session` and logout work with the DB down
-- [ ] run `make test` and `make lint` - must pass before next task
+- [x] add `health.KeycloakCheck` (advisory) fetching the issuer discovery document with a short timeout
+- [x] in `main`, build `CookieSealer`, the lazily-discovering `Keycloak`, the handlers and the `Authenticator`; replace `api.DenyAll{}` and the temporary auth handler
+- [x] write tests for the Keycloak check (healthy, unreachable, bad status) and its `Degraded` aggregation in `/health`
+- [x] write tests for main wiring: API starts with Keycloak down, user-data returns `401` without a session and `200` with one (fake Keycloak), the next request after the fake revokes the session returns `401`, an existing session keeps working when the fake Keycloak is stopped, `/session` and logout work with the DB down
+- [x] run `make test` and `make lint` - must pass before next task
 
 ### Task 9: Add the Apache /api proxy and update Compose
 

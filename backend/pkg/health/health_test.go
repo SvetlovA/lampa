@@ -250,6 +250,96 @@ func TestDatabaseCheck(t *testing.T) {
 	}
 }
 
+func TestKeycloakCheck(t *testing.T) {
+	const realm = "/realms/svtlv"
+	discovery := realm + "/.well-known/openid-configuration"
+	tests := []struct {
+		name    string
+		handler func(issuer string) http.HandlerFunc
+		closed  bool   // the server is stopped before the check runs
+		suffix  string // appended to the configured issuer
+		wantErr bool
+	}{
+		{name: "healthy", handler: func(issuer string) http.HandlerFunc {
+			return func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, discovery, r.URL.Path)
+				w.Write([]byte(`{"issuer":"` + issuer + `","token_endpoint":"x"}`))
+			}
+		}},
+		{name: "trailing slash in issuer", suffix: "/", handler: func(issuer string) http.HandlerFunc {
+			return func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, discovery, r.URL.Path)
+				w.Write([]byte(`{"issuer":"` + issuer + `/"}`))
+			}
+		}},
+		{name: "unreachable", closed: true, wantErr: true},
+		{name: "bad status", wantErr: true, handler: func(string) http.HandlerFunc {
+			return func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "down", http.StatusServiceUnavailable) }
+		}},
+		{name: "redirect", wantErr: true, handler: func(string) http.HandlerFunc {
+			return func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/elsewhere", http.StatusFound) }
+		}},
+		{name: "not json", wantErr: true, handler: func(string) http.HandlerFunc {
+			return func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("<html>")) }
+		}},
+		{name: "issuer mismatch", wantErr: true, handler: func(string) http.HandlerFunc {
+			return func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(`{"issuer":"http://other/realms/svtlv"}`)) }
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var issuer string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				tc.handler(issuer)(w, r)
+			}))
+			issuer = srv.URL + realm
+			if tc.closed {
+				srv.Close()
+			} else {
+				defer srv.Close()
+			}
+
+			c := KeycloakCheck(issuer + tc.suffix)
+			assert.Equal(t, "keycloak", c.Name)
+			assert.Equal(t, Advisory, c.Tier)
+			err := c.Run(t.Context())
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestKeycloakCheck_degradesReport(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "down", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	r, err := NewReporter([]Check{testCheck("database", Critical, okRun), KeycloakCheck(srv.URL + "/realms/svtlv")},
+		DefaultCheckTimeout)
+	require.NoError(t, err)
+
+	code, _, body := serve(t, r, false)
+	assert.Equal(t, http.StatusOK, code, "a degraded service still answers 200")
+	var doc struct {
+		Status string           `json:"status"`
+		Checks []map[string]any `json:"checks"`
+	}
+	require.NoError(t, json.Unmarshal(body, &doc))
+	assert.Equal(t, string(Degraded), doc.Status)
+	require.Len(t, doc.Checks, 2)
+	assert.Equal(t, "keycloak", doc.Checks[1]["name"])
+	assert.Equal(t, string(Degraded), doc.Checks[1]["status"])
+	assert.Equal(t, "keycloak unreachable", doc.Checks[1]["error"])
+	assert.NotContains(t, string(body), srv.URL, "the issuer address is never reported")
+
+	code, _, body = serve(t, r, true)
+	assert.Equal(t, http.StatusOK, code)
+	assert.NotContains(t, string(body), "keycloak", "the critical report skips advisory checks")
+}
+
 func keys(m map[string]any) []string {
 	res := make([]string, 0, len(m))
 	for k := range m {

@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime/debug"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -21,8 +23,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/SvetlovA/lampa/backend/pkg/api"
+	apimocks "github.com/SvetlovA/lampa/backend/pkg/api/mocks"
+	"github.com/SvetlovA/lampa/backend/pkg/auth"
 	"github.com/SvetlovA/lampa/backend/pkg/config"
 	"github.com/SvetlovA/lampa/backend/pkg/health"
+	"github.com/SvetlovA/lampa/backend/pkg/storage"
 	"github.com/SvetlovA/lampa/backend/pkg/storage/pgtest"
 )
 
@@ -271,12 +277,14 @@ func TestStart_databaseUnreachable(t *testing.T) {
 
 func TestStart_servesUntilCanceled(t *testing.T) {
 	dsn := testDSN(t)
+	cfg := testConfig(dsn)
+	cfg.Auth.Issuer = closedURL(t) + testRealm // keeps /health fast
 	apiLn, healthLn := localListener(t), localListener(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	var out bytes.Buffer
-	done := waitStart(ctx, testConfig(dsn), &out,
+	done := waitStart(ctx, cfg, &out,
 		fakeListen(map[string]net.Listener{"api": apiLn, "health": healthLn}, nil))
 
 	healthURL := "http://" + healthLn.Addr().String()
@@ -301,7 +309,7 @@ func TestStart_servesUntilCanceled(t *testing.T) {
 	assert.Contains(t, string(body), `"unauthenticated"`)
 
 	code, _ = get(t, "http://"+apiLn.Addr().String()+"/api/v1/session")
-	assert.Equal(t, http.StatusNotFound, code, "auth routes are mounted but not wired yet")
+	assert.Equal(t, http.StatusOK, code, "auth routes are wired")
 
 	cancel()
 	require.NoError(t, requireDone(t, done))
@@ -345,6 +353,289 @@ func TestRun_bindFailure(t *testing.T) {
 	assert.Contains(t, out.String(), "[INFO] config: ")
 	assert.NotContains(t, out.String(), dsn)
 	assert.NotContains(t, out.String(), testKey, "log must not contain the data key")
+}
+
+const (
+	testRealm   = "/realms/svtlv"
+	testUserID  = "6f1c2a4e-3b5d-4c7e-9f80-1a2b3c4d5e6f"
+	testRefresh = "refresh-token-value"
+)
+
+// fakeKeycloak serves the discovery document and the introspection endpoint, answering whether
+// the refresh token is active. it counts introspection calls.
+type fakeKeycloak struct {
+	srv         *httptest.Server
+	active      atomic.Bool
+	introspects atomic.Int32
+}
+
+func newFakeKeycloak(t *testing.T) *fakeKeycloak {
+	t.Helper()
+	f := &fakeKeycloak{}
+	f.active.Store(true)
+	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		oidcPath := f.srv.URL + testRealm + "/protocol/openid-connect"
+		switch r.URL.Path {
+		case testRealm + "/.well-known/openid-configuration":
+			writeTestJSON(t, w, map[string]any{
+				"issuer":                                f.issuer(),
+				"authorization_endpoint":                oidcPath + "/auth",
+				"token_endpoint":                        oidcPath + "/token",
+				"introspection_endpoint":                oidcPath + "/token/introspect",
+				"jwks_uri":                              oidcPath + "/certs",
+				"id_token_signing_alg_values_supported": []string{"RS256"},
+			})
+		case testRealm + "/protocol/openid-connect/token/introspect":
+			f.introspects.Add(1)
+			if user, pass, ok := r.BasicAuth(); !ok || user != "svtlv-lampa" || pass != "s" {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			assert.Equal(t, testRefresh, r.PostFormValue("token"))
+			writeTestJSON(t, w, map[string]any{"active": f.active.Load()})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+func (f *fakeKeycloak) issuer() string { return f.srv.URL + testRealm }
+
+func writeTestJSON(t *testing.T, w http.ResponseWriter, v any) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	assert.NoError(t, json.NewEncoder(w).Encode(v))
+}
+
+// closedURL returns an http url nothing listens on.
+func closedURL(t *testing.T) string {
+	t.Helper()
+	ln := localListener(t)
+	u := "http://" + ln.Addr().String()
+	ln.Close()
+	return u
+}
+
+// sessionCookie returns a session cookie for testUserID sealed with the data key of cfg, the way
+// a login would write it. its refresh is not due, so every request introspects it.
+func sessionCookie(t *testing.T, cfg config.Config) *http.Cookie {
+	t.Helper()
+	sealer, err := auth.NewCookieSealer(cfg.DataKey)
+	require.NoError(t, err)
+	w := httptest.NewRecorder()
+	now := time.Now()
+	_, err = auth.NewCookies(sealer, false).IssueSession(w, auth.Profile{UserID: testUserID, Name: "Test User"},
+		auth.Tokens{RefreshToken: testRefresh, RefreshExpiresAt: now.Add(30 * time.Minute)}, now)
+	require.NoError(t, err)
+	cookies := w.Result().Cookies()
+	require.Len(t, cookies, 1)
+	return cookies[0]
+}
+
+// reply is the part of a response the wiring tests read.
+type reply struct {
+	code    int
+	cookies []*http.Cookie
+	body    string
+}
+
+// send makes one request with the csrf header and an optional cookie and returns its reply.
+func send(t *testing.T, method, url string, cookie *http.Cookie, body string) reply {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, method, url, strings.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set(api.CSRFHeader, "1")
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return reply{code: resp.StatusCode, cookies: resp.Cookies(), body: string(raw)}
+}
+
+// healthStatus returns the overall status of /health and the status of each check by name.
+func healthStatus(t *testing.T, healthURL string) (string, map[string]string) {
+	t.Helper()
+	code, body := get(t, healthURL+"/health")
+	require.Equal(t, http.StatusOK, code)
+	var rep struct {
+		Status string `json:"status"`
+		Checks []struct {
+			Name   string `json:"name"`
+			Status string `json:"status"`
+		} `json:"checks"`
+	}
+	require.NoError(t, json.Unmarshal(body, &rep))
+	checks := make(map[string]string, len(rep.Checks))
+	for _, c := range rep.Checks {
+		checks[c.Name] = c.Status
+	}
+	return rep.Status, checks
+}
+
+// clearsSession reports whether rep expires the session cookie.
+func clearsSession(rep reply) bool {
+	for _, c := range rep.cookies {
+		if c.Name == auth.SessionCookie && c.MaxAge < 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func TestStart_keycloakDown(t *testing.T) {
+	dsn := testDSN(t)
+	cfg := testConfig(dsn)
+	cfg.Auth.Issuer = closedURL(t) + testRealm
+	apiLn, healthLn := localListener(t), localListener(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	var out bytes.Buffer
+	done := waitStart(ctx, cfg, &out, fakeListen(map[string]net.Listener{"api": apiLn, "health": healthLn}, nil))
+	apiURL, healthURL := "http://"+apiLn.Addr().String(), "http://"+healthLn.Addr().String()
+
+	status, checks := healthStatus(t, healthURL)
+	assert.Equal(t, "Degraded", status)
+	assert.Equal(t, map[string]string{"database": "Healthy", "keycloak": "Degraded"}, checks)
+	code, _ := get(t, healthURL+"/health/critical")
+	assert.Equal(t, http.StatusOK, code, "keycloak never makes the service unhealthy")
+
+	r := send(t, http.MethodGet, apiURL+auth.SessionRoute, nil, "")
+	assert.Equal(t, http.StatusOK, r.code)
+	assert.JSONEq(t, `{"authenticated":false}`, r.body)
+
+	r = send(t, http.MethodGet, apiURL+"/api/v1/user-data", nil, "")
+	assert.Equal(t, http.StatusUnauthorized, r.code)
+
+	r = send(t, http.MethodGet, apiURL+"/api/v1/user-data", sessionCookie(t, cfg), "")
+	assert.Equal(t, http.StatusNotFound, r.code, "an existing session works while keycloak is down")
+	assert.Contains(t, r.body, "user_data_not_found")
+
+	r = send(t, http.MethodPost, apiURL+auth.DeviceStartRoute, nil, "")
+	assert.Equal(t, http.StatusServiceUnavailable, r.code, "only new logins break")
+	assert.Contains(t, r.body, "keycloak_unavailable")
+
+	cancel()
+	require.NoError(t, requireDone(t, done))
+	assert.Contains(t, out.String(), "[WARN] session introspection failed, session kept")
+	assert.NotContains(t, out.String(), testRefresh)
+}
+
+func TestNewAPI_sessionRevalidation(t *testing.T) {
+	kc := newFakeKeycloak(t)
+	cfg := testConfig("")
+	cfg.Auth.Issuer = kc.issuer()
+	var stored storage.Document
+	svc := &apimocks.UserDataMock{
+		GetFunc: func(_ context.Context, userID string) (storage.Document, error) {
+			assert.Equal(t, testUserID, userID)
+			if stored.Data == nil {
+				return storage.Document{}, storage.ErrNotFound
+			}
+			return stored, nil
+		},
+		ReplaceFunc: func(_ context.Context, userID string, raw []byte) (storage.Document, error) {
+			assert.Equal(t, testUserID, userID)
+			assert.Contains(t, string(raw), `"language":"ru"`)
+			stored = storage.Document{SchemaVersion: 1, Data: map[string]json.RawMessage{"settings": json.RawMessage(`{"language":"ru"}`)}}
+			return stored, nil
+		},
+	}
+	var out bytes.Buffer
+	srv, err := newAPI(cfg, svc, log.New(&out, "", 0))
+	require.NoError(t, err)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	userData := ts.URL + "/api/v1/user-data"
+	check := health.KeycloakCheck(kc.issuer())
+	require.NoError(t, check.Run(t.Context()))
+
+	r := send(t, http.MethodGet, userData, nil, "")
+	assert.Equal(t, http.StatusUnauthorized, r.code)
+	assert.Contains(t, r.body, `"unauthenticated"`)
+	assert.Zero(t, kc.introspects.Load(), "no cookie, no keycloak call")
+
+	cookie := sessionCookie(t, cfg)
+	r = send(t, http.MethodPut, userData, cookie, `{"schema_version":1,"data":{"settings":{"language":"ru"}}}`)
+	require.Equal(t, http.StatusOK, r.code, r.body)
+	r = send(t, http.MethodGet, userData, cookie, "")
+	assert.Equal(t, http.StatusOK, r.code)
+	assert.Contains(t, r.body, `"language":"ru"`)
+	assert.Equal(t, int32(2), kc.introspects.Load(), "every authenticated request revalidates")
+
+	r = send(t, http.MethodGet, ts.URL+auth.SessionRoute, cookie, "")
+	assert.Equal(t, http.StatusOK, r.code)
+	assert.Contains(t, r.body, `"authenticated":true`)
+	assert.Contains(t, r.body, testUserID)
+
+	// keycloak ends the session: the next request is signed out and the cookie cleared
+	kc.active.Store(false)
+	r = send(t, http.MethodGet, userData, cookie, "")
+	assert.Equal(t, http.StatusUnauthorized, r.code)
+	assert.True(t, clearsSession(r))
+
+	// keycloak stops: a live session keeps working and the health check fails
+	kc.active.Store(true)
+	kc.srv.Close()
+	r = send(t, http.MethodGet, userData, cookie, "")
+	assert.Equal(t, http.StatusOK, r.code, "revalidation fails open")
+	assert.False(t, clearsSession(r))
+	require.Error(t, check.Run(t.Context()))
+
+	r = send(t, http.MethodPost, ts.URL+auth.LogoutRoute, cookie, "")
+	assert.Equal(t, http.StatusNoContent, r.code)
+	assert.True(t, clearsSession(r))
+
+	assert.Contains(t, out.String(), "[WARN] session introspection failed, session kept")
+	assert.NotContains(t, out.String(), testRefresh)
+}
+
+func TestNewAPI_databaseDown(t *testing.T) {
+	kc := newFakeKeycloak(t)
+	cfg := testConfig("")
+	cfg.Auth.Issuer = kc.issuer()
+	svc := &apimocks.UserDataMock{
+		GetFunc: func(context.Context, string) (storage.Document, error) {
+			return storage.Document{}, storage.ErrUnavailable
+		},
+	}
+	var out bytes.Buffer
+	srv, err := newAPI(cfg, svc, log.New(&out, "", 0))
+	require.NoError(t, err)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	cookie := sessionCookie(t, cfg)
+
+	r := send(t, http.MethodGet, ts.URL+auth.SessionRoute, cookie, "")
+	assert.Equal(t, http.StatusOK, r.code)
+	assert.Contains(t, r.body, `"authenticated":true`)
+
+	r = send(t, http.MethodGet, ts.URL+"/api/v1/user-data", cookie, "")
+	assert.Equal(t, http.StatusServiceUnavailable, r.code, "only user data depends on the database")
+	assert.Contains(t, r.body, "storage_unavailable")
+
+	r = send(t, http.MethodPost, ts.URL+auth.LogoutRoute, cookie, "")
+	assert.Equal(t, http.StatusNoContent, r.code)
+	assert.True(t, clearsSession(r))
+}
+
+func TestNewAPI_invalidConfig(t *testing.T) {
+	cfg := testConfig("")
+	cfg.Auth.PublicURL = ""
+	_, err := newAPI(cfg, &apimocks.UserDataMock{}, log.New(io.Discard, "", 0))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "create api server")
 }
 
 func okHandler() http.Handler {

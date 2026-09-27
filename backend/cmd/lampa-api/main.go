@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/SvetlovA/lampa/backend/pkg/api"
+	"github.com/SvetlovA/lampa/backend/pkg/auth"
 	"github.com/SvetlovA/lampa/backend/pkg/config"
 	"github.com/SvetlovA/lampa/backend/pkg/health"
 	"github.com/SvetlovA/lampa/backend/pkg/storage"
@@ -106,16 +107,12 @@ func start(ctx context.Context, cfg config.Config, logger *log.Logger, listen li
 	if err != nil {
 		return fmt.Errorf("create service: %w", err)
 	}
-	// user-data routes deny everything and the auth routes answer 404 until task 8 wires keycloak
-	apiCfg := api.ServerConfig{Addr: cfg.Listen, MaxBodyBytes: cfg.MaxBodyBytes, PublicOrigin: cfg.Auth.PublicURL}
-	notFound := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		api.WriteError(w, http.StatusNotFound, "not_found", "not found")
-	})
-	apiSrv, err := api.NewServer(apiCfg, svc, api.DenyAll{}, notFound, logger)
+	apiSrv, err := newAPI(cfg, svc, logger)
 	if err != nil {
-		return fmt.Errorf("create api server: %w", err)
+		return err
 	}
-	reporter, err := health.NewReporter([]health.Check{health.DatabaseCheck(store)}, health.DefaultCheckTimeout)
+	checks := []health.Check{health.DatabaseCheck(store), health.KeycloakCheck(cfg.Auth.Issuer)}
+	reporter, err := health.NewReporter(checks, health.DefaultCheckTimeout)
 	if err != nil {
 		return fmt.Errorf("create health reporter: %w", err)
 	}
@@ -124,6 +121,30 @@ func start(ctx context.Context, cfg config.Config, logger *log.Logger, listen li
 		{name: "api", addr: cfg.Listen, handler: apiSrv.Handler()},
 		{name: "health", addr: cfg.HealthListen, handler: healthRoutes(reporter)},
 	})
+}
+
+// newAPI builds the api server with keycloak sign-in and session authentication on top of svc.
+// nothing here contacts keycloak: discovery runs on first use, so the api starts while keycloak
+// is down, and sessions never touch the database.
+func newAPI(cfg config.Config, svc api.UserData, logger *log.Logger) (*api.Server, error) {
+	sealer, err := auth.NewCookieSealer(cfg.DataKey)
+	if err != nil {
+		return nil, fmt.Errorf("create cookie sealer: %w", err)
+	}
+	cookies := auth.NewCookies(sealer, cfg.Auth.SecureCookies)
+	keycloak := auth.NewKeycloak(auth.KeycloakConfig{
+		Issuer:       cfg.Auth.Issuer,
+		ClientID:     cfg.Auth.ClientID,
+		ClientSecret: cfg.Auth.ClientSecret,
+		RedirectURL:  cfg.Auth.PublicURL + auth.CallbackRoute,
+	})
+	apiCfg := api.ServerConfig{Addr: cfg.Listen, MaxBodyBytes: cfg.MaxBodyBytes, PublicOrigin: cfg.Auth.PublicURL}
+	srv, err := api.NewServer(apiCfg, svc, auth.NewSessionAuthenticator(cookies, keycloak, logger),
+		auth.NewHandlers(cookies, keycloak, logger), logger)
+	if err != nil {
+		return nil, fmt.Errorf("create api server: %w", err)
+	}
+	return srv, nil
 }
 
 // server is a named handler served on its own listen address.
