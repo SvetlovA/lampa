@@ -392,6 +392,13 @@ user-data call), while the 30/180-day lifetimes above stay the app's.
   sealed refresh token (the first use after a restart may add a discovery
   call), using the client credentials, an overall 3-second timeout and
   redirects disabled. No success is cached: a cache would delay revocation;
+- established libraries do the protocol work (decided 2026-09-27): the refresh
+  grant goes through `golang.org/x/oauth2`, the same library the login flows
+  use. It does not expose token introspection, and the
+  `github.com/zitadel/oidc/v3` helper omits `token_type_hint` (without it
+  Keycloak treats the token as an access token), so introspection is one small
+  `net/http` request. What stays ours is
+  the policy: when to call, and that only an explicit "no" signs out;
 - **refresh is due** when `now >= refreshed_at + min(1 day, (refresh_expires_at
   - refreshed_at) / 2)`. Then the call is a `refresh_token` grant, which also
   validates, slides Keycloak's SSO idle timer and returns a new refresh token;
