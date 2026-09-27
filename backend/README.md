@@ -310,8 +310,9 @@ and logout work with either dependency down; user data needs the database.
 ## CI and deployment
 
 `.github/workflows/tests.yaml` runs lint, `make test` and `make race` (with
-`LAMPA_API_REQUIRE_DOCKER=1`) plus a compose `config` check against `devops/.env.example` on
-every PR and on pushes to `svtlvtv`.
+`LAMPA_API_REQUIRE_DOCKER=1`), a compose `config` check against `devops/.env.example` and an
+ES5 syntax parse of the `svtlv/*.js` add-ons (pinned `acorn@8.14.0 --ecma5`) on every PR and on
+pushes to `svtlvtv`.
 
 `.github/workflows/deploy-docker.yaml` (`workflow_dispatch` only, default branch only) has one
 input, `environment` (Development / Test / Production, default Production), written into the

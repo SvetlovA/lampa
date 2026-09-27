@@ -570,9 +570,9 @@
 - [x] verify coverage ≥ 80% for new backend code (excluding mocks): `pkg/auth` 94.4%, `pkg/api` 97.3%, `pkg/health` 95.9%, `pkg/config` 100%, `main.newAPI` 90%
 
 ### Task 16: [Final] Update documentation
-- [ ] update `backend/README.md` if needed (the root `README.md` is upstream-owned, design §10.1)
-- [ ] update CLAUDE.md / AGENTS.md if new patterns discovered
-- [ ] move this plan to `docs/plans/completed/` **only after every Post-Completion item below
+- [x] update `backend/README.md` if needed (the root `README.md` is upstream-owned, design §10.1): CI section now lists the `svtlv/*.js` ES5 gate
+- [x] update CLAUDE.md / AGENTS.md if new patterns discovered (no change: Task 14 already covers the add-on rules, proxy, placeholders and ES5 gate; the two files are in sync)
+- [x] (deferred - Post-Completion items are manual and not yet done, so the plan stays in `docs/plans/`) move this plan to `docs/plans/completed/` **only after every Post-Completion item below
       has succeeded** (Keycloak client, production deploy, on-device TV checks on both engines,
       rollback drill); until then the plan stays in `docs/plans/`
 
