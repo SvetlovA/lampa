@@ -5,8 +5,9 @@
   decisions recorded in §5.1–§5.6, §8, §10.5 and §12 of that document.
 - Backend: replace `api.DenyAll` with real Keycloak authentication in `lampa-api` — the OAuth 2.0
   Device Authorization Grant for TVs, Authorization Code + PKCE for phones and computers,
-  stateless sealed `HttpOnly` session cookies (no session table), `GET /api/v1/session`,
-  logout, CSRF protection, and the `keycloak` advisory health check.
+  stateless sealed `HttpOnly` session cookies (no session table) revalidated against Keycloak
+  on every authenticated request, `GET /api/v1/session`, logout, CSRF protection, and the
+  `keycloak` advisory health check.
 - Deployment: Apache `/api` proxy inside the `lampa-web` image (deferred from Plan 1), the API
   port no longer published, new Keycloak configuration and secret in Compose and the manual
   deploy workflow.
@@ -89,11 +90,15 @@
 - **`pkg/auth`** (new) owns everything identity-related: cookie sealing, the stateless session
   cookie, the Keycloak/OIDC client, the auth HTTP handlers and the session `Authenticator`.
   `pkg/api` keeps owning the middleware chain and mounts the auth handlers next to user data.
-- **Two login flows, one session**: both end in `auth.IssueSession(w, profile)` → a sealed
+- **Two login flows, one session**: both end in `auth.IssueSession(w, profile, tokens)` → a sealed
   `lampa_session` cookie carrying the profile (`sub`, `name`, `email`, `picture`) copied from the
-  verified ID token plus its two expiries. **Sessions are stateless (user decision
-  2026-09-26)**: no session table, no purge job, no DB access for auth. No Keycloak token is
-  stored anywhere.
+  verified ID token plus its two expiries and the Keycloak refresh token. **Sessions are stateless
+  (user decision 2026-09-26)**: no session table, no purge job, no DB access for auth. The
+  refresh token is the only Keycloak token kept, and only sealed inside the cookie.
+- **Revalidation (user decision 2026-09-27, design §5.3.1)**: every authenticated request makes
+  one Keycloak call with that refresh token (a refresh grant when due, else introspection), so a
+  session ended, or a user disabled or deleted, in Keycloak is signed out on the next request.
+  Keycloak failures fail open: the session keeps working, only new logins break.
 - **Device grant** (TV): `device_code` never leaves the server — it is sealed into an
   `HttpOnly` cookie scoped to `/api/v1/auth/device`; each poll is one token request (single-shot,
   not `oauth2.Config.DeviceAccessToken`, which blocks until done).
@@ -138,19 +143,44 @@
 - **Session cookie** (design §5.3): `lampa_session=<base64url(AES-256-GCM(JSON))>; Path=/api;
   HttpOnly; SameSite=Lax; Max-Age=<seconds to idle expiry>` plus `Secure` when `PublicURL` is
   https, sealed with the HKDF purpose
-  `lampa-session-v1`. Payload `{sub, name, email, picture, created_at, idle_expires_at}`.
-- **Sliding**: only `GET /api/v1/session` re-issues. It first rejects a cookie past
+  `lampa-session-v1`. Payload `{sub, name, email, picture, created_at, idle_expires_at,
+  refresh_token, refreshed_at, refresh_expires_at}`.
+- **Sliding**: only `GET /api/v1/session` slides the idle expiry. It first rejects a cookie past
   `idle_expires_at` or past `created_at + 180d`, then re-issues with `created_at` preserved,
   `idle_expires_at = min(now + 30d, created_at + 180d)` and a matching `Max-Age`. Other API
-  requests validate but never re-issue. The add-on calls `/session` on every app start **and
-  every 12 hours while Lampa stays open**, so a TV left running keeps its session.
-- **Size bound**: the final `Set-Cookie` value stays ≤ 3 KB after JSON escaping, sealing and
-  base64; `name`/`email` are length-limited and an over-long `picture` URL is dropped, never
-  truncated.
+  requests validate and revalidate but re-issue the cookie only after a Keycloak refresh. The
+  add-on calls `/session` on every app start **and every 12 hours while Lampa stays open**, so a
+  TV left running keeps its session.
+- **Revalidation** (design §5.3.1), in the `Authenticator` and in `/session`, after the expiry
+  checks (one revalidation call; the first use after a restart may add a discovery call): refresh is due when `now >= refreshed_at + min(24h, (refresh_expires_at -
+  refreshed_at) / 2)` → `refresh_token` grant, re-issue the cookie with the new refresh token
+  (`created_at` preserved); otherwise introspect the refresh token
+  (`token_type_hint=refresh_token`, `introspection_endpoint` from discovery). Client
+  credentials, 3-second timeout, redirects disabled, no success cache. Introspection `200
+  {"active":false}` or refresh `400 invalid_grant` → revoked: clear the cookie, `401` (or
+  anonymous `/session`). Introspection `200 {"active":true}`, or refresh `200` with a non-empty
+  `refresh_token` and a positive `refresh_expires_in` → valid. Everything else (timeout,
+  network error, other status, malformed/incomplete body, `active` missing or not a JSON
+  boolean, `invalid_client`, a response over 64 KiB, a refreshed cookie that no longer fits) →
+  Keycloak failure: keep the existing session and cookie, log `[WARN]` without token values. Cookies without a refresh token (none
+  exist before this plan ships) are rejected.
+- **Size bound**: the whole serialized `Set-Cookie` value (`http.Cookie.String()`, name and
+  attributes included) stays ≤ 4000 bytes, checked on issue, `ReplaceTokens` and renewal
+  (browsers cap a cookie at 4096); `name`/`email` are length-limited and an over-long `picture`
+  URL is dropped, never truncated. The refresh token is never dropped or truncated: if the cookie
+  still does not fit at login, the login fails (`/#svtlv-login=failed` or the device poll's
+  error) and is logged; after a refresh it counts as a Keycloak failure (existing session kept).
 - **Revoke all**: bump the purpose label to `lampa-session-v2` in code; never rotate
-  `LAMPA_API_DATA_KEY` (it also seals user data at rest). Accepted costs: logout clears only this
-  device's copy, no per-device revocation, a disabled Keycloak user stays signed in until expiry.
-- **No DB dependency**: sessions, `/session` and logout work with PostgreSQL down.
+  `LAMPA_API_DATA_KEY` (it also seals user data at rest). Per-user revocation is done in
+  Keycloak (disable or delete the user, or end their sessions) and takes effect on the next
+  request; ending one Keycloak session revokes every app session tied to it (browser logins on
+  one device can share one SSO session).
+  Accepted costs: logout clears only this device's copy and leaves the Keycloak session alone (a
+  phone login shares its browser's SSO session with other Svtlv apps), so a copied cookie stays
+  valid until that Keycloak session ends or the cookie expires; a user disabled while Keycloak
+  is unreachable keeps access until it answers again.
+- **No DB dependency**: sessions, `/session` and logout work with PostgreSQL down, and with
+  Keycloak down (revalidation fails open; each request then waits up to the 3-second timeout).
 - **Unavailable vs signed out**: the add-on treats `503`/network errors from the API as "service
   unavailable" (keeps its last state, no sign-out).
 - **Cookies for flows**: `lampa_login` (Path `/api/v1/auth/callback`, Max-Age 600) and
@@ -234,12 +264,12 @@
 - Create: `backend/pkg/auth/session.go`
 - Create: `backend/pkg/auth/session_test.go`
 
-- [ ] define `Profile{UserID, Name, Email, Picture}` and the session payload `{sub, name, email, picture, created_at, idle_expires_at}`; 30-day idle and 180-day absolute constants
-- [ ] implement `IssueSession(w, profile, now)` (new session: `created_at = now`), `OpenSession(r, now) (Session, error)` (rejects missing, tampered, idle-expired and absolute-expired cookies with `ErrNoSession` wrapping `api.ErrUnauthenticated`) and `RenewSession(w, session, now)` (preserves `created_at`, `idle_expires_at = min(now+30d, created_at+180d)`, `Max-Age` matching); sealed with `CookieSealer` purpose `lampa-session-v1`
-- [ ] bound the serialized cookie (≤ 3 KB after escaping, sealing, base64): length-limit `name`/`email`, drop an over-long `picture`, never truncate a URL
+- [ ] define `Profile{UserID, Name, Email, Picture}`, `Tokens{RefreshToken, RefreshExpiresAt}` and the session payload `{sub, name, email, picture, created_at, idle_expires_at, refresh_token, refreshed_at, refresh_expires_at}`; 30-day idle and 180-day absolute constants
+- [ ] implement `IssueSession(w, profile, tokens, now)` (new session: `created_at = refreshed_at = now`), `ReplaceTokens(w, session, tokens, now)` (after a refresh: new refresh token, `refreshed_at = now`, `created_at`/`idle_expires_at` unchanged), `OpenSession(r, now) (Session, error)` (rejects missing, tampered, idle-expired, absolute-expired and refresh-token-less cookies with `ErrNoSession` wrapping `api.ErrUnauthenticated`) and `RenewSession(w, session, now)` (preserves `created_at`, `idle_expires_at = min(now+30d, created_at+180d)`, `Max-Age` matching); sealed with `CookieSealer` purpose `lampa-session-v1`
+- [ ] bound the serialized cookie (`Cookie.String()` ≤ 4000 bytes, attributes included) on issue, `ReplaceTokens` and renewal: length-limit `name`/`email`, drop an over-long `picture`, never truncate a URL, never drop or truncate the refresh token (fail with a distinct error instead)
 - [ ] set `Secure` from `SecureCookies` on every cookie (session, `lampa_login`, `lampa_device`); add `ClearSession(w)` with the same attributes and `Max-Age=-1`
-- [ ] write tests (injected clock): issue/open round trip, renewal preserves `created_at`, idle expiry, absolute cap reached through repeated renewals, `Max-Age` values, cookie attributes with `Secure` on for https and off for http
-- [ ] write tests for errors: tampered, truncated, wrong purpose label, oversized profile (picture dropped, cookie within bound), non-UUID `sub` rejected
+- [ ] write tests (injected clock): issue/open round trip, renewal preserves `created_at`, `ReplaceTokens` keeps both expiries, idle expiry, absolute cap reached through repeated renewals, `Max-Age` values, cookie attributes with `Secure` on for https and off for http
+- [ ] write tests for errors: tampered, truncated, wrong purpose label, oversized profile (picture dropped, cookie within bound with a realistic ~1 KB refresh token), cookie that cannot fit, missing refresh token, non-UUID `sub` rejected
 - [ ] run `make test` and `make lint` - must pass before next task
 
 ### Task 4: Add the Keycloak OIDC client
@@ -249,12 +279,14 @@
 - Create: `backend/pkg/auth/keycloak_test.go`
 
 - [ ] create `Keycloak` with **lazy discovery**: construction never calls Keycloak; the first use runs `oidc.NewProvider` under a mutex and caches the provider, `oauth2.Config` (client id/secret, redirect URI, scopes `openid profile email`) and ID-token verifier; a failed discovery returns an error and is retried on the next use, so a Keycloak outage never stops the API
-- [ ] implement `AuthCodeURL(ctx, state, nonce, verifier)` with S256 PKCE and `Exchange(ctx, code, verifier, nonce) (Profile, error)` that verifies the ID token and nonce
+- [ ] implement `AuthCodeURL(ctx, state, nonce, verifier)` with S256 PKCE and `Exchange(ctx, code, verifier, nonce) (Profile, Tokens, error)` that verifies the ID token and nonce and returns the refresh token with its expiry (`refresh_expires_in`); scopes never include `offline_access`
 - [ ] implement `StartDevice(ctx)` via `oauth2.Config.DeviceAuth` **passing the client secret explicitly** (`oauth2.SetAuthURLParam("client_secret", …)`: upstream `deviceauth.go` sends only `client_id` and `scope`, and Keycloak authenticates confidential clients at its device endpoint)
-- [ ] implement a single-shot `PollDevice(ctx, deviceCode)` as a hand-rolled, client-authenticated `grant_type=urn:ietf:params:oauth:grant-type:device_code` token request (`oauth2.Config.DeviceAccessToken` sleeps one interval before its first request and blocks until done), mapping `authorization_pending`, `slow_down`, `expired_token`, `access_denied` to typed results; the device-flow ID token carries no nonce, so it is verified without the nonce check
+- [ ] implement a single-shot `PollDevice(ctx, deviceCode)` as a hand-rolled, client-authenticated `grant_type=urn:ietf:params:oauth:grant-type:device_code` token request (`oauth2.Config.DeviceAccessToken` sleeps one interval before its first request and blocks until done), mapping `authorization_pending`, `slow_down`, `expired_token`, `access_denied` to typed results; the device-flow ID token carries no nonce, so it is verified without the nonce check; success returns `Profile` and `Tokens` like `Exchange`
 - [ ] extract `Profile{UserID, Name, Email, Picture}`: `sub` must parse as UUID, name falls back to `preferred_username` then `email`, `picture` only if absolute https
+- [ ] implement `Introspect(ctx, refreshToken) (Verdict, error)` and `Refresh(ctx, refreshToken) (Tokens, Verdict, error)` per Technical Details: `Active`/`Revoked` only for the two explicit answers, every other outcome an error (Keycloak failure); one `http.Client` reused, 3-second timeout, `CheckRedirect` returning `http.ErrUseLastResponse`, client secret sent as HTTP Basic; response bodies read through a 64 KiB limit; `active` decoded as `*bool`-style strict JSON so a missing, `null`, string or number value is an error (Go's zero `false` must never sign anyone out); a refresh `200` without a non-empty refresh token or a positive, in-range `refresh_expires_in` is an error, never a renewal; error messages never contain token values
 - [ ] write tests against an `httptest` fake Keycloak (discovery, JWKS with a test RSA key, device and token endpoints) for the success paths of both flows; the fake **rejects device and token requests without the client secret**, as a confidential client in Keycloak does
 - [ ] write tests for errors: bad signature, wrong audience/issuer, nonce mismatch, non-UUID `sub`, each device error code; lazy discovery: Keycloak down → error → Keycloak back → next call works
+- [ ] write tests for revalidation against the fake (which rejects introspection and refresh requests without client authentication): introspection `active` true/false, refresh success, `invalid_grant` → `Revoked`; and failures: `5xx`, `401 invalid_client`, a `302` (not followed), timeout, non-JSON body, an over-limit body, `active` missing/`null`/`"false"`/`0`, refresh `200` with an empty refresh token, a zero, negative, non-numeric or overflowing `refresh_expires_in`
 - [ ] run `make test` and `make lint` - must pass before next task
 
 ### Task 5: Add the session Authenticator and 503 for non-auth failures
@@ -267,10 +299,11 @@
 - Modify: `backend/pkg/api/server.go`
 - Modify: `backend/pkg/api/server_test.go`
 
-- [ ] implement `api.Authenticator` over `OpenSession`: return `sub`; missing/tampered/expired → `api.ErrUnauthenticated`; no DB access
+- [ ] change the seam to `Authenticate(w http.ResponseWriter, r *http.Request) (string, error)` (it must clear or re-issue the cookie); update `DenyAll` and the middleware
+- [ ] implement `api.Authenticator` over `OpenSession` plus revalidation (Technical Details): return `sub`; missing/tampered/expired → `api.ErrUnauthenticated`; revoked → clear the cookie and `api.ErrUnauthenticated`; refreshed → `ReplaceTokens`; Keycloak failure → `sub` plus a `[WARN]`; no DB access
 - [ ] change the `authenticate` middleware: `401 unauthenticated` only for `ErrUnauthenticated`; any other error is logged and answers `503 session_unavailable` (design §5.3)
 - [ ] export `api.WriteError` / `api.WriteJSON` (keep the JSON shape) so `pkg/auth` handlers reuse them (`pkg/auth` already imports `pkg/api`, no cycle)
-- [ ] write tests for valid session, no cookie, malformed cookie, expired session
+- [ ] write tests (fake Keycloak via a consumer-side interface, injected clock) for valid session with introspection, refresh due (cookie re-issued, `created_at` kept), no cookie, malformed cookie, expired session, revoked by introspection and by `invalid_grant` (cookie cleared), Keycloak failure (session kept, no cookie change), a refreshed cookie that no longer fits (session kept), a cookie without a refresh token (rejected); two parallel requests with one due cookie against a fake with rotation off: both refresh, both keep `created_at`, and requests with the old and the new refresh token are both accepted
 - [ ] write tests for the middleware: `ErrUnauthenticated` → `401`, any other error from a fake authenticator → `503` and logged; update existing `identity_test.go` expectations
 - [ ] run `make test` and `make lint` - must pass before next task
 
@@ -280,12 +313,12 @@
 - Create: `backend/pkg/auth/handlers.go`
 - Create: `backend/pkg/auth/handlers_test.go`
 
-- [ ] `GET /api/v1/session`: anonymous or profile JSON; on a valid session `RenewSession` (the only place that slides the idle expiry); always `200`
+- [ ] `GET /api/v1/session`: anonymous or profile JSON; revalidate like the `Authenticator` (revoked → clear cookie, anonymous); on a valid session `RenewSession` (the only place that slides the idle expiry), carrying a refreshed token when one was issued; always `200`
 - [ ] `GET /api/v1/auth/login?return=`: validate the return path (local absolute path only, default `/`), seal login state into `lampa_login`, redirect to Keycloak; `GET /api/v1/auth/callback`: open the cookie, check state, exchange, create session, set cookie, clear `lampa_login`, redirect to the return path + `#svtlv-login=ok`; every failure redirects to `/#svtlv-login=failed` (Technical Details), never a JSON page
-- [ ] `POST /api/v1/auth/device/start` and `POST /api/v1/auth/device/poll` per Technical Details; success clears `lampa_device` and sets the session cookie
+- [ ] `POST /api/v1/auth/device/start` and `POST /api/v1/auth/device/poll` per Technical Details; success clears `lampa_device` and sets the session cookie with the returned refresh token
 - [ ] `POST /api/v1/auth/logout`: `ClearSession`, `204` also when already signed out
 - [ ] write tests (fake `Keycloak` via a consumer-side interface, moq into `mocks/` if useful) for every success path
-- [ ] write tests for errors: open-redirect attempts (`//evil`, `https://evil`, `\\evil`, `/\evil`), state mismatch, missing/expired flow cookies, Keycloak down at login, each device result, expired/tampered session on `/session` → anonymous `200`, `Max-Age` clamped near the absolute cap
+- [ ] write tests for errors: open-redirect attempts (`//evil`, `https://evil`, `\\evil`, `/\evil`), state mismatch, missing/expired flow cookies, Keycloak down at login, each device result, expired/tampered/revoked session on `/session` → anonymous `200` and a cleared cookie, Keycloak failure on `/session` → still signed in, `Max-Age` clamped near the absolute cap, a login whose cookie cannot fit → failure redirect
 - [ ] run `make test` and `make lint` - must pass before next task
 
 ### Task 7: Add CSRF protection and mount the auth routes
@@ -316,7 +349,7 @@
 - [ ] add `health.KeycloakCheck` (advisory) fetching the issuer discovery document with a short timeout
 - [ ] in `main`, build `CookieSealer`, the lazily-discovering `Keycloak`, the handlers and the `Authenticator`; replace `api.DenyAll{}` and the temporary auth handler
 - [ ] write tests for the Keycloak check (healthy, unreachable, bad status) and its `Degraded` aggregation in `/health`
-- [ ] write tests for main wiring: API starts with Keycloak down, user-data returns `401` without a session and `200` with one (fake Keycloak), `/session` and logout work with the DB down
+- [ ] write tests for main wiring: API starts with Keycloak down, user-data returns `401` without a session and `200` with one (fake Keycloak), the next request after the fake revokes the session returns `401`, an existing session keeps working when the fake Keycloak is stopped, `/session` and logout work with the DB down
 - [ ] run `make test` and `make lint` - must pass before next task
 
 ### Task 9: Add the Apache /api proxy and update Compose
@@ -396,14 +429,14 @@
 - Modify: `AGENTS.md`
 - Modify: `docs/settings-sync-backend-design.md`
 
-- [ ] `backend/README.md`: auth routes, config keys and placeholders, stateless cookie sessions and their accepted costs, 401 vs 503, local testing with a fake or local Keycloak
+- [ ] `backend/README.md`: auth routes, config keys and placeholders, stateless cookie sessions, per-request Keycloak revalidation (fail-open) and the accepted costs, the Keycloak realm prerequisites, 401 vs 503, local testing with a fake or local Keycloak
 - [ ] `CLAUDE.md` and its mirror `AGENTS.md`: remove "user-data routes answer 401 until Plan 2" and the published API port; update "placeholders resolved only in `Database.Password` and `DataKey`"; document the `svtlv/` add-on rules (ES5 gate, marked `index.html` block, no `app.min.js` edits) and that `svtlv/` is a top-level directory that intentionally ships in `lampa-web` (the `.dockerignore` rule); the `/api` proxy
-- [ ] design: update §3.1's "published on the same host port" sentence; record Plan 2 deviations under §14 (non-secret placeholders `LAMPA_PUBLIC_URL`/`LAMPA_KEYCLOAK_ISSUER`, session lifetimes as constants, any others found)
+- [ ] design: update §3.1's "published on the same host port" sentence; record Plan 2 deviations under §14 (non-secret placeholders `LAMPA_PUBLIC_URL`/`LAMPA_KEYCLOAK_ISSUER`, session lifetimes as constants, the `Authenticate(w, r)` seam change, any others found)
 - [ ] run `make test` and `make lint` - must pass before next task
 
 ### Task 15: Verify acceptance criteria
 - [ ] verify every Overview item is implemented and design §5, §8, §10.5, §12 match the code
-- [ ] verify edge cases: Keycloak down (API up, `/health` Degraded, existing sessions work, login recovers when it returns), expired session, DB down (sessions still work; user data `503`), open-redirect attempts, CSRF rejections, `account_use=false`, missing add-on file
+- [ ] verify edge cases: Keycloak down (API up, `/health` Degraded, existing sessions work, login recovers when it returns), session revoked in Keycloak (next request `401`), expired session, DB down (sessions still work; user data `503`), open-redirect attempts, CSRF rejections, `account_use=false`, missing add-on file
 - [ ] run full test suite in WSL: `cd backend && make test && make race && make lint`
 - [ ] run the ES5 check and the compose `config` check
 - [ ] verify coverage ≥ 80% for new backend code (excluding mocks)
@@ -424,6 +457,11 @@
   URI `http://<tailscale-ip>:8092/api/v1/auth/callback` (= `LAMPA_PUBLIC_URL` + `/api/v1/auth/callback`),
   no web origins
 - optional `picture` user-attribute mapper for avatars
+- realm prerequisites for revalidation (design §5.3.1), checked explicitly, not assumed: SSO
+  Session Idle ≥ 31 days, SSO Session Max ≥ 180 days, the `svtlv-lampa` client's session
+  idle/max unset or no shorter, **Revoke Refresh Token off**; the client does not get
+  `offline_access` as a default scope. These realm settings are shared with Svtlv, which applies
+  the same revalidation
 - the issuer pre-flight is done in Task 1; re-check after the deploy. Once the client exists,
   start one device authorization and confirm its `verification_uri` opens on the phone. With an HTTP (tailnet)
   issuer, the phone used for the TV device login must be on Tailscale
@@ -449,8 +487,14 @@
 - a file://-origin shell (if available) shows no Account UI and keeps CUB's icon
 - session expiry: covered by unit tests with an injected clock; on-device, delete the
   `lampa_session` cookie in devtools and confirm the add-on shows signed out
+- revocation, each on a signed-in browser and on the TV: end the user's session in the Keycloak
+  admin console → the next `/session` (reload, or wait for the heartbeat) shows signed out; the
+  same after disabling the user, and after deleting a test user. Stop Keycloak briefly → the
+  signed-in session keeps working and `[WARN]` lines appear; start it → no re-login needed (an
+  outage longer than the refresh token or SSO idle lifetime ends the session anyway)
 - security review: cookie attributes in devtools (`HttpOnly`, `SameSite=Lax`, no `Secure` on the http URL), CSRF rejection with a foreign `Origin`, no
-  Keycloak tokens in storage or logs, HTML in the Keycloak display name shown literally
+  Keycloak tokens in Lampa storage, the database or logs (the refresh token exists only sealed in
+  `lampa_session`), HTML in the Keycloak display name shown literally
 
 **Rollback drill**:
 - revert the merge commit on `svtlvtv`, redeploy, confirm Lampa works anonymously and CUB's own

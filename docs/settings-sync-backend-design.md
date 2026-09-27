@@ -291,7 +291,8 @@ can produce a null origin from a sandboxed iframe.
 
 Both flows run in the Go backend with `github.com/coreos/go-oidc/v3` and
 `golang.org/x/oauth2` (vendored); no hand-written JWT validation. The browser
-never receives a Keycloak token.
+never receives a readable Keycloak token: only the refresh token is kept, sealed
+inside the `HttpOnly` session cookie (§5.3).
 
 The flow is chosen in the browser with Lampa's `Platform.tv()` — the same split
 CUB's own login uses (QR on TV, mobile layout otherwise). `Platform.screen('tv')`
@@ -329,42 +330,99 @@ key is never used directly for cookies.
 
 Sessions are stateless: the whole session lives in one sealed cookie and the
 server keeps no session state (decided 2026-09-26; no table, no purge job).
+Every authenticated request is revalidated against Keycloak, so ending the
+Keycloak session, disabling or deleting the user signs them out of Lampa on
+their next request (decided 2026-09-27; §5.3.1).
 
 - the `lampa_session` cookie is AES-256-GCM sealed JSON
-  `{sub, name, email, picture, created_at, idle_expires_at}`; the key is derived
+  `{sub, name, email, picture, created_at, idle_expires_at, refresh_token,
+  refreshed_at, refresh_expires_at}`; the key is derived
   from `LAMPA_API_DATA_KEY` with HKDF-SHA256 and the purpose label
   `lampa-session-v1`, so the browser can neither read nor forge it;
 - `HttpOnly`, `SameSite=Lax`, `Path=/api`, `Secure` only when the public URL
   is HTTPS (§5.1), with
   a real `Max-Age`. A session-only cookie could vanish on an app restart;
-- lifetime is independent of Keycloak: sliding 30-day idle timeout, 180-day
-  absolute cap. Re-login with a remote is costly, so TV sessions must last;
+- lifetime is the app's own: sliding 30-day idle timeout, 180-day absolute
+  cap. Re-login with a remote is costly, so TV sessions must last. Keycloak can
+  only end a session earlier (§5.3.1), never extend it;
 - the idle timeout slides only when the cookie is re-issued: `GET
   /api/v1/session` first rejects a cookie past `idle_expires_at` or past
   `created_at + 180 days`, then re-issues it with `created_at` preserved and
   `idle_expires_at = min(now + 30 days, created_at + 180 days)`, `Max-Age`
   matching. The add-on calls it at start and every 12 hours, so a TV left
-  running keeps its session; other API requests validate but never re-issue;
+  running keeps its session; other API requests validate and revalidate
+  (§5.3.1) but re-issue the cookie only after a Keycloak refresh;
 - after the ID token is verified the backend keeps only `sub`, `name`
   (falling back to `preferred_username`), `email` and the optional `picture`,
-  all inside the cookie. No access or refresh token is stored. The final
-  `Set-Cookie` value is bounded (≤ 3 KB after JSON escaping, sealing and
-  base64); an over-long `picture` URL is dropped, never truncated, and names
-  are length-limited;
+  all inside the cookie, plus the refresh token from the same token response.
+  The access and ID tokens are discarded. The final `name=value` stays within
+  4000 bytes after JSON escaping, sealing and base64 (browsers cap one cookie at
+  4096; the whole serialized `Set-Cookie` value, attributes included, is
+  bounded on issue and on every re-issue); an over-long `picture` URL is
+  dropped, never truncated, names are length-limited, and the refresh token is
+  never dropped or truncated: if it still does not fit, the login fails and is
+  logged (after a refresh, the existing session is kept);
 - `POST /api/v1/auth/logout` clears the cookie on this device. It ends the
-  Lampa session only; the Keycloak SSO session is left alone;
-- accepted costs of stateless sessions: a copied cookie stays valid until its
-  expiry even after logout; there is no per-device revocation; a user disabled
-  in Keycloak stays signed in until expiry; the profile (including the avatar)
-  refreshes on the next login. Revoking every session at once is a code
+  Lampa session only; the Keycloak SSO session is left alone, because a phone
+  login shares its browser's SSO session with other Svtlv apps;
+- accepted costs of stateless sessions: a copied cookie stays valid after
+  logout until its Keycloak session ends or the cookie expires; revocation is
+  done in Keycloak, and ending one Keycloak session revokes every app session
+  tied to it (browser logins on one device can share one SSO session); the
+  profile (including the avatar) refreshes on the next login. Revoking every session at once is a code
   change that bumps the purpose label (`lampa-session-v2`) — never a rotation of
   `LAMPA_API_DATA_KEY`, which also seals user data at rest;
 - sessions, `GET /api/v1/session` and logout work with the database down;
+  they keep working with Keycloak down too (§5.3.1);
 - the `Authenticator` seam (`api.Authenticator`) is implemented in `pkg/auth`:
-  it opens the cookie, checks both expiries and returns `sub`. A missing,
-  tampered or expired cookie is `ErrUnauthenticated`; the `authenticate`
+  it opens the cookie, checks both expiries, revalidates (§5.3.1) and returns
+  `sub`. A missing, tampered, expired or revoked cookie is
+  `ErrUnauthenticated` (a revoked one is also cleared); the `authenticate`
   middleware answers `401` for it and `503 session_unavailable` for any other
   error, so a client is never told it is signed out because a dependency failed.
+
+### 5.3.1 Revalidation against Keycloak
+
+Decided 2026-09-27: ending a user's Keycloak session (admin console "Sign
+out", or the session expiring), disabling or deleting the user signs them out
+of Lampa on their **next** authenticated request (`/api/v1/session` or any
+user-data call), while the 30/180-day lifetimes above stay the app's.
+
+- every authenticated request makes one revalidation call to Keycloak with the
+  sealed refresh token (the first use after a restart may add a discovery
+  call), using the client credentials, an overall 3-second timeout and
+  redirects disabled. No success is cached: a cache would delay revocation;
+- **refresh is due** when `now >= refreshed_at + min(1 day, (refresh_expires_at
+  - refreshed_at) / 2)`. Then the call is a `refresh_token` grant, which also
+  validates, slides Keycloak's SSO idle timer and returns a new refresh token;
+  the cookie is re-issued with it (`created_at` preserved, `idle_expires_at`
+  slid only by `/session`). Otherwise the call is token introspection
+  (`token_type_hint=refresh_token`, endpoint from discovery), which neither
+  slides the SSO idle timer nor consumes a token reuse. Keycloak 26.5.7 `RefreshTokenIntrospectionProvider` checks
+  the user session and that the user exists and is enabled;
+- **outcomes**: introspection `200` with `active: false`, or refresh `400
+  invalid_grant` → signed out (cookie cleared, `401`, or anonymous `/session`).
+  Introspection `200` with `active: true`, or refresh `200` carrying a
+  non-empty refresh token and a positive `refresh_expires_in` → valid.
+  Anything else (timeout, network error, another status, a malformed or
+  incomplete body, an `active` that is not a JSON boolean, `invalid_client`)
+  is a Keycloak failure: the session **keeps
+  working** (user decision) and a `[WARN]` is logged. A Keycloak outage
+  therefore breaks new logins only, and a user disabled during an outage keeps
+  access until Keycloak answers again. During an outage each request waits up
+  to the timeout;
+- the `refresh_token` grant can run concurrently for one cookie (tabs, parallel
+  requests). That is harmless only with the realm's **Revoke Refresh Token
+  off**, which is therefore a deployment prerequisite, not an assumed default;
+- Keycloak prerequisites (Post-Completion): realm SSO Session Idle ≥ 31 days
+  (one day of slack over the app's 30, since Keycloak's idle timer slides only
+  on a refresh) and SSO Session Max ≥ 180 days; client session idle/max unset
+  or no shorter; Revoke Refresh Token off; `offline_access` never requested (an
+  offline token outlives the SSO session, defeating revocation). The 30/180
+  days are caps, not guarantees: a phone's SSO session may have started before
+  the Lampa login, so Keycloak's max can end it earlier;
+- cookies issued before this change have no refresh token and are rejected
+  (one re-login).
 
 ### 5.4 Avatar
 
@@ -833,8 +891,9 @@ everything and leaves CUB's icon visible when `location.protocol` is not
   document.
 - PostgreSQL unavailable: both health endpoints report `Unhealthy`, the Docker
   critical probe fails and user-data endpoints return a temporary error.
-- Keycloak unavailable: anonymous mode and already-loaded local data continue
-  working; new login fails cleanly and `/health` reports `Degraded`.
+- Keycloak unavailable: existing sessions (revalidation fails open, §5.3.1),
+  anonymous mode and already-loaded local data continue working; new login
+  fails cleanly and `/health` reports `Degraded`.
 - Invalid server document: reject it and keep the current local values.
 
 ## 12. Security
@@ -844,8 +903,12 @@ everything and leaves CUB's icon visible when `location.protocol` is not
   the same holds for Keycloak, whose configured issuer must equal its `iss`.
 - Use sealed, stateless session cookies (`HttpOnly`, `SameSite=Lax`, `Secure`
   when the public URL is HTTPS) that the browser can neither read nor forge (§5.3).
-- Keep Keycloak access and refresh tokens out of the browser and out of the
-  database.
+- Keep Keycloak access and ID tokens out of the browser; keep the refresh token
+  only sealed inside the `HttpOnly` session cookie; keep all of them out of the
+  database and logs.
+- Revalidate every authenticated request against Keycloak (§5.3.1), so a
+  session ended, or a user disabled or deleted, in Keycloak is signed out on the
+  next request.
 - Protect modifying requests against CSRF with `X-Lampa-Csrf` plus the
   `Origin` check (§5.5); never enable credentialed CORS or trust
   `Origin: null`.
