@@ -55,6 +55,16 @@
   (Android WebView) and XWalk (Crosswalk); no cookie code, WebView defaults apply.
 - **Toolchain**: all `make` targets run inside WSL Ubuntu from `backend/` (Windows Go has no
   cgo, so `-race` fails there). Go style follows the local Ralphex checkout.
+- ⚠️ **Keycloak pre-flight (Task 1) not yet run**: it needs shell access to the production
+  server, which the automated run does not have. The Keycloak address is still undecided and
+  checks (a)–(c) are unverified; run them before the production deploy (Post-Completion) and
+  record the result here. If they fail, design the transport path (design §5.6) before deploying.
+- **Config as implemented (Task 1)**: `config.Config.Auth` (`config.Auth{PublicURL, Issuer,
+  ClientID, ClientSecret, SecureCookies}`). `PublicURL` is stricter than planned: it must be
+  exactly the lowercase `scheme://host[:port]` a browser sends as `Origin` (no trailing slash,
+  no default port), so the Task 7 Origin check can compare strings. `Issuer` keeps its path and
+  any trailing slash as given (go-oidc compares it byte for byte) and rejects user, query and
+  fragment.
 
 ## Development Approach
 - **testing approach**: Regular (code first, then tests in the same task)
@@ -236,14 +246,14 @@
 - Modify: `backend/pkg/config/config_test.go`
 - Modify: `backend/cmd/lampa-api/main_test.go`
 
-- [ ] **pre-flight (before any code)**: decide the Keycloak address (public HTTPS or HTTP on the tailnet), then on the server run `docker exec svtlvtv_lampa_api curl -fsS <issuer>/.well-known/openid-configuration` and check (a) the returned `issuer` equals `<issuer>` exactly (a realm with a fixed public HTTPS hostname returns `https://…` even over a Tailscale address), (b) every advertised endpoint the API calls (`token_endpoint`, `device_authorization_endpoint`, `jwks_uri`) is reachable from the container, (c) the `authorization_endpoint` users open is reachable from a phone and a browser on the tailnet (the device `verification_uri` only comes from a device authorization response, so it is checked after the client exists — Post-Completion). `go-oidc` uses the advertised endpoints as-is, and `oidc.InsecureIssuerURLContext` only changes which issuer is expected, not those URLs. Keep the shared `svtlv` realm's hostname/issuer unchanged (other Svtlv clients depend on it) unless changing it is separately approved. Record the result in Context; if (a)–(c) cannot all hold, stop and design an explicit transport path in this plan and design §5.6 before continuing
-- [ ] add `Auth` settings (PublicURL, Issuer, ClientID, ClientSecret) to `settings`/`Config`, strict decoding unchanged
-- [ ] resolve `{LAMPA_PUBLIC_URL}`, `{LAMPA_KEYCLOAK_ISSUER}` and `{LAMPA_KEYCLOAK_CLIENT_SECRET}` with explicit `resolve` calls; missing values fail naming the variable, never the value
-- [ ] validate: `PublicURL` an absolute `http`/`https` origin without path, `Issuer` an absolute `http`/`https` URL, non-empty client ID/secret; expose `SecureCookies = PublicURL is https`; `String()`/`GoString()` redact the client secret
-- [ ] update `main_test.go`'s `testSettings` fixture with an `Auth` section and its env maps with the three new variables, so the existing run tests keep passing
-- [ ] write tests for successful load per environment (Test, Production) including redaction
-- [ ] write tests for errors: missing variables, `PublicURL` with a path or another scheme, non-http(s) issuer, unknown key
-- [ ] run `make test` and `make lint` - must pass before next task
+- [x] **pre-flight (before any code)** (skipped - not automatable: needs shell access to the production server; ⚠️ must be run before the production deploy, see Context): decide the Keycloak address (public HTTPS or HTTP on the tailnet), then on the server run `docker exec svtlvtv_lampa_api curl -fsS <issuer>/.well-known/openid-configuration` and check (a) the returned `issuer` equals `<issuer>` exactly (a realm with a fixed public HTTPS hostname returns `https://…` even over a Tailscale address), (b) every advertised endpoint the API calls (`token_endpoint`, `device_authorization_endpoint`, `jwks_uri`) is reachable from the container, (c) the `authorization_endpoint` users open is reachable from a phone and a browser on the tailnet (the device `verification_uri` only comes from a device authorization response, so it is checked after the client exists — Post-Completion). `go-oidc` uses the advertised endpoints as-is, and `oidc.InsecureIssuerURLContext` only changes which issuer is expected, not those URLs. Keep the shared `svtlv` realm's hostname/issuer unchanged (other Svtlv clients depend on it) unless changing it is separately approved. Record the result in Context; if (a)–(c) cannot all hold, stop and design an explicit transport path in this plan and design §5.6 before continuing
+- [x] add `Auth` settings (PublicURL, Issuer, ClientID, ClientSecret) to `settings`/`Config`, strict decoding unchanged
+- [x] resolve `{LAMPA_PUBLIC_URL}`, `{LAMPA_KEYCLOAK_ISSUER}` and `{LAMPA_KEYCLOAK_CLIENT_SECRET}` with explicit `resolve` calls; missing values fail naming the variable, never the value
+- [x] validate: `PublicURL` an absolute `http`/`https` origin without path, `Issuer` an absolute `http`/`https` URL, non-empty client ID/secret; expose `SecureCookies = PublicURL is https`; `String()`/`GoString()` redact the client secret
+- [x] update `main_test.go`'s `testSettings` fixture with an `Auth` section and its env maps with the three new variables, so the existing run tests keep passing
+- [x] write tests for successful load per environment (Test, Production) including redaction
+- [x] write tests for errors: missing variables, `PublicURL` with a path or another scheme, non-http(s) issuer, unknown key
+- [x] run `make test` and `make lint` - must pass before next task
 
 ### Task 2: Add OIDC dependencies and cookie sealing
 

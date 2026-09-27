@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -30,6 +31,17 @@ const testSecret = "s3cr3t-pw"
 var testKey = base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, config.DataKeySize))
 
 func noEnv(string) (string, bool) { return "", false }
+
+// withAuth returns m plus the three auth variables testSettings refers to.
+func withAuth(m map[string]string) map[string]string {
+	out := map[string]string{
+		"LAMPA_PUBLIC_URL":             "http://100.64.0.1:8092",
+		"LAMPA_KEYCLOAK_ISSUER":        "http://100.64.0.2:8080/realms/svtlv",
+		"LAMPA_KEYCLOAK_CLIENT_SECRET": testSecret,
+	}
+	maps.Copy(out, m)
+	return out
+}
 
 func envOf(m map[string]string) func(string) (string, bool) {
 	return func(k string) (string, bool) {
@@ -71,7 +83,8 @@ func testConfig(dsn string) config.Config {
 }
 
 // testSettings returns an appsettings.json with the given database and listeners; the password
-// and data key come from the LAMPA_DB_PASSWORD and LAMPA_API_DATA_KEY placeholders.
+// and data key come from the LAMPA_DB_PASSWORD and LAMPA_API_DATA_KEY placeholders, the auth
+// settings from the variables withAuth adds.
 func testSettings(t *testing.T, host string, port uint16, apiListen, healthListen string) fstest.MapFS {
 	t.Helper()
 	data, err := json.Marshal(map[string]any{
@@ -80,6 +93,8 @@ func testSettings(t *testing.T, host string, port uint16, apiListen, healthListe
 		"Database": map[string]any{"Host": host, "Port": port, "Name": "lampa", "User": "lampa",
 			"Password": "{LAMPA_DB_PASSWORD}", "SSLMode": "disable"},
 		"DataKey": "{LAMPA_API_DATA_KEY}",
+		"Auth": map[string]any{"PublicURL": "{LAMPA_PUBLIC_URL}", "Issuer": "{LAMPA_KEYCLOAK_ISSUER}",
+			"ClientID": "svtlv-lampa", "ClientSecret": "{LAMPA_KEYCLOAK_CLIENT_SECRET}"},
 	})
 	require.NoError(t, err)
 	return fstest.MapFS{"appsettings.json": {Data: data}}
@@ -165,11 +180,16 @@ func TestRun_invalidConfig(t *testing.T) {
 		wantErr  error
 	}{
 		{name: "no env", settings: settings, env: map[string]string{}, wantErr: config.ErrMissing},
-		{name: "missing key", settings: settings, env: map[string]string{"LAMPA_DB_PASSWORD": testSecret}, wantErr: config.ErrMissing},
-		{name: "bad key", settings: settings, env: map[string]string{"LAMPA_DB_PASSWORD": testSecret, "LAMPA_API_DATA_KEY": "short"},
-			wantErr: config.ErrInvalid},
+		{name: "missing key", settings: settings, env: withAuth(map[string]string{"LAMPA_DB_PASSWORD": testSecret}),
+			wantErr: config.ErrMissing},
+		{name: "bad key", settings: settings,
+			env: withAuth(map[string]string{"LAMPA_DB_PASSWORD": testSecret, "LAMPA_API_DATA_KEY": "short"}), wantErr: config.ErrInvalid},
 		{name: "same listen", settings: testSettings(t, "127.0.0.1", 1, ":9000", ":9000"),
-			env: map[string]string{"LAMPA_DB_PASSWORD": testSecret, "LAMPA_API_DATA_KEY": testKey}, wantErr: config.ErrInvalid},
+			env: withAuth(map[string]string{"LAMPA_DB_PASSWORD": testSecret, "LAMPA_API_DATA_KEY": testKey}), wantErr: config.ErrInvalid},
+		{name: "missing auth variable", settings: settings,
+			env: map[string]string{"LAMPA_DB_PASSWORD": testSecret, "LAMPA_API_DATA_KEY": testKey}, wantErr: config.ErrMissing},
+		{name: "bad public url", settings: settings, env: withAuth(map[string]string{"LAMPA_DB_PASSWORD": testSecret,
+			"LAMPA_API_DATA_KEY": testKey, "LAMPA_PUBLIC_URL": "http://100.64.0.1:8092/path"}), wantErr: config.ErrInvalid},
 		{name: "unknown environment", settings: settings, env: map[string]string{"LAMPA_ENVIRONMENT": "Staging"},
 			wantErr: config.ErrInvalid},
 	}
@@ -209,7 +229,7 @@ func TestRun_logsEnvironment(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			env := map[string]string{"LAMPA_DB_PASSWORD": testSecret, "LAMPA_API_DATA_KEY": testKey}
+			env := withAuth(map[string]string{"LAMPA_DB_PASSWORD": testSecret, "LAMPA_API_DATA_KEY": testKey})
 			if tc.env != "" {
 				env[config.EnvEnvironment] = tc.env
 			}
@@ -308,7 +328,7 @@ func TestRun_bindFailure(t *testing.T) {
 
 	db := pgtest.DB(t).Config().ConnConfig
 	settings := testSettings(t, db.Host, db.Port, "127.0.0.1:0", busy.Addr().String())
-	env := envOf(map[string]string{"LAMPA_DB_PASSWORD": db.Password, "LAMPA_API_DATA_KEY": testKey})
+	env := envOf(withAuth(map[string]string{"LAMPA_DB_PASSWORD": db.Password, "LAMPA_API_DATA_KEY": testKey}))
 	var out bytes.Buffer
 	done := make(chan error, 1)
 	go func() { done <- run(t.Context(), nil, settings, env, &out) }()
