@@ -124,6 +124,15 @@
   ⚠️ Docker Desktop could not be started in the automated run, so the testcontainers tests
   (`TestStart_keycloakDown`, the updated `TestStart_servesUntilCanceled`) compiled and linted but
   were skipped locally; CI runs them with `LAMPA_API_REQUIRE_DOCKER=1`.
+- **Proxy and Compose as implemented (Task 9)**: the web `Dockerfile` uncomments the
+  `proxy_module`/`proxy_http_module` `LoadModule` lines with `sed` (the build fails if either is
+  still missing) and appends `ProxyPreserveHost On` plus the `/api/v1/` `ProxyPass …
+  disablereuse=On` / `ProxyPassReverse` pair. `lampa-api` publishes no port; the Keycloak
+  variables are passed with `:?` guards and `devops/.env.example` carries `http://localhost:8092`,
+  `http://localhost:8080/realms/svtlv` and a `change-me` secret. The deploy workflow still writes
+  `LAMPA_API_PORT` (harmless now; dropped in Task 10). ⚠️ The local-stack proxy checks (curl
+  `/api/v1/session` through `:8092`, `:8081` not proxied, API restart without 502) were not run:
+  Docker Desktop does not start in the automated run. They are listed under Post-Completion.
 
 ## Development Approach
 - **testing approach**: Regular (code first, then tests in the same task)
@@ -432,11 +441,11 @@
 - Modify: `devops/docker-compose.yaml`
 - Modify: `devops/.env.example`
 
-- [ ] in the web `Dockerfile`, enable `mod_proxy`/`mod_proxy_http` and append the `/api/v1/` `ProxyPass … disablereuse=On` / `ProxyPassReverse` / `ProxyPreserveHost` block to `httpd.conf` with `RUN` (no new top-level directory in `htdocs`)
-- [ ] Compose: stop publishing the `lampa-api` port; pass `LAMPA_PUBLIC_URL`, `LAMPA_KEYCLOAK_ISSUER`, `LAMPA_KEYCLOAK_CLIENT_SECRET` with `:?` guards; update the "non-secret settings live in those files" comment for the two non-secret placeholders; keep the header-comment layout rules (`image:` before `build:`, only `context:`/`args:` between `build:` and `dockerfile:`)
-- [ ] update `devops/.env.example` (new variables with placeholders, drop `LAMPA_API_PORT`)
-- [ ] verify: `docker compose -f devops/docker-compose.yaml --env-file devops/.env.example config --quiet`; local stack up → `curl http://localhost:8092/api/v1/session` returns `{"authenticated":false}` through the proxy; `:8081` is not reachable through it; `docker restart svtlvtv_lampa_api` and the same curl still works (no stale backend IP)
-- [ ] run `make test` - must pass before next task
+- [x] in the web `Dockerfile`, enable `mod_proxy`/`mod_proxy_http` and append the `/api/v1/` `ProxyPass … disablereuse=On` / `ProxyPassReverse` / `ProxyPreserveHost` block to `httpd.conf` with `RUN` (no new top-level directory in `htdocs`)
+- [x] Compose: stop publishing the `lampa-api` port; pass `LAMPA_PUBLIC_URL`, `LAMPA_KEYCLOAK_ISSUER`, `LAMPA_KEYCLOAK_CLIENT_SECRET` with `:?` guards; update the "non-secret settings live in those files" comment for the two non-secret placeholders; keep the header-comment layout rules (`image:` before `build:`, only `context:`/`args:` between `build:` and `dockerfile:`)
+- [x] update `devops/.env.example` (new variables with placeholders, drop `LAMPA_API_PORT`)
+- [x] verify (compose `config` passes, the three `:?` guards fire when a variable is missing, and the deploy strip + guard pass on the new file; the local-stack checks were skipped - not automatable: Docker Desktop does not start in the automated run, moved to Post-Completion): `docker compose -f devops/docker-compose.yaml --env-file devops/.env.example config --quiet`; local stack up → `curl http://localhost:8092/api/v1/session` returns `{"authenticated":false}` through the proxy; `:8081` is not reachable through it; `docker restart svtlvtv_lampa_api` and the same curl still works (no stale backend IP)
+- [x] run `make test` - must pass before next task
 
 ### Task 10: Add Keycloak settings to the deploy workflow
 
@@ -538,6 +547,13 @@
 - the issuer pre-flight is done in Task 1; re-check after the deploy. Once the client exists,
   start one device authorization and confirm its `verification_uri` opens on the phone. With an HTTP (tailnet)
   issuer, the phone used for the TV device login must be on Tailscale
+
+**Local proxy check** (Task 9, not run in the automated run):
+- `cp devops/.env.example devops/.env`, `docker compose -f devops/docker-compose.yaml up -d --build`;
+  `curl http://localhost:8092/api/v1/session` returns `{"authenticated":false}` through the
+  proxy; `curl http://localhost:8092/health` is Lampa's static 404, not the API health;
+  `docker restart svtlvtv_lampa_api`, wait until healthy, and the same `/session` curl still
+  answers `200` (no stale backend IP)
 
 **Deployment**:
 - add repository variables `LAMPA_PUBLIC_URL` (`http://<tailscale-ip>:8092`) and
