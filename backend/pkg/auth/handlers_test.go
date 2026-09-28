@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -719,11 +720,61 @@ func TestHandlers_Logout(t *testing.T) {
 			assert.Equal(t, http.StatusNoContent, rec.Code)
 			assert.Empty(t, rec.Body.String())
 			assertCleared(t, cookieNamed(t, rec, SessionCookie), SessionPath)
+			mark := cookieNamed(t, rec, LogoutCookie)
+			assert.Equal(t, strconv.FormatInt(testNow.Unix(), 10), mark.Value, "the logout time")
+			assert.Equal(t, SessionPath, mark.Path)
 		})
 	}
 	refreshed, introspected := th.kc.calls()
 	assert.Empty(t, refreshed, "logout leaves the keycloak session alone")
 	assert.Empty(t, introspected)
+}
+
+// another tab's /session request, in flight during the logout, answers with a renewed cookie
+// after it: that cookie must not sign the device back in.
+func TestHandlers_LogoutRenewedLate(t *testing.T) {
+	th := newTestHandlers(t, newFakeKeycloakClient(testRefreshToken))
+	_, cookie := issue(t, th.c, testProfile, testTokens(), testNow.Add(-time.Hour))
+	late := cookieNamed(t, th.do(http.MethodGet, SessionRoute, cookie), SessionCookie)
+	mark := cookieNamed(t, th.do(http.MethodPost, LogoutRoute, cookie), LogoutCookie)
+
+	th.now = testNow.Add(time.Minute)
+	rec := th.do(http.MethodGet, SessionRoute, late, mark)
+	assertAnonymous(t, rec)
+	assertCleared(t, cookieNamed(t, rec, SessionCookie), SessionPath)
+
+	r := requestWith(late)
+	r.AddCookie(mark)
+	_, err := NewSessionAuthenticator(th.c, nil, nil).Authenticate(httptest.NewRecorder(), r)
+	require.ErrorIs(t, err, ErrNoSession, "user data refuses it too, before any keycloak call")
+}
+
+func TestHandlers_LoginClearsLogoutMark(t *testing.T) {
+	mark := reqCookie(LogoutCookie, "1789000000")
+
+	t.Run("callback", func(t *testing.T) {
+		th := newTestHandlers(t, newFakeKeycloakClient())
+		lc, call := th.startLogin(t, "/")
+		rec := th.do(http.MethodGet, CallbackRoute+"?code=c&state="+url.QueryEscape(call.State), lc, mark)
+		require.Equal(t, http.StatusFound, rec.Code)
+		assertCleared(t, cookieNamed(t, rec, LogoutCookie), SessionPath)
+		_, err := th.c.OpenSession(requestWith(cookieNamed(t, rec, SessionCookie)), th.now)
+		require.NoError(t, err)
+	})
+	t.Run("device", func(t *testing.T) {
+		kc := newFakeKeycloakClient()
+		kc.poll = DeviceResult{Status: DeviceAuthorized, Profile: testProfile, Tokens: testTokens()}
+		th := newTestHandlers(t, kc)
+		rec := th.do(http.MethodPost, DevicePollRoute, th.deviceCookie(t), mark)
+		assertSignedIn(t, rec)
+		assertCleared(t, cookieNamed(t, rec, LogoutCookie), SessionPath)
+	})
+	t.Run("no mark", func(t *testing.T) {
+		th := newTestHandlers(t, newFakeKeycloakClient())
+		lc, call := th.startLogin(t, "/")
+		rec := th.do(http.MethodGet, CallbackRoute+"?code=c&state="+url.QueryEscape(call.State), lc)
+		noCookie(t, rec, LogoutCookie)
+	})
 }
 
 func TestHandlers_Routing(t *testing.T) {

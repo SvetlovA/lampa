@@ -303,7 +303,9 @@
   Accepted costs: logout clears only this device's copy and leaves the Keycloak session alone (a
   phone login shares its browser's SSO session with other Svtlv apps), so a copied cookie stays
   valid until that Keycloak session ends or the cookie expires; a user disabled while Keycloak
-  is unreachable keeps access until it answers again.
+  is unreachable keeps access until it answers again. Not accepted: a request of another tab
+  in flight during the logout renewing the cookie afterwards; logout sets a `lampa_logout` mark
+  (logout time) that refuses sessions created up to it, and the next login deletes it.
 - **No DB dependency**: sessions, `/session` and logout work with PostgreSQL down, and with
   Keycloak down (revalidation fails open; each request then waits up to the 3-second timeout).
 - **Unavailable vs signed out**: the add-on treats `503`/network errors from the API as "service

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 	"unicode/utf8"
 
@@ -21,6 +22,7 @@ const (
 const (
 	SessionCookie = "lampa_session"
 	SessionPath   = "/api"
+	LogoutCookie  = "lampa_logout" // logout time of this device, see EndSession
 	LoginCookie   = "lampa_login"
 	LoginPath     = "/api/v1/auth/callback"
 	DeviceCookie  = "lampa_device"
@@ -153,12 +155,46 @@ func (c *Cookies) OpenSession(r *http.Request, now time.Time) (Session, error) {
 	if err := validateSession(s, now); err != nil {
 		return Session{}, fmt.Errorf("%w: %w", ErrNoSession, err)
 	}
+	if loggedOut, ok := logoutMark(r); ok && !s.CreatedAt.After(loggedOut) {
+		return Session{}, fmt.Errorf("%w: signed out on this device", ErrNoSession)
+	}
 	return s, nil
 }
 
 // ClearSession deletes the session cookie, with the same attributes it was set with.
 func (c *Cookies) ClearSession(w http.ResponseWriter) {
 	http.SetCookie(w, c.newCookie(SessionCookie, SessionPath, "", -1))
+}
+
+// EndSession deletes the session cookie and marks this device signed out at now: OpenSession
+// then refuses every session created up to now. a request still in flight (another tab) may
+// answer with a renewed session cookie after the logout, and that cookie keeps its created_at.
+// the mark lives as long as any such session could, so it needs no sealing: dropping or forging
+// it only affects the sender's own sessions.
+func (c *Cookies) EndSession(w http.ResponseWriter, now time.Time) {
+	c.ClearSession(w)
+	http.SetCookie(w, c.newCookie(LogoutCookie, SessionPath, strconv.FormatInt(now.Unix(), 10), int(AbsoluteTimeout/time.Second)))
+}
+
+// ClearLogoutMark deletes the logout mark of r, if any, after a login: a session created in the
+// same second as the logout would be refused otherwise.
+func (c *Cookies) ClearLogoutMark(w http.ResponseWriter, r *http.Request) {
+	if _, err := r.Cookie(LogoutCookie); err == nil {
+		http.SetCookie(w, c.newCookie(LogoutCookie, SessionPath, "", -1))
+	}
+}
+
+// logoutMark returns the logout time r carries; a missing or malformed mark is ignored.
+func logoutMark(r *http.Request) (time.Time, bool) {
+	cookie, err := r.Cookie(LogoutCookie)
+	if err != nil {
+		return time.Time{}, false
+	}
+	sec, err := strconv.ParseInt(cookie.Value, 10, 64)
+	if err != nil || sec <= 0 {
+		return time.Time{}, false
+	}
+	return unixTime(sec), true
 }
 
 // newCookie builds an auth cookie: HttpOnly, SameSite=Lax (the login callback arrives as a

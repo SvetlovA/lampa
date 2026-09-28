@@ -107,8 +107,15 @@
   // 'ok' or 'failed' from the #svtlv-login fragment of a redirect login
   var loginResult = '';
   // the pending preshow hook of cubProfiles; CUB may never show its list (request failed,
-  // PIN cancelled), so a hook can outlive its menu and is replaced by the next one
+  // PIN cancelled), so a hook can outlive its menu: the head menu and every settings page
+  // opening drop it
   var profilesHook = null;
+  // GET /session requests still in flight; each may answer with a renewed session cookie
+  var sessionPending = 0;
+  // callbacks waiting for sessionPending to reach 0
+  var sessionIdle = [];
+  // true from the logout confirmation until POST /auth/logout answers
+  var loggingOut = false;
 
   function t(key) {
     var dict = strings[Lampa.Storage.get('language', 'ru')] || strings.en;
@@ -117,6 +124,8 @@
   }
 
   function fetchSession(onSuccess, onFail) {
+    sessionPending++;
+
     $.ajax({
       url: SESSION_URL,
       type: 'GET',
@@ -129,8 +138,27 @@
       },
       error: function () {
         onFail();
+      },
+      complete: function () {
+        var waiting;
+
+        sessionPending--;
+
+        if (sessionPending) return;
+
+        waiting = sessionIdle;
+        sessionIdle = [];
+        waiting.forEach(function (call) {
+          call();
+        });
       }
     });
+  }
+
+  // runs call once no GET /session is in flight, so a late renewed cookie cannot land after it
+  function whenSessionIdle(call) {
+    if (sessionPending) sessionIdle.push(call);
+    else call();
   }
 
   // POST with the CSRF header; done(status, body) gets status 0 on a network error or timeout
@@ -435,16 +463,29 @@
     signIn(backToHead);
   }
 
-  // 204 also when already signed out; anything else keeps the current state
+  // 204 also when already signed out; anything else keeps the current state. a /session
+  // response of this tab arriving after the logout would show the user signed in again, so the
+  // logout waits for those in flight and the heartbeat pauses until it answers (the server
+  // refuses the renewed cookie of any tab by its lampa_logout mark)
   function doLogOut() {
-    post(LOGOUT_URL, function (status) {
-      if (status == 204) {
-        applySession({
-          authenticated: false
-        });
-        Lampa.Noty.show(t('logged_out'));
-      } else Lampa.Noty.show(t('logout_failed'));
+    if (loggingOut) return;
+
+    loggingOut = true;
+
+    whenSessionIdle(function () {
+      post(LOGOUT_URL, logOutDone);
     });
+  }
+
+  function logOutDone(status) {
+    loggingOut = false;
+
+    if (status == 204) {
+      applySession({
+        authenticated: false
+      });
+      Lampa.Noty.show(t('logged_out'));
+    } else Lampa.Noty.show(t('logout_failed'));
   }
 
   // screen 5
@@ -536,13 +577,14 @@
     unhookProfiles();
 
     profilesHook = function (e) {
+      // the list loads asynchronously, so another Select may show first: that one is skipped
+      // and the hook waits for CUB's own list
+      if (e.active.title != Lampa.Lang.translate('account_profiles')) return;
+
       unhookProfiles();
 
-      // the list loads asynchronously and may fail; only CUB's own Select gets the item,
-      // and only while Account is still signed out
-      if (user || e.active.title != Lampa.Lang.translate('account_profiles')) return;
-
-      e.active.items.push(action('signin_to_account', signInFromHead));
+      // only while Account is still signed out
+      if (!user) e.active.items.push(action('signin_to_account', signInFromHead));
     };
 
     Lampa.Select.listener.follow('preshow', profilesHook);
@@ -552,6 +594,9 @@
   function openMenu() {
     var cub = cubSignedIn();
     var items;
+
+    // a hook left by a CUB list that never showed must not reach one opened from here
+    unhookProfiles();
 
     if (!user && !cub) return signInChooser();
     if (!user) return cubProfiles();
@@ -657,6 +702,9 @@
     Lampa.Template.add('settings_' + COMPONENT, '<div class="svtlv-account"></div>');
 
     Lampa.Settings.listener.follow('open', function (e) {
+      // CUB's settings folder opens the same list; a leftover head hook must not reach it
+      unhookProfiles();
+
       if (e.name != COMPONENT) return;
 
       try {
@@ -677,6 +725,9 @@
   }
 
   function heartbeat() {
+    // an answer landing after a logout in flight would show the user signed in again (see doLogOut)
+    if (loggingOut) return;
+
     // 503 or a network error keeps the last known state: unavailable is not signed out
     fetchSession(applySession, function () {});
   }

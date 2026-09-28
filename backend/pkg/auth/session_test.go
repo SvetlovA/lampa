@@ -368,3 +368,58 @@ func TestValidUUID(t *testing.T) {
 		assert.False(t, validUUID(s), s)
 	}
 }
+
+func TestCookies_LogoutMark(t *testing.T) {
+	c := newTestCookies(t, false)
+	_, before := issue(t, c, testProfile, testTokens(), testNow)
+
+	rec := httptest.NewRecorder()
+	c.EndSession(rec, testNow.Add(time.Hour))
+	var mark *http.Cookie
+	for _, ck := range rec.Result().Cookies() {
+		switch ck.Name {
+		case SessionCookie:
+			assert.Negative(t, ck.MaxAge, "the session cookie is cleared")
+		case LogoutCookie:
+			mark = ck
+		}
+	}
+	require.NotNil(t, mark)
+	assert.Equal(t, "/api", mark.Path)
+	assert.True(t, mark.HttpOnly)
+	assert.Equal(t, int(AbsoluteTimeout/time.Second), mark.MaxAge)
+
+	opened := func(session, logout *http.Cookie) error {
+		r := requestWith(session)
+		r.AddCookie(logout)
+		_, err := c.OpenSession(r, testNow.Add(2*time.Hour))
+		return err
+	}
+	_, sameSecond := issue(t, c, testProfile, testTokens(), testNow.Add(time.Hour))
+	_, after := issue(t, c, testProfile, testTokens(), testNow.Add(time.Hour+time.Second))
+
+	err := opened(before, mark)
+	require.ErrorIs(t, err, ErrNoSession, "a session renewed after the logout keeps its created_at")
+	require.ErrorIs(t, err, api.ErrUnauthenticated)
+	require.ErrorIs(t, opened(sameSecond, mark), ErrNoSession)
+	require.NoError(t, opened(after, mark))
+	for _, bad := range []string{"", "x", "0", "-5"} {
+		require.NoError(t, opened(before, reqCookie(LogoutCookie, bad)), "malformed mark %q is ignored", bad)
+	}
+}
+
+func TestCookies_ClearLogoutMark(t *testing.T) {
+	c := newTestCookies(t, true)
+
+	rec := httptest.NewRecorder()
+	c.ClearLogoutMark(rec, requestWith(nil))
+	assert.Empty(t, rec.Result().Cookies(), "nothing to clear")
+
+	rec = httptest.NewRecorder()
+	c.ClearLogoutMark(rec, requestWith(reqCookie(LogoutCookie, "1")))
+	cleared := setCookie(t, rec)
+	assert.Equal(t, LogoutCookie, cleared.Name)
+	assert.Equal(t, "/api", cleared.Path)
+	assert.Negative(t, cleared.MaxAge)
+	assert.True(t, cleared.Secure)
+}

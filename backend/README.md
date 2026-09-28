@@ -217,7 +217,10 @@ break. Accepted costs:
 - a user disabled while Keycloak is unreachable keeps access until it answers again;
 - logout clears only this device's cookie and leaves the Keycloak session alone (a phone login
   shares its browser's SSO session with other Svtlv apps), so a copied cookie stays valid until
-  that Keycloak session ends or the cookie expires.
+  that Keycloak session ends or the cookie expires. The device itself cannot be signed back in by
+  a request still in flight (another tab) renewing its cookie after the logout: logout also sets
+  `lampa_logout` (the logout time, `Max-Age` = the absolute timeout), and a session created up to
+  that time is refused; the next login deletes it.
 
 ### 401 vs 503
 
@@ -257,7 +260,7 @@ phones and browsers.
 | `GET /api/v1/auth/callback` | `302 <return>#svtlv-login=ok` + session cookie | `302 /#svtlv-login=failed` |
 | `POST /api/v1/auth/device/start` | `200` `{user_code, verification_uri, verification_uri_complete, expires_in, interval}` | `503 keycloak_unavailable` |
 | `POST /api/v1/auth/device/poll` | `202` `{status, interval}` (`pending` or `slow_down`); `200` signed-in body + session cookie | `400 no_device_login`, `403 access_denied`, `410 expired`, `500 login_failed`, `503 keycloak_unavailable` |
-| `POST /api/v1/auth/logout` | `204`, cookie cleared | — |
+| `POST /api/v1/auth/logout` | `204`, cookie cleared, `lampa_logout` set | — |
 | `GET /api/v1/user-data` | `200` `{schema_version, data, updated_at}` | `401`, `404 user_data_not_found`, `500 connections_unreadable`, `503 storage_unavailable` / `session_unavailable` |
 | `PUT /api/v1/user-data` `{schema_version, data}` | `200` stored document | `400 invalid_document` / `unsupported_schema_version` / `invalid_json`, `401`, `413 request_too_large`, `415 unsupported_media_type`, `503` |
 | `DELETE /api/v1/user-data` | `204`, idempotent | `401`, `503` |

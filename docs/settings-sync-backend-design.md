@@ -368,7 +368,12 @@ their next request (decided 2026-09-27; §5.3.1).
   logged (after a refresh, the existing session is kept);
 - `POST /api/v1/auth/logout` clears the cookie on this device. It ends the
   Lampa session only; the Keycloak SSO session is left alone, because a phone
-  login shares its browser's SSO session with other Svtlv apps;
+  login shares its browser's SSO session with other Svtlv apps. It also sets a
+  `lampa_logout` cookie holding the logout time (`Path=/api`, `Max-Age` = the
+  absolute timeout, unsealed: it only affects the sender's own sessions), and a
+  session created up to that time is refused, so a request of another tab still
+  in flight cannot sign the device back in with a renewed cookie; the next login
+  deletes it;
 - accepted costs of stateless sessions: a copied cookie stays valid after
   logout until its Keycloak session ends or the cookie expires; revocation is
   done in Keycloak, and ending one Keycloak session revokes every app session

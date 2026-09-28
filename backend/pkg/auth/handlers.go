@@ -252,6 +252,7 @@ func (h *Handlers) finishLogin(w http.ResponseWriter, r *http.Request) (string, 
 	if _, err = h.cookies.IssueSession(w, profile, tokens, now); err != nil {
 		return "", err
 	}
+	h.cookies.ClearLogoutMark(w, r)
 	return returnPath(st.Return), nil
 }
 
@@ -324,6 +325,7 @@ func (h *Handlers) devicePoll(w http.ResponseWriter, r *http.Request) {
 			api.WriteError(w, http.StatusInternalServerError, "login_failed", "sign-in failed")
 			return
 		}
+		h.cookies.ClearLogoutMark(w, r)
 		api.WriteJSON(w, http.StatusOK, signedIn(s.Profile))
 	default:
 		h.logger.Printf("[WARN] device login: unknown poll status %d", res.Status)
@@ -331,10 +333,11 @@ func (h *Handlers) devicePoll(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// logout clears the session cookie of this device. it answers 204 also when already signed out;
-// the keycloak session is left alone (design §5.3).
+// logout clears the session cookie of this device and marks it signed out, so a renewed cookie
+// from a request still in flight cannot sign it back in. it answers 204 also when already signed
+// out; the keycloak session is left alone (design §5.3).
 func (h *Handlers) logout(w http.ResponseWriter, _ *http.Request) {
-	h.cookies.ClearSession(w)
+	h.cookies.EndSession(w, h.now())
 	w.WriteHeader(http.StatusNoContent)
 }
 
