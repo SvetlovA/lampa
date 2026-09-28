@@ -283,7 +283,9 @@ func TestKeycloakCheck(t *testing.T) {
 			return func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("<html>")) }
 		}},
 		{name: "issuer mismatch", wantErr: true, handler: func(string) http.HandlerFunc {
-			return func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(`{"issuer":"http://other/realms/svtlv"}`)) }
+			return func(w http.ResponseWriter, _ *http.Request) {
+				w.Write([]byte(`{"issuer":"http://other/realms/svtlv"}`))
+			}
 		}},
 	}
 	for _, tc := range tests {

@@ -55,7 +55,8 @@ type fakeKeycloak struct {
 	t   *testing.T
 	srv *httptest.Server
 
-	down atomic.Bool // discovery answers 503
+	down            atomic.Bool // discovery answers 503
+	noIntrospection atomic.Bool // discovery advertises no introspection endpoint
 
 	mu         sync.Mutex
 	requests   []fakeRequest
@@ -127,7 +128,7 @@ func (f *fakeKeycloak) serve(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "down", http.StatusServiceUnavailable)
 			return
 		}
-		writeTestJSON(w, http.StatusOK, map[string]any{
+		doc := map[string]any{
 			"issuer":                                f.issuer(),
 			"authorization_endpoint":                f.srv.URL + testOIDCPath + "/auth",
 			"token_endpoint":                        f.srv.URL + testOIDCPath + "/token",
@@ -135,7 +136,11 @@ func (f *fakeKeycloak) serve(w http.ResponseWriter, r *http.Request) {
 			"introspection_endpoint":                f.srv.URL + testOIDCPath + "/token/introspect",
 			"jwks_uri":                              f.srv.URL + testOIDCPath + "/certs",
 			"id_token_signing_alg_values_supported": []string{"RS256"},
-		})
+		}
+		if f.noIntrospection.Load() {
+			delete(doc, "introspection_endpoint")
+		}
+		writeTestJSON(w, http.StatusOK, doc)
 	case testOIDCPath + "/certs":
 		writeTestJSON(w, http.StatusOK, map[string]any{"keys": []map[string]string{{
 			"kty": "RSA", "kid": testKeyID, "use": "sig", "alg": "RS256",
@@ -403,6 +408,8 @@ func TestKeycloak_StartDeviceErrors(t *testing.T) {
 		{"server error", http.StatusInternalServerError, map[string]string{}},
 		{"no device code", http.StatusOK, map[string]any{"user_code": "A", "verification_uri": "https://kc/device", "expires_in": 600}},
 		{"no expiry", http.StatusOK, map[string]any{"device_code": "d", "user_code": "A", "verification_uri": "https://kc/device"}},
+		{"no user code", http.StatusOK, map[string]any{"device_code": "d", "verification_uri": "https://kc/device", "expires_in": 600}},
+		{"no verification uri", http.StatusOK, map[string]any{"device_code": "d", "user_code": "A", "expires_in": 600}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -586,6 +593,7 @@ func TestKeycloak_IntrospectErrors(t *testing.T) {
 			require.Error(t, err)
 			assert.Equal(t, VerdictUnknown, verdict)
 			assert.NotContains(t, err.Error(), "rt\"")
+			assert.Empty(t, f.recorded("/elsewhere"), "no redirect is followed")
 		})
 	}
 
@@ -596,10 +604,17 @@ func TestKeycloak_IntrospectErrors(t *testing.T) {
 		require.ErrorContains(t, err, "status 401")
 		assert.Equal(t, VerdictUnknown, verdict)
 	})
+}
 
-	t.Run("no redirect request", func(t *testing.T) {
-		assert.Empty(t, f.recorded("/elsewhere"))
-	})
+func TestKeycloak_IntrospectNoEndpoint(t *testing.T) {
+	f := newFakeKeycloak(t)
+	f.noIntrospection.Store(true)
+	k := newTestKeycloak(t, f)
+
+	verdict, err := k.Introspect(t.Context(), "rt")
+	require.ErrorContains(t, err, "no introspection endpoint")
+	assert.Equal(t, VerdictUnknown, verdict)
+	assert.Empty(t, f.recorded(testOIDCPath+"/token/introspect"))
 }
 
 func TestKeycloak_timeout(t *testing.T) {
@@ -721,6 +736,7 @@ func TestKeycloak_RefreshErrors(t *testing.T) {
 			assert.Equal(t, Tokens{}, tokens)
 			assert.NotContains(t, err.Error(), "refresh-1")
 			assert.Len(t, f.recorded(testOIDCPath+"/token"), before+1, "one call, no auth-style retry")
+			assert.Empty(t, f.recorded("/elsewhere"), "no redirect is followed")
 		})
 	}
 

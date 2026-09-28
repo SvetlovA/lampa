@@ -202,6 +202,21 @@ func TestCookies_OpenSession_Expiry(t *testing.T) {
 	require.ErrorIs(t, err, ErrNoSession)
 	require.ErrorIs(t, err, ErrCookieExpired)
 	require.ErrorIs(t, err, api.ErrUnauthenticated)
+
+	// under a second left: renewing it would write Max-Age=0, which deletes the cookie
+	_, err = c.OpenSession(requestWith(cookie), testNow.Add(IdleTimeout-500*time.Millisecond))
+	require.ErrorIs(t, err, ErrNoSession)
+}
+
+func TestCookies_ReplaceTokens_NearIdleExpiry(t *testing.T) {
+	c := newTestCookies(t, false)
+	issued, _ := issue(t, c, testProfile, testTokens(), testNow)
+	now := issued.IdleExpiresAt.Add(-500 * time.Millisecond)
+
+	rec := httptest.NewRecorder()
+	_, err := c.ReplaceTokens(rec, issued, testTokens(), now)
+	require.ErrorIs(t, err, ErrInvalidSession)
+	assert.Empty(t, rec.Result().Cookies(), "nothing is written")
 }
 
 func TestCookies_OpenSession_Rejects(t *testing.T) {
@@ -253,6 +268,7 @@ func TestCookies_OpenSession_InvalidPayload(t *testing.T) {
 		{"non-uuid sub", func(p *sessionPayload) { p.Sub = "alice" }},
 		{"missing created_at", func(p *sessionPayload) { p.CreatedAt = 0 }},
 		{"past absolute expiry", func(p *sessionPayload) { p.CreatedAt = testNow.Add(-AbsoluteTimeout).Unix() }},
+		{"idle expiry before the envelope's", func(p *sessionPayload) { p.IdleExpiresAt = testNow.Unix() }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -570,7 +570,7 @@
 - [x] verify coverage ≥ 80% for new backend code (excluding mocks): `pkg/auth` 94.4%, `pkg/api` 97.3%, `pkg/health` 95.9%, `pkg/config` 100%, `main.newAPI` 90%
 
 ### Task 16: [Final] Update documentation
-- [x] update `backend/README.md` if needed (the root `README.md` is upstream-owned, design §10.1): CI section now lists the `svtlv/*.js` ES5 gate
+- [x] update `backend/README.md` if needed: CI section now lists the `svtlv/*.js` ES5 gate. The root `README.md` is fork-owned too (its Svtlv deploy sections); the final review updated its Compose table, deploy secrets/variables, verify commands and the `svtlv/` add-on notes
 - [x] update CLAUDE.md / AGENTS.md if new patterns discovered (no change: Task 14 already covers the add-on rules, proxy, placeholders and ES5 gate; the two files are in sync)
 - [x] (deferred - Post-Completion items are manual and not yet done, so the plan stays in `docs/plans/`) move this plan to `docs/plans/completed/` **only after every Post-Completion item below
       has succeeded** (Keycloak client, production deploy, on-device TV checks on both engines,
@@ -590,7 +590,8 @@
   idle/max unset or no shorter, **Revoke Refresh Token off**; the client does not get
   `offline_access` as a default scope. These realm settings are shared with Svtlv, which applies
   the same revalidation
-- the issuer pre-flight is done in Task 1; re-check after the deploy. Once the client exists,
+- run the Task 1 issuer pre-flight (skipped there) before the production deploy: issuer
+  equality and endpoint reachability from the container and from phones; re-check after it. Once the client exists,
   start one device authorization and confirm its `verification_uri` opens on the phone. With an HTTP (tailnet)
   issuer, the phone used for the TV device login must be on Tailscale
 

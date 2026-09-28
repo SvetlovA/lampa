@@ -267,7 +267,7 @@ func (h *Handlers) deviceStart(w http.ResponseWriter, r *http.Request) {
 	}
 	expiresIn := int64(ds.ExpiresIn / time.Second)
 	st := deviceState{DeviceCode: ds.DeviceCode, Interval: int64(ds.Interval / time.Second), ExpiresAt: now.Unix() + expiresIn}
-	if expiresIn <= 0 || !h.setDeviceCookie(w, st, now) {
+	if !h.setDeviceCookie(w, st, now) {
 		api.WriteError(w, http.StatusServiceUnavailable, "keycloak_unavailable", "sign-in is unavailable")
 		return
 	}

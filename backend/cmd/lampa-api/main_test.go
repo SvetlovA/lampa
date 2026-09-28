@@ -630,6 +630,39 @@ func TestNewAPI_databaseDown(t *testing.T) {
 	assert.True(t, clearsSession(r))
 }
 
+func TestNewAPI_loginWiring(t *testing.T) {
+	for _, publicURL := range []string{"http://100.64.0.1:8092", "https://lampa.example"} {
+		t.Run(publicURL, func(t *testing.T) {
+			kc := newFakeKeycloak(t)
+			cfg := testConfig("")
+			cfg.Auth.Issuer = kc.issuer()
+			cfg.Auth.PublicURL = publicURL
+			cfg.Auth.SecureCookies = strings.HasPrefix(publicURL, "https://")
+			srv, err := newAPI(cfg, &apimocks.UserDataMock{}, log.New(io.Discard, "", 0))
+			require.NoError(t, err)
+			ts := httptest.NewServer(srv.Handler())
+			defer ts.Close()
+
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, ts.URL+auth.LoginRoute, http.NoBody)
+			require.NoError(t, err)
+			client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+			resp, err := client.Do(req)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+
+			require.Equal(t, http.StatusFound, resp.StatusCode)
+			loc, err := resp.Location()
+			require.NoError(t, err)
+			assert.Equal(t, publicURL+auth.CallbackRoute, loc.Query().Get("redirect_uri"))
+			cookies := resp.Cookies()
+			require.Len(t, cookies, 1)
+			assert.Equal(t, auth.LoginCookie, cookies[0].Name)
+			assert.Equal(t, auth.CallbackRoute, cookies[0].Path)
+			assert.Equal(t, cfg.Auth.SecureCookies, cookies[0].Secure)
+		})
+	}
+}
+
 func TestNewAPI_invalidConfig(t *testing.T) {
 	cfg := testConfig("")
 	cfg.Auth.PublicURL = ""

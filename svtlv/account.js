@@ -14,7 +14,6 @@
   var DEVICE_START_URL = '/api/v1/auth/device/start';
   var DEVICE_POLL_URL = '/api/v1/auth/device/poll';
   var LOGOUT_URL = '/api/v1/auth/logout';
-  var DEVICE_INTERVAL = 5; // seconds, when the server sends none
   var REQUEST_TIMEOUT = 15000;
   var HEARTBEAT_INTERVAL = 12 * 60 * 60 * 1000; // keeps the session cookie sliding on a TV left open
   var READY_POLL = 200;
@@ -107,6 +106,9 @@
   var device = null;
   // 'ok' or 'failed' from the #svtlv-login fragment of a redirect login
   var loginResult = '';
+  // the pending preshow hook of cubProfiles; CUB may never show its list (request failed,
+  // PIN cancelled), so a hook can outlive its menu and is replaced by the next one
+  var profilesHook = null;
 
   function t(key) {
     var dict = strings[Lampa.Storage.get('language', 'ru')] || strings.en;
@@ -312,7 +314,7 @@
       code.append($('<span></span>').text(group));
     });
 
-    Lampa.Utils.qrcode(start.verification_uri_complete || start.verification_uri, html.find('.account-modal-split__qr-code'), function () {
+    Lampa.Utils.qrcode(start.verification_uri_complete, html.find('.account-modal-split__qr-code'), function () {
       html.find('.account-modal-split__qr').remove();
     });
 
@@ -378,7 +380,7 @@
     var html = deviceView(start);
 
     flow.modal = true;
-    flow.interval = start.interval > 0 ? start.interval : DEVICE_INTERVAL;
+    flow.interval = start.interval;
     flow.expiresAt = new Date().getTime() + start.expires_in * 1000;
     flow.status = html.find('.svtlv-account-device__status');
     flow.timer = html.find('.svtlv-account-device__timer');
@@ -418,7 +420,7 @@
     flow.xhr = post(DEVICE_START_URL, function (status, body) {
       if (flow.done) return;
 
-      if (status == 200 && body && body.user_code && body.verification_uri && body.expires_in > 0) openDevice(flow, body);
+      if (status == 200 && body && body.user_code && body.verification_uri && body.expires_in > 0 && body.interval > 0) openDevice(flow, body);
       else finishDevice(flow, t(status == 0 || status >= 502 ? 'signin_unavailable' : 'signin_failed'));
     });
   }
@@ -523,18 +525,27 @@
     });
   }
 
+  function unhookProfiles() {
+    if (profilesHook) Lampa.Select.listener.remove('preshow', profilesHook);
+
+    profilesHook = null;
+  }
+
   // CUB's own profile list, with "Sign in to Account" added on its way to the screen
   function cubProfiles() {
-    var extra = function (e) {
-      Lampa.Select.listener.remove('preshow', extra);
+    unhookProfiles();
 
-      // the list loads asynchronously and may fail; only CUB's own Select gets the item
-      if (e.active.title != Lampa.Lang.translate('account_profiles')) return;
+    profilesHook = function (e) {
+      unhookProfiles();
+
+      // the list loads asynchronously and may fail; only CUB's own Select gets the item,
+      // and only while Account is still signed out
+      if (user || e.active.title != Lampa.Lang.translate('account_profiles')) return;
 
       e.active.items.push(action('signin_to_account', signInFromHead));
     };
 
-    Lampa.Select.listener.follow('preshow', extra);
+    Lampa.Select.listener.follow('preshow', profilesHook);
     Lampa.Account.Profile.select(backToHead);
   }
 

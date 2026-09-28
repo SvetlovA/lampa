@@ -315,10 +315,10 @@ func TestHandlers_SessionKeycloakFailure(t *testing.T) {
 	assert.Contains(t, th.logs.String(), "[WARN] session introspection failed, session kept")
 }
 
-func TestHandlers_SessionNotRenewed(t *testing.T) {
+func TestHandlers_SessionRenewedNearIdleExpiry(t *testing.T) {
 	th := newTestHandlers(t, newFakeKeycloakClient(testRefreshToken))
 	_, cookie := issue(t, th.c, testProfile, testTokens(), testNow)
-	// just under a second of idle time left: open succeeds only a second earlier
+	// two seconds of idle time left, the least a session still opens with
 	th.now = testNow.Add(IdleTimeout - 2*time.Second)
 	rec := th.do(http.MethodGet, SessionRoute, cookie)
 	assertSignedIn(t, rec)
@@ -616,6 +616,20 @@ func TestHandlers_DevicePollSlowDown(t *testing.T) {
 	kc.poll = DeviceResult{Status: DevicePending}
 	rec = th.do(http.MethodPost, DevicePollRoute, dc)
 	assert.JSONEq(t, `{"status":"pending","interval":10}`, rec.Body.String())
+}
+
+func TestHandlers_DevicePollSlowDownNearExpiry(t *testing.T) {
+	kc := newFakeKeycloakClient()
+	kc.poll = DeviceResult{Status: DeviceSlowDown}
+	th := newTestHandlers(t, kc)
+	cookie := th.deviceCookie(t)
+	// under a second left: the cookie cannot be rewritten, so the old one keeps the old interval
+	th.now = testNow.Add(600*time.Second - 500*time.Millisecond)
+
+	rec := th.do(http.MethodPost, DevicePollRoute, cookie)
+	assert.Equal(t, http.StatusAccepted, rec.Code)
+	assert.JSONEq(t, `{"status":"slow_down","interval":10}`, rec.Body.String())
+	noCookie(t, rec, DeviceCookie)
 }
 
 func TestHandlers_DevicePollEnded(t *testing.T) {
