@@ -52,17 +52,17 @@ func (s *Server) getUserData(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) putUserData(w http.ResponseWriter, r *http.Request) {
 	if !isJSON(r.Header.Get("Content-Type")) {
-		writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "content type must be application/json")
+		WriteError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "content type must be application/json")
 		return
 	}
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
 		if maxErr := (*http.MaxBytesError)(nil); errors.As(err, &maxErr) {
-			writeError(w, http.StatusRequestEntityTooLarge, storage.CodeTooLarge, "body exceeds size limit")
+			WriteError(w, http.StatusRequestEntityTooLarge, storage.CodeTooLarge, "body exceeds size limit")
 			return
 		}
 		s.logger.Printf("[WARN] read body of %q %q: %v", r.Method, r.URL.Path, err)
-		writeError(w, http.StatusBadRequest, storage.CodeInvalidJSON, "body could not be read")
+		WriteError(w, http.StatusBadRequest, storage.CodeInvalidJSON, "body could not be read")
 		return
 	}
 	id, _ := UserID(r.Context())
@@ -93,21 +93,21 @@ func (s *Server) writeServiceError(w http.ResponseWriter, r *http.Request, err e
 		if verr.Code == storage.CodeTooLarge {
 			status = http.StatusRequestEntityTooLarge
 		}
-		writeError(w, status, verr.Code, verr.Reason)
+		WriteError(w, status, verr.Code, verr.Reason)
 	case errors.Is(err, storage.ErrNotFound):
-		writeError(w, http.StatusNotFound, "user_data_not_found", "user data not found")
+		WriteError(w, http.StatusNotFound, "user_data_not_found", "user data not found")
 	case errors.Is(err, storage.ErrUnavailable):
-		writeError(w, http.StatusServiceUnavailable, "storage_unavailable", "storage unavailable")
+		WriteError(w, http.StatusServiceUnavailable, "storage_unavailable", "storage unavailable")
 	case errors.Is(err, storage.ErrConnectionsUnreadable):
-		writeError(w, http.StatusInternalServerError, "connections_unreadable", "stored connections cannot be read")
+		WriteError(w, http.StatusInternalServerError, "connections_unreadable", "stored connections cannot be read")
 	default:
 		s.logger.Printf("[ERROR] %q %q: %v", r.Method, r.URL.Path, err)
-		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
+		WriteError(w, http.StatusInternalServerError, "internal_error", "internal error")
 	}
 }
 
 func writeDocument(w http.ResponseWriter, doc storage.Document) {
-	writeJSON(w, http.StatusOK, documentResponse{
+	WriteJSON(w, http.StatusOK, documentResponse{
 		SchemaVersion: doc.SchemaVersion,
 		Data:          orderedData(doc.Data),
 		UpdatedAt:     doc.UpdatedAt.UTC(),

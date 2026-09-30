@@ -143,7 +143,7 @@ func TestServer_PutUserData(t *testing.T) {
 				},
 			}
 			srv, _ := newTestServer(t, svc, allowAll(testUserID))
-			req := httptest.NewRequest(http.MethodPut, userDataPath, strings.NewReader(tc.body))
+			req := newRequest(http.MethodPut, userDataPath, strings.NewReader(tc.body))
 			if tc.contentType != "" {
 				req.Header.Set("Content-Type", tc.contentType)
 			}
@@ -179,7 +179,7 @@ func (failingReader) Read([]byte) (int, error) { return 0, errors.New("connectio
 func TestServer_PutUserDataReadFailure(t *testing.T) {
 	svc := &mocks.UserDataMock{}
 	srv, logs := newTestServer(t, svc, allowAll(testUserID))
-	req := httptest.NewRequest(http.MethodPut, userDataPath, failingReader{})
+	req := newRequest(http.MethodPut, userDataPath, failingReader{})
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
@@ -211,7 +211,7 @@ func TestServer_DeleteUserData(t *testing.T) {
 			}
 			srv, _ := newTestServer(t, svc, allowAll(testUserID))
 			w := httptest.NewRecorder()
-			srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodDelete, userDataPath, http.NoBody))
+			srv.Handler().ServeHTTP(w, newRequest(http.MethodDelete, userDataPath, http.NoBody))
 			resp := w.Result()
 			defer resp.Body.Close()
 

@@ -19,26 +19,31 @@ import (
 )
 
 func TestNewServer(t *testing.T) {
-	cfg := ServerConfig{Addr: ":8080", MaxBodyBytes: 1}
+	cfg := ServerConfig{Addr: ":8080", MaxBodyBytes: 1, PublicOrigin: testOrigin}
 	logger := log.New(io.Discard, "", 0)
+	routes := notFoundRoutes()
 	tests := []struct {
 		name    string
 		cfg     ServerConfig
 		svc     UserData
 		auth    Authenticator
+		routes  http.Handler
 		logger  Logger
 		wantErr string
 	}{
-		{name: "valid", cfg: cfg, svc: &mocks.UserDataMock{}, auth: DenyAll{}, logger: logger},
-		{name: "nil service", cfg: cfg, auth: DenyAll{}, logger: logger, wantErr: "nil user data service"},
-		{name: "nil authenticator", cfg: cfg, svc: &mocks.UserDataMock{}, logger: logger, wantErr: "nil authenticator"},
-		{name: "nil logger", cfg: cfg, svc: &mocks.UserDataMock{}, auth: DenyAll{}, wantErr: "nil logger"},
-		{name: "zero body limit", cfg: ServerConfig{Addr: ":8080"}, svc: &mocks.UserDataMock{}, auth: DenyAll{}, logger: logger,
-			wantErr: "max body bytes must be positive"},
+		{name: "valid", cfg: cfg, svc: &mocks.UserDataMock{}, auth: DenyAll{}, routes: routes, logger: logger},
+		{name: "nil service", cfg: cfg, auth: DenyAll{}, routes: routes, logger: logger, wantErr: "nil user data service"},
+		{name: "nil authenticator", cfg: cfg, svc: &mocks.UserDataMock{}, routes: routes, logger: logger, wantErr: "nil authenticator"},
+		{name: "nil auth routes", cfg: cfg, svc: &mocks.UserDataMock{}, auth: DenyAll{}, logger: logger, wantErr: "nil auth routes"},
+		{name: "nil logger", cfg: cfg, svc: &mocks.UserDataMock{}, auth: DenyAll{}, routes: routes, wantErr: "nil logger"},
+		{name: "empty public origin", cfg: ServerConfig{Addr: ":8080", MaxBodyBytes: 1}, svc: &mocks.UserDataMock{}, auth: DenyAll{},
+			routes: routes, logger: logger, wantErr: "empty public origin"},
+		{name: "zero body limit", cfg: ServerConfig{Addr: ":8080", PublicOrigin: testOrigin}, svc: &mocks.UserDataMock{}, auth: DenyAll{},
+			routes: routes, logger: logger, wantErr: "max body bytes must be positive"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			srv, err := NewServer(tc.cfg, tc.svc, tc.auth, tc.logger)
+			srv, err := NewServer(tc.cfg, tc.svc, tc.auth, tc.routes, tc.logger)
 			if tc.wantErr != "" {
 				require.EqualError(t, err, tc.wantErr)
 				assert.Nil(t, srv)
@@ -73,7 +78,7 @@ func TestServer_Fallbacks(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, _ := newTestServer(t, &mocks.UserDataMock{}, allowAll(testUserID))
 			w := httptest.NewRecorder()
-			srv.Handler().ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, http.NoBody))
+			srv.Handler().ServeHTTP(w, newRequest(tc.method, tc.path, http.NoBody))
 			resp := w.Result()
 			defer resp.Body.Close()
 
@@ -120,7 +125,7 @@ func TestServer_AccessLog(t *testing.T) {
 		},
 	}
 	srv, logs := newTestServer(t, svc, allowAll(testUserID))
-	req := httptest.NewRequest(http.MethodPut, userDataPath+"?token="+secretQuery,
+	req := newRequest(http.MethodPut, userDataPath+"?token="+secretQuery,
 		strings.NewReader(`{"schema_version":1,"data":{"other":{"k":"`+secretBody+`"}}}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+secretCookie)
@@ -155,7 +160,7 @@ func TestServer_AccessLogImplicitStatus(t *testing.T) {
 
 func TestWriteJSON_EncodeFailure(t *testing.T) {
 	w := httptest.NewRecorder()
-	writeJSON(w, http.StatusOK, map[string]any{"bad": func() {}})
+	WriteJSON(w, http.StatusOK, map[string]any{"bad": func() {}})
 	resp := w.Result()
 	defer resp.Body.Close()
 
@@ -239,7 +244,7 @@ func TestServer_Start(t *testing.T) {
 	defer busy.Close()
 
 	t.Run("bind failure", func(t *testing.T) {
-		srv, err := NewServer(ServerConfig{Addr: busy.Addr().String(), MaxBodyBytes: 1}, &mocks.UserDataMock{}, DenyAll{},
+		srv, err := NewServer(ServerConfig{Addr: busy.Addr().String(), MaxBodyBytes: 1, PublicOrigin: testOrigin}, &mocks.UserDataMock{}, DenyAll{}, notFoundRoutes(),
 			log.New(io.Discard, "", 0))
 		require.NoError(t, err)
 		err = srv.Start(t.Context())
@@ -253,7 +258,8 @@ func TestServer_Start(t *testing.T) {
 		addr := free.Addr().String()
 		require.NoError(t, free.Close())
 
-		srv, err := NewServer(ServerConfig{Addr: addr, MaxBodyBytes: 1}, &mocks.UserDataMock{}, DenyAll{}, log.New(io.Discard, "", 0))
+		srv, err := NewServer(ServerConfig{Addr: addr, MaxBodyBytes: 1, PublicOrigin: testOrigin}, &mocks.UserDataMock{}, DenyAll{}, notFoundRoutes(),
+			log.New(io.Discard, "", 0))
 		require.NoError(t, err)
 		ctx, cancel := context.WithCancel(t.Context())
 		done := make(chan error, 1)

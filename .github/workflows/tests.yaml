@@ -54,6 +54,23 @@ jobs:
       - name: Race
         run: make race
 
+  frontend:
+    name: Frontend add-ons ES5 syntax
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # svtlv/ add-ons run on old TV browsers. acorn is pinned exactly so the gate never
+      # changes under us; it checks syntax only, so post-ES5 APIs (fetch, Object.assign,
+      # Array.prototype.includes, bare Promise) still need review by hand
+      - name: Parse svtlv/*.js as ECMAScript 5
+        run: npx --yes acorn@8.14.0 --ecma5 --silent svtlv/*.js
+
   compose:
     name: Compose config
     runs-on: ubuntu-latest

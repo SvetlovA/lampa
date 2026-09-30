@@ -22,6 +22,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
+  SERVER_HOST: svtlv
 
 jobs:
   prepare:
@@ -73,18 +74,18 @@ jobs:
         env:
           DEPLOY_DIR: ${{ secrets.DEPLOY_DIR }}
           GHCR_PAT: ${{ secrets.GHCR_PAT }}
-          LAMPA_DOMAIN: ${{ secrets.LAMPA_DOMAIN }}
-          LAMPA_PORT: ${{ secrets.LAMPA_PORT }}
           LAMPA_DB_PASSWORD: ${{ secrets.LAMPA_DB_PASSWORD }}
           LAMPA_API_DATA_KEY: ${{ secrets.LAMPA_API_DATA_KEY }}
-          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          LAMPA_KEYCLOAK_CLIENT_SECRET: ${{ secrets.LAMPA_KEYCLOAK_CLIENT_SECRET }}
+          ENVIRONMENT: ${{ inputs.environment }}
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
           SSH_USER: ${{ secrets.SSH_USER }}
           TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
           set -euo pipefail
-          required=(DEPLOY_DIR GHCR_PAT LAMPA_DOMAIN LAMPA_DB_PASSWORD LAMPA_API_DATA_KEY
-            SERVER_HOST SSH_PRIVATE_KEY SSH_USER TAILSCALE_AUTHKEY)
+          required=(DEPLOY_DIR GHCR_PAT LAMPA_DB_PASSWORD LAMPA_API_DATA_KEY
+            LAMPA_KEYCLOAK_CLIENT_SECRET
+            SSH_PRIVATE_KEY SSH_USER TAILSCALE_AUTHKEY)
 
           missing=()
           for name in "${required[@]}"; do
@@ -94,7 +95,7 @@ jobs:
           done
 
           if [ "${#missing[@]}" -ne 0 ]; then
-            printf 'Missing required repository secret: %s\n' "${missing[@]}" >&2
+            printf 'Missing required repository secret or variable: %s\n' "${missing[@]}" >&2
             exit 1
           fi
 
@@ -102,12 +103,6 @@ jobs:
           dot_segment='(^|/)\.\.?(/|$)'
           if [[ "$DEPLOY_DIR" = "/" || ! "$DEPLOY_DIR" =~ ^/[-A-Za-z0-9._/]+$ || "$DEPLOY_DIR" =~ $dot_segment ]]; then
             echo "DEPLOY_DIR must be a safe absolute server path" >&2
-            exit 1
-          fi
-
-          PORT_TO_VALIDATE="${LAMPA_PORT:-8092}"
-          if [[ ! "$PORT_TO_VALIDATE" =~ ^[0-9]+$ ]] || (( PORT_TO_VALIDATE < 1 || PORT_TO_VALIDATE > 65535 )); then
-            echo "LAMPA_PORT must be an integer between 1 and 65535" >&2
             exit 1
           fi
 
@@ -120,6 +115,55 @@ jobs:
             [ "$(printf '%s' "$LAMPA_API_DATA_KEY" | base64 -d 2>/dev/null | wc -c)" -ne 32 ]; then
             echo "LAMPA_API_DATA_KEY must be standard base64 of exactly 32 bytes (openssl rand -base64 32)" >&2
             exit 1
+          fi
+
+          # the values below land unquoted in the server .env, so only characters compose reads
+          # literally are accepted (no whitespace, quotes, "$" or "#")
+          if [[ ! "$LAMPA_KEYCLOAK_CLIENT_SECRET" =~ ^[A-Za-z0-9._~+/=-]+$ ]]; then
+            echo "LAMPA_KEYCLOAK_CLIENT_SECRET must be the svtlv-lampa client secret from Keycloak" >&2
+            exit 1
+          fi
+
+          # read the effective origin from the same embedded settings the API will use
+          PUBLIC_URL=$(python3 - "$ENVIRONMENT" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          root = Path("backend/pkg/config/defaults")
+          base = json.loads((root / "appsettings.json").read_text())
+          override_file = root / f"appsettings.{sys.argv[1]}.json"
+          override = json.loads(override_file.read_text()) if override_file.exists() else {}
+          print(override.get("Authentication", {}).get("PublicURL", base["Authentication"]["PublicURL"]))
+          PY
+          )
+
+          # same rule as lampa-api's config: the exact lowercase origin a browser sends, without
+          # the scheme's default port
+          origin_re='^(https?)://([a-z0-9]([-a-z0-9.]*[a-z0-9])?|\[[0-9a-f:.]+\])(:([1-9][0-9]{0,4}))?$'
+          if [[ ! "$PUBLIC_URL" =~ $origin_re ]]; then
+            echo "Authentication.PublicURL must be a lowercase origin scheme://host[:port] without a trailing slash" >&2
+            exit 1
+          fi
+          public_scheme="${BASH_REMATCH[1]}"
+          public_host="${BASH_REMATCH[2]}"
+          public_port="${BASH_REMATCH[5]}"
+          if [ -n "$public_port" ] && { (( public_port > 65535 )) ||
+            [ "$public_scheme:$public_port" = "http:80" ] || [ "$public_scheme:$public_port" = "https:443" ]; }; then
+            echo "Authentication.PublicURL must have a port 1-65535 other than its scheme's default" >&2
+            exit 1
+          fi
+
+          # the release Compose file binds the HTTP web port to svtlv's Tailscale address.
+          if [ "$public_scheme" = "http" ]; then
+            if [ "$public_host" != "svtlv" ]; then
+              echo "an http Authentication.PublicURL must use the svtlv Tailscale hostname" >&2
+              exit 1
+            fi
+            if [ "8092" != "${public_port:-80}" ]; then
+              echo "the published web port must equal the Authentication.PublicURL port (8092)" >&2
+              exit 1
+            fi
           fi
 
   build:
@@ -177,8 +221,8 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            domain=${{ secrets.LAMPA_DOMAIN }}
-            prefix=${{ vars.LAMPA_PREFIX || 'https://' }}
+            domain=svtlv:8092
+            prefix=http://
             CI=true
             GIT_BRANCH=${{ github.ref_name }}
             GITHUB_SHA=${{ github.sha }}
@@ -212,8 +256,6 @@ jobs:
 
       - name: Verify server connectivity
         shell: bash
-        env:
-          SERVER_HOST: ${{ secrets.SERVER_HOST }}
         run: |
           set -euo pipefail
           tailscale status
@@ -226,8 +268,6 @@ jobs:
 
       - name: Trust server SSH host key
         shell: bash
-        env:
-          SERVER_HOST: ${{ secrets.SERVER_HOST }}
         run: |
           set -euo pipefail
           install -d -m 700 ~/.ssh
@@ -242,6 +282,7 @@ jobs:
           sed -i \
             -e "s|image: lampa-web:dev|image: ${IMAGE_BASE}-web:latest|g" \
             -e "s|image: lampa-api:dev|image: ${IMAGE_BASE}-api:latest|g" \
+            -e 's|"0.0.0.0:8092:80"|"100.105.140.19:8092:80"|' \
             devops/docker-compose.yaml
           sed -i '/build:/,/dockerfile:/d' devops/docker-compose.yaml
 
@@ -266,15 +307,18 @@ jobs:
               exit 1
             fi
           done
+          if ! grep -qF '"100.105.140.19:8092:80"' "$file"; then
+            echo "$file must bind the web port to svtlv's Tailscale address" >&2
+            exit 1
+          fi
 
       - name: Prepare deployment env
         shell: bash
         env:
           ENVIRONMENT: ${{ inputs.environment }}
-          LAMPA_BIND_ADDRESS: ${{ vars.LAMPA_BIND_ADDRESS }}
-          LAMPA_PORT: ${{ secrets.LAMPA_PORT }}
           LAMPA_DB_PASSWORD: ${{ secrets.LAMPA_DB_PASSWORD }}
           LAMPA_API_DATA_KEY: ${{ secrets.LAMPA_API_DATA_KEY }}
+          LAMPA_KEYCLOAK_CLIENT_SECRET: ${{ secrets.LAMPA_KEYCLOAK_CLIENT_SECRET }}
         run: |
           set -euo pipefail
           umask 077
@@ -282,17 +326,14 @@ jobs:
           # container names are stable across deploys
           {
             printf 'LAMPA_ENVIRONMENT=%s\n' "$ENVIRONMENT"
-            printf 'LAMPA_BIND_ADDRESS=%s\n' "${LAMPA_BIND_ADDRESS:-0.0.0.0}"
-            printf 'LAMPA_PORT=%s\n' "${LAMPA_PORT:-8092}"
-            printf 'LAMPA_API_PORT=%s\n' 5800
             printf 'LAMPA_DB_PASSWORD=%s\n' "$LAMPA_DB_PASSWORD"
             printf 'LAMPA_API_DATA_KEY=%s\n' "$LAMPA_API_DATA_KEY"
+            printf 'LAMPA_KEYCLOAK_CLIENT_SECRET=%s\n' "$LAMPA_KEYCLOAK_CLIENT_SECRET"
           } > deploy.env
 
       - name: Copy deployment files to server
         shell: bash
         env:
-          SERVER_HOST: ${{ secrets.SERVER_HOST }}
           SSH_USER: ${{ secrets.SSH_USER }}
         run: |
           set -euo pipefail
@@ -310,7 +351,6 @@ jobs:
         env:
           GHCR_PAT: ${{ secrets.GHCR_PAT }}
           GHCR_USERNAME: ${{ github.repository_owner }}
-          SERVER_HOST: ${{ secrets.SERVER_HOST }}
           SSH_USER: ${{ secrets.SSH_USER }}
         run: |
           set -euo pipefail
@@ -321,7 +361,6 @@ jobs:
       - name: Deploy containers
         shell: bash
         env:
-          SERVER_HOST: ${{ secrets.SERVER_HOST }}
           SSH_USER: ${{ secrets.SSH_USER }}
         run: |
           set -euo pipefail

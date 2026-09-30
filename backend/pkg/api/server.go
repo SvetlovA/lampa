@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/SvetlovA/lampa/backend/pkg/storage"
@@ -35,6 +36,12 @@ const (
 
 const userDataPath = "/api/v1/user-data"
 
+// routes served by the auth handler given to NewServer: every path under authPrefix plus sessionPath.
+const (
+	authPrefix  = "/api/v1/auth/"
+	sessionPath = "/api/v1/session"
+)
+
 // UserData reads, replaces and deletes the document of a user. storage.Service is the production implementation.
 type UserData interface {
 	Get(ctx context.Context, userID string) (storage.Document, error)
@@ -51,30 +58,38 @@ type Logger interface {
 type ServerConfig struct {
 	Addr         string // listen address used by Start, host:port
 	MaxBodyBytes int64  // request body limit, bytes
+	PublicOrigin string // the only Origin accepted on state-changing requests, scheme://host[:port]
 }
 
-// Server serves the user-data API.
+// Server serves the user-data API and mounts the auth routes.
 type Server struct {
-	cfg     ServerConfig
-	svc     UserData
-	auth    Authenticator
-	logger  Logger
-	handler http.Handler
+	cfg        ServerConfig
+	svc        UserData
+	auth       Authenticator
+	authRoutes http.Handler
+	logger     Logger
+	handler    http.Handler
 }
 
-// NewServer creates a Server. every dependency is required and the body limit must be positive.
-func NewServer(cfg ServerConfig, svc UserData, auth Authenticator, logger Logger) (*Server, error) {
+// NewServer creates a Server. authRoutes serves /api/v1/auth/* and /api/v1/session behind the same
+// middleware chain as user data. every dependency is required, the public origin must be set and
+// the body limit must be positive.
+func NewServer(cfg ServerConfig, svc UserData, auth Authenticator, authRoutes http.Handler, logger Logger) (*Server, error) {
 	switch {
 	case svc == nil:
 		return nil, errors.New("nil user data service")
 	case auth == nil:
 		return nil, errors.New("nil authenticator")
+	case authRoutes == nil:
+		return nil, errors.New("nil auth routes")
 	case logger == nil:
 		return nil, errors.New("nil logger")
+	case cfg.PublicOrigin == "":
+		return nil, errors.New("empty public origin")
 	case cfg.MaxBodyBytes <= 0:
 		return nil, errors.New("max body bytes must be positive")
 	}
-	s := &Server{cfg: cfg, svc: svc, auth: auth, logger: logger}
+	s := &Server{cfg: cfg, svc: svc, auth: auth, authRoutes: authRoutes, logger: logger}
 	s.handler = s.routes()
 	return s, nil
 }
@@ -100,11 +115,12 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 }
 
 // routes registers method patterns plus json fallbacks, since ServeMux answers 404/405 in plain text.
-// middleware order, outermost first: access log, recover, body limit, deadline, authenticator (per route).
+// middleware order, outermost first: access log, recover, body limit, deadline, csrf, authenticator (per route).
+// csrf runs before routing, so a rejected request never reaches a handler or the authenticator.
 func (s *Server) routes() http.Handler {
 	methodNotAllowed := func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Allow", "GET, PUT, DELETE")
-		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+userDataPath, s.authenticate(s.getUserData))
@@ -114,10 +130,15 @@ func (s *Server) routes() http.Handler {
 	// instead of running the authenticated get handler.
 	mux.HandleFunc("HEAD "+userDataPath, methodNotAllowed)
 	mux.HandleFunc(userDataPath, methodNotAllowed)
-	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		writeError(w, http.StatusNotFound, "not_found", "not found")
-	})
-	return s.accessLog(s.recoverPanic(s.limitBody(s.withDeadline(mux))))
+	notFound := func(w http.ResponseWriter, _ *http.Request) {
+		WriteError(w, http.StatusNotFound, "not_found", "not found")
+	}
+	mux.Handle(authPrefix, s.authRoutes)
+	mux.Handle(sessionPath, s.authRoutes)
+	// without it ServeMux redirects the bare prefix to authPrefix with a plain-text 307
+	mux.HandleFunc(strings.TrimSuffix(authPrefix, "/"), notFound)
+	mux.HandleFunc("/", notFound)
+	return s.accessLog(s.recoverPanic(s.limitBody(s.withDeadline(s.csrf(mux)))))
 }
 
 // ServeHandler runs an http.Server with the hardening timeouts serving h on ln until ctx is canceled
@@ -173,19 +194,19 @@ type errorBody struct {
 	} `json:"error"`
 }
 
-// writeError writes the json error contract. message must be a fixed string, never request input.
-func writeError(w http.ResponseWriter, status int, code, message string) {
+// WriteError writes the json error contract. message must be a fixed string, never request input.
+func WriteError(w http.ResponseWriter, status int, code, message string) {
 	var body errorBody
 	body.Error.Code, body.Error.Message = code, message
-	writeJSON(w, status, body)
+	WriteJSON(w, status, body)
 }
 
 // internalErrorBody is sent when a response cannot be encoded.
 const internalErrorBody = `{"error":{"code":"internal_error","message":"internal error"}}` + "\n"
 
-// writeJSON writes v as a json response without html escaping. v is encoded before the header
+// WriteJSON writes v as a json response without html escaping. v is encoded before the header
 // is sent, so an encoding failure still answers 500 internal_error.
-func writeJSON(w http.ResponseWriter, status int, v any) {
+func WriteJSON(w http.ResponseWriter, status int, v any) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
@@ -256,7 +277,7 @@ func (s *Server) recoverPanic(next http.Handler) http.Handler {
 				panic(p)
 			}
 			s.logger.Printf("[ERROR] panic serving %q %q: %v\n%s", r.Method, r.URL.Path, p, debug.Stack())
-			writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
+			WriteError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		}()
 		next.ServeHTTP(w, r)
 	})

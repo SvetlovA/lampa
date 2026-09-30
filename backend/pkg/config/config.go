@@ -63,7 +63,8 @@ var (
 	placeholderRe = regexp.MustCompile(`\{([A-Z][A-Z0-9_]*)\}`)
 )
 
-// Config holds validated service settings. DBDSN and DataKey are secrets and never printed.
+// Config holds validated service settings. DBDSN, DataKey and Auth.ClientSecret are secrets and
+// never printed.
 type Config struct {
 	Environment  string            // one of Development, Test, Production
 	Listen       string            // public API listen address, host:port
@@ -71,6 +72,17 @@ type Config struct {
 	DBDSN        string            // postgres connection string, secret
 	DataKey      [DataKeySize]byte // AES-256 key sealing connection credentials, secret
 	MaxBodyBytes int64             // request body limit in bytes, > 0
+	Auth         Auth              // keycloak sign-in settings
+}
+
+// Auth holds the keycloak sign-in settings. ClientSecret is a secret and never printed.
+type Auth struct {
+	PublicURL            string // origin users reach lampa at, scheme://host[:port] without path
+	Issuer               string // keycloak realm issuer, equal to the iss keycloak issues
+	ClientID             string // confidential keycloak client id
+	ClientSecret         string // keycloak client secret, secret
+	RequireHTTPSMetadata bool   // require HTTPS for the keycloak discovery URL
+	SecureCookies        bool   // PublicURL is https, so every cookie is Secure
 }
 
 // settings mirrors the appsettings files; every layer decodes into the same value.
@@ -90,7 +102,16 @@ type settings struct {
 		Password string `json:"Password"`
 		SSLMode  string `json:"SSLMode"`
 	} `json:"Database"`
-	DataKey string `json:"DataKey"`
+	DataKey        string `json:"DataKey"`
+	Authentication struct {
+		PublicURL string `json:"PublicURL"`
+		Keycloak  struct {
+			Authority            string `json:"Authority"`
+			ClientID             string `json:"ClientId"`
+			ClientSecret         string `json:"ClientSecret"`
+			RequireHTTPSMetadata bool   `json:"RequireHttpsMetadata"`
+		} `json:"Keycloak"`
+	} `json:"Authentication"`
 }
 
 // Load reads appsettings.json and the optional appsettings.<Environment>.json from fsys
@@ -106,14 +127,18 @@ func Load(fsys fs.FS, lookup func(string) (string, bool)) (Config, error) {
 		return Config{}, err
 	}
 
-	// fixed order: the password is resolved and reported before the data key
-	s.Database.Password, err = resolve("Database.Password", s.Database.Password, lookup)
-	if err != nil {
-		return Config{}, err
-	}
-	s.DataKey, err = resolve("DataKey", s.DataKey, lookup)
-	if err != nil {
-		return Config{}, err
+	// fixed order: the password is resolved and reported before the data key and client secret.
+	for _, f := range []struct {
+		path string
+		v    *string
+	}{
+		{"Database.Password", &s.Database.Password},
+		{"DataKey", &s.DataKey},
+		{"Authentication.Keycloak.ClientSecret", &s.Authentication.Keycloak.ClientSecret},
+	} {
+		if *f.v, err = resolve(f.path, *f.v, lookup); err != nil {
+			return Config{}, err
+		}
 	}
 
 	key, err := s.validate()
@@ -127,19 +152,38 @@ func Load(fsys fs.FS, lookup func(string) (string, bool)) (Config, error) {
 		DBDSN:        s.dsn(),
 		DataKey:      key,
 		MaxBodyBytes: s.API.MaxBodyBytes,
+		Auth: Auth{
+			PublicURL:            s.Authentication.PublicURL,
+			Issuer:               s.Authentication.Keycloak.Authority,
+			ClientID:             s.Authentication.Keycloak.ClientID,
+			ClientSecret:         s.Authentication.Keycloak.ClientSecret,
+			RequireHTTPSMetadata: s.Authentication.Keycloak.RequireHTTPSMetadata,
+			SecureCookies:        strings.HasPrefix(s.Authentication.PublicURL, "https://"),
+		},
 	}, nil
 }
 
-// String returns a printable form with the DSN and data key redacted.
+// String returns a printable form with the DSN, data key and client secret redacted.
 func (c Config) String() string {
-	return fmt.Sprintf("{Environment:%s Listen:%s HealthListen:%s DBDSN:%s DataKey:%s MaxBodyBytes:%d}",
+	return fmt.Sprintf("{Environment:%s Listen:%s HealthListen:%s DBDSN:%s DataKey:%s MaxBodyBytes:%d Auth:%s}",
 		c.Environment, c.Listen, c.HealthListen, redact(c.DBDSN != ""), redact(c.DataKey != [DataKeySize]byte{}),
-		c.MaxBodyBytes)
+		c.MaxBodyBytes, c.Auth)
 }
 
 // GoString keeps %#v redacted as well.
 func (c Config) GoString() string {
 	return "config.Config" + c.String()
+}
+
+// String returns a printable form with the client secret redacted.
+func (a Auth) String() string {
+	return fmt.Sprintf("{PublicURL:%s Issuer:%s ClientID:%s ClientSecret:%s RequireHTTPSMetadata:%t SecureCookies:%t}",
+		a.PublicURL, a.Issuer, a.ClientID, redact(a.ClientSecret != ""), a.RequireHTTPSMetadata, a.SecureCookies)
+}
+
+// GoString keeps %#v redacted as well.
+func (a Auth) GoString() string {
+	return "config.Auth" + a.String()
 }
 
 // environment returns the selected environment, Test when the variable is unset or empty.
@@ -242,6 +286,22 @@ func (s *settings) validate() ([DataKeySize]byte, error) {
 	if err != nil {
 		return none, fmt.Errorf("DataKey: %w", err)
 	}
+
+	if err = validateOrigin(s.Authentication.PublicURL); err != nil {
+		return none, fmt.Errorf("Authentication.PublicURL: %w", err)
+	}
+	if err = validateIssuer(s.Authentication.Keycloak.Authority); err != nil {
+		return none, fmt.Errorf("Authentication.Keycloak.Authority: %w", err)
+	}
+	if s.Authentication.Keycloak.RequireHTTPSMetadata && !strings.HasPrefix(s.Authentication.Keycloak.Authority, "https://") {
+		return none, fmt.Errorf("Authentication.Keycloak.Authority: HTTPS is required for metadata: %w", ErrInvalid)
+	}
+	if s.Authentication.Keycloak.ClientID == "" {
+		return none, fmt.Errorf("Authentication.Keycloak.ClientId: %w", ErrMissing)
+	}
+	if s.Authentication.Keycloak.ClientSecret == "" {
+		return none, fmt.Errorf("Authentication.Keycloak.ClientSecret: %w", ErrMissing)
+	}
 	return key, nil
 }
 
@@ -267,6 +327,42 @@ func validateAddr(addr string) error {
 	}
 	if _, err := strconv.ParseUint(port, 10, 16); err != nil {
 		return fmt.Errorf("port must be 0-65535: %w", ErrInvalid)
+	}
+	return nil
+}
+
+// validateOrigin accepts a lowercase http or https origin, scheme://host[:port] without the
+// scheme's default port, exactly as a browser sends it in the Origin header. errors never
+// include the value.
+func validateOrigin(v string) error {
+	if v == "" {
+		return ErrMissing
+	}
+	u, err := url.Parse(v)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("must be an absolute http or https URL: %w", ErrInvalid)
+	}
+	if u.User != nil || v != u.Scheme+"://"+strings.ToLower(u.Host) {
+		return fmt.Errorf("must be a lowercase origin scheme://host[:port] without user, path or query: %w", ErrInvalid)
+	}
+	if (u.Scheme == "http" && u.Port() == "80") || (u.Scheme == "https" && u.Port() == "443") {
+		return fmt.Errorf("must omit the default port of its scheme: %w", ErrInvalid)
+	}
+	return nil
+}
+
+// validateIssuer accepts an absolute http or https URL with a host and no user, query or
+// fragment. errors never include the value.
+func validateIssuer(v string) error {
+	if v == "" {
+		return ErrMissing
+	}
+	u, err := url.Parse(v)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("must be an absolute http or https URL: %w", ErrInvalid)
+	}
+	if u.User != nil || strings.ContainsAny(v, "?#") {
+		return fmt.Errorf("must not contain user, query or fragment: %w", ErrInvalid)
 	}
 	return nil
 }

@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -173,6 +175,51 @@ func DatabaseCheck(p Pinger) Check {
 		Description: "PostgreSQL is reachable.",
 		Error:       "database unreachable",
 		Run:         p.Ping,
+	}
+}
+
+// maxDiscoveryBytes bounds the discovery document the keycloak check reads.
+const maxDiscoveryBytes = 64 << 10
+
+// KeycloakCheck creates the advisory "keycloak" check: it fetches the discovery document of
+// issuer and passes when it answers 200 with that same issuer, the one go-oidc will require.
+// keycloak down only breaks new logins, existing sessions fail open, so the tier is advisory.
+func KeycloakCheck(issuer string) Check {
+	client := &http.Client{
+		// a redirect is a misconfigured issuer, not a discovery document
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	// joined the way go-oidc does, so a trailing slash in issuer is kept in the comparison only
+	discoveryURL := strings.TrimSuffix(issuer, "/") + "/.well-known/openid-configuration"
+	return Check{
+		Name:        "keycloak",
+		Tier:        Advisory,
+		Description: "Keycloak discovery is reachable.",
+		Error:       "keycloak unreachable",
+		Run: func(ctx context.Context) error {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, discoveryURL, http.NoBody)
+			if err != nil {
+				return fmt.Errorf("keycloak discovery request: %w", err)
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				return fmt.Errorf("keycloak discovery: %w", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				return fmt.Errorf("keycloak discovery: status %d", resp.StatusCode)
+			}
+			var doc struct {
+				Issuer string `json:"issuer"`
+			}
+			if err := json.NewDecoder(io.LimitReader(resp.Body, maxDiscoveryBytes)).Decode(&doc); err != nil {
+				return fmt.Errorf("keycloak discovery: decode: %w", err)
+			}
+			if doc.Issuer != issuer {
+				return errors.New("keycloak discovery: issuer mismatch")
+			}
+			return nil
+		},
 	}
 }
 

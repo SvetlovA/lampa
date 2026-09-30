@@ -32,10 +32,11 @@ regular web server for use in a compatible browser.
 | `lang/` | Runtime translation files |
 | `msx/start.json` | MSX application descriptor |
 | `vender/` | Browser libraries loaded by `index.html` |
+| `svtlv/` | Fork-only ES5 add-ons loaded from the marked block at the end of `index.html`; today the Account sign-in (Svtlv Keycloak) |
 | `Dockerfile` | Apache-based production image |
 | `devops/docker-compose.yaml` | Local and server Compose configuration (`lampa-web`, `lampa-db`, `lampa-api`); builds both images locally |
 | `devops/.env.example` | Template for the local `devops/.env` (gitignored) |
-| `.github/workflows/tests.yaml` | Backend lint, tests and race plus a Compose config check on PRs and pushes to `svtlvtv` |
+| `.github/workflows/tests.yaml` | Backend lint, tests and race, an ES5 parse of `svtlv/*.js` and a Compose config check on PRs and pushes to `svtlvtv` |
 | `.github/workflows/deploy-docker.yaml` | Manual Svtlv deployment workflow |
 | `backend/` | `lampa-api`, a fork-only Go service that stores user data in PostgreSQL; see [`backend/README.md`](backend/README.md) |
 | `docs/` | Design documents and implementation plans for the backend |
@@ -93,33 +94,32 @@ external `svtlv_monitoring_external` network, which must exist:
 
 ```bash
 cd devops
-cp .env.example .env                               # adjust values, replace secrets
+cp .env.example .env                               # replace the placeholder secrets
 docker network create svtlv_monitoring_external    # once
-docker compose up -d --build                       # or: up -d --build lampa-web
+docker compose -p lampa up -d --build              # or: up -d --build lampa-web
 ```
 
-`.env.example` sets `COMPOSE_PROJECT_NAME=lampa`, so a local stack does not share
-Svtlv's `devops` project. The API runs in the `Test` environment by default; see
+Use `-p lampa` so a local stack does not share Svtlv's `devops` project.
+The API runs in the `Test` environment by default; see
 "Configuration" and "Local run" in [`backend/README.md`](backend/README.md),
 including the Development mode (a host `go run` against the published database).
 
-The Compose services use these values:
+Local Compose uses `http://localhost:8092` for MSX, publishes the web service on
+`0.0.0.0:8092`, and publishes PostgreSQL on `127.0.0.1:5434`. Its `.env` contains
+only the environment selector and secrets:
 
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
-| `LAMPA_DOMAIN` | Yes, to build `lampa-web` | None | MSX host without a protocol |
-| `LAMPA_PREFIX` | No | `https://` | Protocol written to `msx/start.json` |
-| `LAMPA_BIND_ADDRESS` | No | `0.0.0.0` | Published host interface for `lampa-web` and `lampa-api` |
-| `LAMPA_PORT` | No | `8092` | Host port mapped to Apache port 80 |
 | `LAMPA_ENVIRONMENT` | No | `Test` | `lampa-api` environment: `Development`, `Test` or `Production` |
-| `LAMPA_API_PORT` | No | `5800` | Host port mapped to the API port 5800 |
-| `LAMPA_DB_PORT` | No | `5434` | Loopback host port mapped to PostgreSQL 5432 |
 | `LAMPA_DB_PASSWORD` | Yes | None | Password of the `lampa` database role (`openssl rand -hex 32`) |
 | `LAMPA_API_DATA_KEY` | Yes | None | Base64 of 32 bytes that seal stored credentials (`openssl rand -base64 32`) |
+| `LAMPA_KEYCLOAK_CLIENT_SECRET` | Yes | None | Secret of the `svtlv-lampa` Keycloak client |
 
-The API health port 8081 is container-internal and never published. None of the
-published ports collide with Svtlv's (`8080` is Keycloak, `5433` is Svtlv's
-database).
+`lampa-api` publishes no port: browsers reach it only through the `/api/v1/`
+proxy in `lampa-web`, and its health port 8081 stays container-internal. None of
+the published ports collide with Svtlv's (`8080` is Keycloak, `5433` is Svtlv's
+database). The Keycloak client setup is in
+[`backend/README.md`](backend/README.md#keycloak-prerequisites).
 
 Check or stop the local services with:
 
@@ -168,10 +168,15 @@ The workflow has a single input:
 | --- | --- | --- |
 | `environment` | `Production` | `lampa-api` environment written to the server `.env` as `LAMPA_ENVIRONMENT`: `Development`, `Test` or `Production`. Development is for a local `go run` only (a container cannot reach the database), so the workflow rejects it before building or stopping anything |
 
+`Test` currently has a localhost public origin for local Compose. Set a reachable
+Test origin in `appsettings.Test.json` before dispatching a Test server deploy.
+
 The workflow performs the following operations:
 
-1. Validates the branch and all required repository secrets, including the format
-   of `LAMPA_DB_PASSWORD` and `LAMPA_API_DATA_KEY`.
+1. Validates the branch and all required repository secrets and variables,
+   including the format of `LAMPA_DB_PASSWORD` and `LAMPA_API_DATA_KEY`, and
+   reads the selected `Authentication.PublicURL` to check the bind address and
+   port when it uses `http://` (see "GitHub Actions variables").
 2. Builds `ghcr.io/<owner>/lampa-web` and `ghcr.io/<owner>/lampa-api` and publishes
    them to GitHub Container Registry (GHCR) with the branch, `<branch>-<sha>` and
    `latest` tags.
@@ -202,14 +207,15 @@ The target server must have:
 - Docker Engine;
 - the `docker-compose` executable;
 - an SSH user that can create `DEPLOY_DIR` and run Docker commands;
-- Tailscale connectivity from the GitHub Actions runner to `SERVER_HOST`;
-- the configured `LAMPA_PORT` available to bind, or a reverse proxy prepared to
-  use that port;
-- port `5800` (`lampa-api`) and loopback port `5434` (`lampa-db`) free.
+- Tailscale connectivity from the GitHub Actions runner to `svtlv`;
+- Tailscale address `100.105.140.19` and port `8092` available for `lampa-web`;
+- loopback port `5434` (`lampa-db`) free;
+- a `svtlv-lampa` client in the Svtlv Keycloak realm, set up as described in
+  [`backend/README.md`](backend/README.md#keycloak-prerequisites).
 
-Local Compose and automated deployments default to port `8092` because port
-`8080` is already used by Keycloak on the Svtlv server. The optional
-`LAMPA_PORT` secret overrides that default. The API is published on `5800`.
+Local Compose and automated deployments use port `8092` because port `8080` is
+already used by Keycloak on the Svtlv server. The API publishes no port; it is
+reached through the `/api/v1/` proxy in `lampa-web`.
 
 ### Required GitHub Actions secrets
 
@@ -219,14 +225,13 @@ Secrets**:
 | Secret | Description |
 | --- | --- |
 | `DEPLOY_DIR` | Absolute deployment path, such as `/opt/svtlvtv/lampa-web` |
-| `LAMPA_DOMAIN` | Public MSX host without a protocol |
 | `TAILSCALE_AUTHKEY` | Auth key for runner tailnet access |
-| `SERVER_HOST` | Server's Tailscale hostname or IP |
 | `SSH_USER` | User that performs the remote deployment |
 | `SSH_PRIVATE_KEY` | Private SSH key authorized for `SSH_USER` on the server |
 | `GHCR_PAT` | GitHub personal access token with `read:packages` permission |
 | `LAMPA_DB_PASSWORD` | 64 lowercase hex characters (`openssl rand -hex 32`) |
 | `LAMPA_API_DATA_KEY` | Base64 of exactly 32 bytes (`openssl rand -base64 32`) |
+| `LAMPA_KEYCLOAK_CLIENT_SECRET` | Secret of the `svtlv-lampa` Keycloak client |
 
 **Back up `LAMPA_API_DATA_KEY` outside GitHub.** It seals every stored TorrServer,
 Jackett and Prowlarr credential; losing or changing it makes them unreadable, and key
@@ -237,21 +242,10 @@ rotation is not implemented. `LAMPA_DB_PASSWORD` applies only when the
 `GITHUB_TOKEN` is supplied automatically by GitHub Actions and is used to check
 out the repository and push the images produced by the workflow.
 
-### Optional GitHub Actions secret
-
-| Secret | Default | Description |
-| --- | --- | --- |
-| `LAMPA_PORT` | `8092` | Server port mapped to the container's port 80 |
-
-### Optional GitHub Actions variables
-
-Configure these under **Repository settings → Secrets and variables → Actions →
-Variables** when the defaults are not suitable:
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `LAMPA_PREFIX` | `https://` | Protocol written to the MSX descriptor |
-| `LAMPA_BIND_ADDRESS` | `0.0.0.0` | Published server interface for `lampa-web` and `lampa-api` |
+The workflow hardcodes `svtlv:8092` and `http://` in the MSX build, connects to
+`svtlv` over Tailscale, and binds the released web service to
+`100.105.140.19:8092`. The public URL and Keycloak Authority are checked into
+the environment-specific appsettings files.
 
 ### Run a deployment
 
@@ -275,7 +269,7 @@ With `DEPLOY_DIR=/opt/svtlvtv/lampa-web`, a successful run produces:
 ```
 
 The generated `.env` file is set to mode `600`. It records `LAMPA_ENVIRONMENT`,
-the published ports and bind address, the database password and the data key;
+the Keycloak client secret, the database password and the data key;
 SSH, Tailscale, and registry credentials are not written into it or into the
 application images. It sets no `COMPOSE_PROJECT_NAME`, so the project name stays
 the `DEPLOY_DIR` basename and container and volume names are stable across
@@ -287,16 +281,16 @@ On the server:
 
 ```bash
 DEPLOY_DIR=/opt/svtlvtv/lampa-web
-LAMPA_PORT=8092
 cd "$DEPLOY_DIR"
+PUBLIC_URL=http://svtlv:8092
 docker-compose ps lampa-web
 docker inspect --format '{{.State.Health.Status}}' svtlvtv_lampa_web
 docker-compose logs --tail 100 lampa-web
-curl --fail "http://127.0.0.1:${LAMPA_PORT}/"
+curl --fail "$PUBLIC_URL/"
 ```
 
-If `LAMPA_PORT` or `LAMPA_BIND_ADDRESS` was changed, adjust the `curl` address
-accordingly.
+With a Tailscale bind address the web port answers only on that address, not on
+`127.0.0.1`, so the check uses the public URL.
 
 Also check the API and its database. The health port is not published on the
 host, so query it from inside the container:
@@ -304,12 +298,14 @@ host, so query it from inside the container:
 ```bash
 docker inspect --format '{{.State.Health.Status}}' svtlvtv_lampa_api svtlvtv_lampa_db
 docker exec svtlvtv_lampa_api curl -s http://localhost:8081/health
-curl -s -w ' %{http_code}\n' http://127.0.0.1:5800/api/v1/user-data
+curl -s -w ' %{http_code}\n' "$PUBLIC_URL/api/v1/session"
 docker-compose logs lampa-api | grep -m1 Environment
 ```
 
-The user-data request answers `401` until authentication is added in a later
-plan. The startup log names the environment selected by the workflow input.
+`/health` lists a `keycloak` check that is advisory: it reports `Degraded`, never
+unhealthy, when Keycloak is unreachable. The session request goes through the web
+proxy and answers `200` with `{"authenticated":false}`. The startup log names the
+environment selected by the workflow input.
 
 ### Roll back
 
@@ -319,16 +315,16 @@ The workflow has no rollback inputs. To roll back, revert the offending commit o
 
 ### Troubleshooting
 
-- **Missing required repository secret** — add the named secret and start the
-  workflow again.
-- **Tailscale ping fails** — confirm the auth key is valid and `SERVER_HOST` is
+- **Missing required repository secret or variable** — add the named secret or
+  variable and start the workflow again.
+- **Tailscale ping fails** — confirm the auth key is valid and `svtlv` is
   reachable from the same tailnet.
 - **SSH authentication fails** — verify `SSH_USER`, the private key, and the matching
   public key in the server user's `authorized_keys` file.
 - **GHCR returns `denied` or `unauthorized`** — verify that `GHCR_PAT` belongs
   to a user with package access and includes `read:packages`.
-- **Port is already allocated** — set `LAMPA_PORT` to an unused port or stop the
-  conflicting service.
+- **Port is already allocated** — stop the conflicting service before deploying
+  on `100.105.140.19:8092`.
 - **Container is unhealthy** — inspect
   `docker-compose logs --tail 100 lampa-web` and confirm that Apache can serve
   `/` inside the container.
@@ -350,7 +346,11 @@ The workflow has no rollback inputs. To roll back, revert the offending commit o
 
 The upstream project publishes generated files into this repository. In particular:
 
-- edit `app.min.js` directly for application changes;
+- edit `app.min.js` directly for upstream application changes;
+- put fork-only features in `svtlv/` as add-ons that use only `window.Lampa`, never
+  in `app.min.js`, `css/app.css` or `lang/*`, and keep the marked
+  `<!-- svtlv:begin -->` … `<!-- svtlv:end -->` block of `index.html` when taking
+  upstream files;
 - edit `css/app.css` directly for style changes;
 - update both the inline `ru`/`en` dictionaries in `app.min.js` and the matching
   `lang/ru.js` or `lang/en.js` file when adding translations;

@@ -18,6 +18,9 @@ import (
 const (
 	testPassword = "s3cret-pass"
 	testFile     = "appsettings.Test.json"
+	testOrigin   = "http://100.64.0.1:8092"
+	testIssuer   = "https://svtlv.fly.dev/realms/svtlv-test"
+	testClient   = "client-s3cret-value"
 )
 
 // baseJSON matches the shape of the shipped appsettings.json
@@ -26,7 +29,10 @@ const baseJSON = `{
   "Health": {"Listen": ":8081"},
   "Database": {"Host": "localhost", "Port": 5434, "Name": "lampa", "User": "lampa",
                "Password": "{LAMPA_DB_PASSWORD}", "SSLMode": "disable"},
-  "DataKey": "{LAMPA_API_DATA_KEY}"
+  "DataKey": "{LAMPA_API_DATA_KEY}",
+  "Authentication": {"PublicURL": "http://100.64.0.1:8092", "Keycloak": {
+    "Authority": "https://svtlv.fly.dev/realms/svtlv-test", "ClientId": "svtlv-lampa",
+    "ClientSecret": "{LAMPA_KEYCLOAK_CLIENT_SECRET}", "RequireHttpsMetadata": false}}
 }`
 
 var (
@@ -34,12 +40,13 @@ var (
 	testKeyB64 = base64.StdEncoding.EncodeToString(testKey)
 )
 
-// envOf returns a lookup func backed by a map, with both placeholder variables prefilled.
+// envOf returns a lookup func backed by a map, with every placeholder variable prefilled.
 func envOf(t *testing.T, overrides map[string]string) func(string) (string, bool) {
 	t.Helper()
 	env := map[string]string{
-		"LAMPA_DB_PASSWORD":  testPassword,
-		"LAMPA_API_DATA_KEY": testKeyB64,
+		"LAMPA_DB_PASSWORD":            testPassword,
+		"LAMPA_API_DATA_KEY":           testKeyB64,
+		"LAMPA_KEYCLOAK_CLIENT_SECRET": testClient,
 	}
 	maps.Copy(env, overrides)
 	return func(name string) (string, bool) {
@@ -75,6 +82,44 @@ func TestLoad_base(t *testing.T) {
 	assert.Equal(t, "postgres://lampa:"+testPassword+"@localhost:5434/lampa?sslmode=disable", cfg.DBDSN)
 	assert.Equal(t, testKey, cfg.DataKey[:])
 	assert.Equal(t, int64(2097152), cfg.MaxBodyBytes)
+	assert.Equal(t, Auth{PublicURL: testOrigin, Issuer: testIssuer, ClientID: "svtlv-lampa", ClientSecret: testClient},
+		cfg.Auth)
+}
+
+func TestLoad_auth(t *testing.T) {
+	tests := []struct {
+		name       string
+		origin     string
+		issuer     string
+		wantSecure bool
+	}{
+		{name: "http tailnet address", origin: testOrigin, issuer: testIssuer},
+		{name: "https origin sets secure cookies", origin: "https://lampa.example.org", issuer: "https://id.example.org/realms/svtlv",
+			wantSecure: true},
+		{name: "https origin with a port", origin: "https://lampa.example.org:8443", issuer: testIssuer, wantSecure: true},
+		{name: "http origin with a port", origin: "http://lampa.example.org:8092", issuer: testIssuer},
+		{name: "ipv6 origin", origin: "http://[fd7a:115c:a1e0::1]:8092", issuer: testIssuer},
+		{name: "issuer without path", origin: testOrigin, issuer: "https://id.example.org"},
+		{name: "issuer with trailing slash is kept as is", origin: testOrigin, issuer: "https://id.example.org/realms/svtlv/"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			override := fmt.Sprintf(`{"Authentication":{"PublicURL":%q,"Keycloak":{"Authority":%q}}}`, tc.origin, tc.issuer)
+			cfg, err := Load(fsOf(map[string]string{testFile: override}), envOf(t, nil))
+			require.NoError(t, err)
+			assert.Equal(t, tc.origin, cfg.Auth.PublicURL)
+			assert.Equal(t, tc.issuer, cfg.Auth.Issuer)
+			assert.Equal(t, tc.wantSecure, cfg.Auth.SecureCookies)
+		})
+	}
+
+	t.Run("client id from an environment file", func(t *testing.T) {
+		cfg, err := Load(fsOf(map[string]string{testFile: `{"Authentication": {"Keycloak": {"ClientId": "other-client"}}}`}), envOf(t, nil))
+		require.NoError(t, err)
+		assert.Equal(t, "other-client", cfg.Auth.ClientID)
+		assert.Equal(t, testClient, cfg.Auth.ClientSecret)
+	})
 }
 
 func TestLoad_environments(t *testing.T) {
@@ -250,6 +295,36 @@ func TestLoad_invalid(t *testing.T) {
 			wantErr: ErrInvalid, wantMsg: "DataKey: must decode to 32 bytes, got 16: invalid value", wantFull: true},
 		{name: "long key", env: map[string]string{"LAMPA_API_DATA_KEY": base64.StdEncoding.EncodeToString(make([]byte, 33))},
 			wantErr: ErrInvalid, wantMsg: "DataKey: must decode to 32 bytes, got 33"},
+		{name: "missing client secret variable", env: map[string]string{"LAMPA_KEYCLOAK_CLIENT_SECRET": ""}, wantErr: ErrMissing,
+			wantMsg: "Authentication.Keycloak.ClientSecret: LAMPA_KEYCLOAK_CLIENT_SECRET: required value is not set", wantFull: true},
+		{name: "data key reported before client secret",
+			env:     map[string]string{"LAMPA_API_DATA_KEY": "", "LAMPA_KEYCLOAK_CLIENT_SECRET": ""},
+			wantErr: ErrMissing, wantMsg: "DataKey: LAMPA_API_DATA_KEY: required value is not set", wantFull: true},
+		{name: "empty public url", files: map[string]string{testFile: `{"Authentication": {"PublicURL": ""}}`}, wantErr: ErrMissing,
+			wantMsg: "Authentication.PublicURL: required value is not set", wantFull: true},
+		{name: "public url with a path", files: map[string]string{testFile: `{"Authentication": {"PublicURL": "http://100.64.0.1:8092/lampa"}}`},
+			wantErr: ErrInvalid, wantMsg: "Authentication.PublicURL: must be a lowercase origin scheme://host[:port] without user, path or query: invalid value",
+			wantFull: true},
+		{name: "empty issuer", files: map[string]string{testFile: `{"Authentication": {"Keycloak": {"Authority": ""}}}`}, wantErr: ErrMissing,
+			wantMsg: "Authentication.Keycloak.Authority: required value is not set", wantFull: true},
+		{name: "non-http issuer", files: map[string]string{testFile: `{"Authentication": {"Keycloak": {"Authority": "ldap://id.example.org/realms/svtlv"}}}`},
+			wantErr: ErrInvalid, wantMsg: "Authentication.Keycloak.Authority: must be an absolute http or https URL: invalid value", wantFull: true},
+		{name: "relative issuer", files: map[string]string{testFile: `{"Authentication": {"Keycloak": {"Authority": "/realms/svtlv"}}}`},
+			wantErr: ErrInvalid, wantMsg: "Authentication.Keycloak.Authority: must be an absolute http or https URL"},
+		{name: "issuer with a query", files: map[string]string{testFile: `{"Authentication": {"Keycloak": {"Authority": "https://id.example.org/realms/svtlv?x=1"}}}`},
+			wantErr: ErrInvalid, wantMsg: "Authentication.Keycloak.Authority: must not contain user, query or fragment: invalid value", wantFull: true},
+		{name: "issuer with a fragment", files: map[string]string{testFile: `{"Authentication": {"Keycloak": {"Authority": "https://id.example.org/realms/svtlv#x"}}}`},
+			wantErr: ErrInvalid, wantMsg: "Authentication.Keycloak.Authority: must not contain user, query or fragment"},
+		{name: "issuer with a user", files: map[string]string{testFile: `{"Authentication": {"Keycloak": {"Authority": "https://me:pw@id.example.org/realms/svtlv"}}}`},
+			wantErr: ErrInvalid, wantMsg: "Authentication.Keycloak.Authority: must not contain user, query or fragment"},
+		{name: "http issuer when https metadata is required", files: map[string]string{testFile: `{"Authentication": {"Keycloak": {"Authority": "http://id.example.org/realms/svtlv", "RequireHttpsMetadata": true}}}`},
+			wantErr: ErrInvalid, wantMsg: "Authentication.Keycloak.Authority: HTTPS is required for metadata: invalid value", wantFull: true},
+		{name: "empty client id", files: map[string]string{testFile: `{"Authentication": {"Keycloak": {"ClientId": ""}}}`}, wantErr: ErrMissing,
+			wantMsg: "Authentication.Keycloak.ClientId: required value is not set", wantFull: true},
+		{name: "empty client secret", files: map[string]string{testFile: `{"Authentication": {"Keycloak": {"ClientSecret": ""}}}`}, wantErr: ErrMissing,
+			wantMsg: "Authentication.Keycloak.ClientSecret: required value is not set", wantFull: true},
+		{name: "unknown auth key", files: map[string]string{testFile: `{"Authentication": {"Keycloak": {"RedirectURL": "x"}}}`}, wantErr: ErrInvalid,
+			wantMsg: `unknown field "RedirectURL"`},
 	}
 
 	for _, tc := range tests {
@@ -289,13 +364,17 @@ func TestLoad_embeddedDefaults(t *testing.T) {
 	assert.ElementsMatch(t, []string{"appsettings.json", "appsettings.Test.json", "appsettings.Production.json"}, names)
 
 	tests := []struct {
-		env      string
-		wantHost string
-		wantPort uint16
+		env               string
+		wantHost          string
+		wantPort          uint16
+		wantOrigin        string
+		wantIssuer        string
+		wantHTTPSMetadata bool
 	}{
-		{env: Development, wantHost: "localhost", wantPort: 5434},
-		{env: Test, wantHost: "lampa-db", wantPort: 5432},
-		{env: Production, wantHost: "lampa-db", wantPort: 5432},
+		{env: Development, wantHost: "localhost", wantPort: 5434, wantOrigin: "http://localhost:8092", wantIssuer: testIssuer},
+		{env: Test, wantHost: "lampa-db", wantPort: 5432, wantOrigin: "http://localhost:8092", wantIssuer: testIssuer},
+		{env: Production, wantHost: "lampa-db", wantPort: 5432,
+			wantOrigin: "http://svtlv:8092", wantIssuer: "https://svtlv.fly.dev/realms/svtlv", wantHTTPSMetadata: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.env, func(t *testing.T) {
@@ -315,8 +394,19 @@ func TestLoad_embeddedDefaults(t *testing.T) {
 			assert.Equal(t, "lampa", pc.User)
 			assert.Equal(t, testPassword, pc.Password)
 			assert.Equal(t, "sslmode=disable", mustURL(t, cfg.DBDSN).RawQuery)
+
+			assert.Equal(t, Auth{PublicURL: tc.wantOrigin, Issuer: tc.wantIssuer, ClientID: "svtlv-lampa",
+				ClientSecret: testClient, RequireHTTPSMetadata: tc.wantHTTPSMetadata}, cfg.Auth)
+			assert.Contains(t, cfg.String(), "ClientSecret:[redacted]")
+			assert.NotContains(t, cfg.String(), testClient)
 		})
 	}
+
+	t.Run("without auth variables", func(t *testing.T) {
+		env := envOf(t, map[string]string{EnvEnvironment: Production, "LAMPA_KEYCLOAK_CLIENT_SECRET": ""})
+		_, err := Load(Defaults, env)
+		require.EqualError(t, err, "Authentication.Keycloak.ClientSecret: LAMPA_KEYCLOAK_CLIENT_SECRET: required value is not set")
+	})
 
 	t.Run("without variables", func(t *testing.T) {
 		_, err := Load(Defaults, func(string) (string, bool) { return "", false })
@@ -342,7 +432,10 @@ func TestConfig_String(t *testing.T) {
 			assert.NotContains(t, out, "localhost")
 			assert.NotContains(t, out, testKeyB64)
 			assert.NotContains(t, out, "171", "raw key bytes must not be printed") // 0xAB
+			assert.NotContains(t, out, testClient)
 			assert.Contains(t, out, "DBDSN:[redacted] DataKey:[redacted]")
+			assert.Contains(t, out, "Auth:{PublicURL:"+testOrigin+" Issuer:"+testIssuer+
+				" ClientID:svtlv-lampa ClientSecret:[redacted] RequireHTTPSMetadata:false SecureCookies:false}")
 			assert.Contains(t, out, "Environment:Test")
 			assert.Contains(t, out, ":5800")
 		})
@@ -360,5 +453,16 @@ func TestConfig_String(t *testing.T) {
 
 	t.Run("unset secrets", func(t *testing.T) {
 		assert.Contains(t, Config{}.String(), "DBDSN:[unset] DataKey:[unset]")
+		assert.Contains(t, Config{}.String(), "ClientSecret:[unset]")
+	})
+
+	t.Run("auth alone", func(t *testing.T) {
+		for _, verb := range []string{"%v", "%+v", "%#v", "%s"} {
+			out := fmt.Sprintf(verb, cfg.Auth)
+			assert.NotContains(t, out, testClient, verb)
+			assert.Contains(t, out, "ClientSecret:[redacted]", verb)
+		}
+		assert.Equal(t, "config.Auth"+cfg.Auth.String(), fmt.Sprintf("%#v", cfg.Auth))
+		assert.NotContains(t, fmt.Sprintf("%+v", &cfg.Auth), testClient)
 	})
 }
