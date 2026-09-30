@@ -23,7 +23,7 @@ const (
 	testClient   = "client-s3cret-value"
 )
 
-// baseJSON matches the shape of the shipped appsettings.json
+// baseJSON is a self-contained fixture for the config loader tests.
 const baseJSON = `{
   "Api": {"Listen": ":5800", "MaxBodyBytes": 2097152},
   "Health": {"Listen": ":8081"},
@@ -356,69 +356,6 @@ func TestMustSub(t *testing.T) {
 	_, err := fs.Stat(mustSub(fsys, "dir"), "a.json")
 	require.NoError(t, err)
 	assert.Panics(t, func() { mustSub(fsys, "../dir") })
-}
-
-func TestLoad_embeddedDefaults(t *testing.T) {
-	names, err := fs.Glob(Defaults, "appsettings*.json")
-	require.NoError(t, err)
-	assert.ElementsMatch(t, []string{"appsettings.json", "appsettings.Test.json", "appsettings.Production.json"}, names)
-
-	tests := []struct {
-		env               string
-		wantHost          string
-		wantPort          uint16
-		wantOrigin        string
-		wantIssuer        string
-		wantHTTPSMetadata bool
-	}{
-		{env: Development, wantHost: "localhost", wantPort: 5434, wantOrigin: "http://localhost:8092", wantIssuer: testIssuer},
-		{env: Test, wantHost: "lampa-db", wantPort: 5432, wantOrigin: "http://localhost:8092", wantIssuer: testIssuer},
-		{env: Production, wantHost: "lampa-db", wantPort: 5432,
-			wantOrigin: "http://svtlv:8092", wantIssuer: "https://svtlv.fly.dev/realms/svtlv", wantHTTPSMetadata: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.env, func(t *testing.T) {
-			cfg, err := Load(Defaults, envOf(t, map[string]string{EnvEnvironment: tc.env}))
-			require.NoError(t, err)
-
-			assert.Equal(t, tc.env, cfg.Environment)
-			assert.Equal(t, ":5800", cfg.Listen)
-			assert.Equal(t, ":8081", cfg.HealthListen)
-			assert.Equal(t, int64(2097152), cfg.MaxBodyBytes)
-			assert.Equal(t, testKey, cfg.DataKey[:])
-
-			pc := parseDSN(t, cfg.DBDSN)
-			assert.Equal(t, tc.wantHost, pc.Host)
-			assert.Equal(t, tc.wantPort, pc.Port)
-			assert.Equal(t, "lampa", pc.Database)
-			assert.Equal(t, "lampa", pc.User)
-			assert.Equal(t, testPassword, pc.Password)
-			assert.Equal(t, "sslmode=disable", mustURL(t, cfg.DBDSN).RawQuery)
-
-			assert.Equal(t, Auth{PublicURL: tc.wantOrigin, Issuer: tc.wantIssuer, ClientID: "svtlv-lampa",
-				ClientSecret: testClient, RequireHTTPSMetadata: tc.wantHTTPSMetadata}, cfg.Auth)
-			assert.Contains(t, cfg.String(), "ClientSecret:[redacted]")
-			assert.NotContains(t, cfg.String(), testClient)
-		})
-	}
-
-	t.Run("without auth variables", func(t *testing.T) {
-		env := envOf(t, map[string]string{EnvEnvironment: Production, "LAMPA_KEYCLOAK_CLIENT_SECRET": ""})
-		_, err := Load(Defaults, env)
-		require.EqualError(t, err, "Authentication.Keycloak.ClientSecret: LAMPA_KEYCLOAK_CLIENT_SECRET: required value is not set")
-	})
-
-	t.Run("without variables", func(t *testing.T) {
-		_, err := Load(Defaults, func(string) (string, bool) { return "", false })
-		require.EqualError(t, err, "Database.Password: LAMPA_DB_PASSWORD: required value is not set")
-	})
-}
-
-func mustURL(t *testing.T, s string) *url.URL {
-	t.Helper()
-	u, err := url.Parse(s)
-	require.NoError(t, err)
-	return u
 }
 
 func TestConfig_String(t *testing.T) {

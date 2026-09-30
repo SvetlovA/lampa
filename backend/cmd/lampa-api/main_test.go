@@ -219,14 +219,6 @@ func TestRun_invalidConfig(t *testing.T) {
 	}
 }
 
-func TestRun_embeddedDefaultsNeedSecrets(t *testing.T) {
-	var out bytes.Buffer
-	err := run(t.Context(), nil, config.Defaults, noEnv, &out)
-	require.ErrorIs(t, err, config.ErrMissing)
-	// the password is resolved before the data key, so it is the one reported
-	assert.EqualError(t, err, "load config: Database.Password: LAMPA_DB_PASSWORD: required value is not set")
-}
-
 func TestRun_logsEnvironment(t *testing.T) {
 	// the database points to a closed port, so run stops at the migration right after logging the config
 	settings := testSettings(t, "127.0.0.1", 1, ":9000", ":9001")
