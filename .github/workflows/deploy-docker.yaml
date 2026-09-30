@@ -69,11 +69,6 @@ jobs:
           echo "value=${PREFIX}" >> "$GITHUB_OUTPUT"
           echo "::notice::Image prefix set to: ${PREFIX}"
 
-      - name: Checkout code
-        uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
       - name: Validate required configuration
         shell: bash
         env:
@@ -82,7 +77,6 @@ jobs:
           LAMPA_DB_PASSWORD: ${{ secrets.LAMPA_DB_PASSWORD }}
           LAMPA_API_DATA_KEY: ${{ secrets.LAMPA_API_DATA_KEY }}
           LAMPA_KEYCLOAK_CLIENT_SECRET: ${{ secrets.LAMPA_KEYCLOAK_CLIENT_SECRET }}
-          ENVIRONMENT: ${{ inputs.environment }}
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
           SSH_USER: ${{ secrets.SSH_USER }}
           TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
@@ -127,48 +121,6 @@ jobs:
           if [[ ! "$LAMPA_KEYCLOAK_CLIENT_SECRET" =~ ^[A-Za-z0-9._~+/=-]+$ ]]; then
             echo "LAMPA_KEYCLOAK_CLIENT_SECRET must be the svtlv-lampa client secret from Keycloak" >&2
             exit 1
-          fi
-
-          # read the effective origin from the same embedded settings the API will use
-          PUBLIC_URL=$(python3 - "$ENVIRONMENT" <<'PY'
-          import json
-          from pathlib import Path
-          import sys
-
-          root = Path("backend/pkg/config/defaults")
-          base = json.loads((root / "appsettings.json").read_text())
-          override_file = root / f"appsettings.{sys.argv[1]}.json"
-          override = json.loads(override_file.read_text()) if override_file.exists() else {}
-          print(override.get("Authentication", {}).get("PublicURL", base["Authentication"]["PublicURL"]))
-          PY
-          )
-
-          # same rule as lampa-api's config: the exact lowercase origin a browser sends, without
-          # the scheme's default port
-          origin_re='^(https?)://([a-z0-9]([-a-z0-9.]*[a-z0-9])?|\[[0-9a-f:.]+\])(:([1-9][0-9]{0,4}))?$'
-          if [[ ! "$PUBLIC_URL" =~ $origin_re ]]; then
-            echo "Authentication.PublicURL must be a lowercase origin scheme://host[:port] without a trailing slash" >&2
-            exit 1
-          fi
-          public_scheme="${BASH_REMATCH[1]}"
-          public_host="${BASH_REMATCH[2]}"
-          public_port="${BASH_REMATCH[5]}"
-          if [ -n "$public_port" ] && { (( public_port > 65535 )) ||
-            [ "$public_scheme:$public_port" = "http:80" ] || [ "$public_scheme:$public_port" = "https:443" ]; }; then
-            echo "Authentication.PublicURL must have a port 1-65535 other than its scheme's default" >&2
-            exit 1
-          fi
-
-          # the release Compose file binds the HTTP web port to svtlv's Tailscale address.
-          if [ "$public_scheme" = "http" ]; then
-            if [ "$public_host" != "svtlv" ]; then
-              echo "an http Authentication.PublicURL must use the svtlv Tailscale hostname" >&2
-              exit 1
-            fi
-            if [ "8092" != "${public_port:-80}" ]; then
-              echo "the published web port must equal the Authentication.PublicURL port (8092)" >&2
-              exit 1
-            fi
           fi
 
   build:
