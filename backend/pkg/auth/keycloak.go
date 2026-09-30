@@ -73,10 +73,11 @@ type DeviceStart struct {
 
 // KeycloakConfig is the confidential keycloak client lampa-api signs in with.
 type KeycloakConfig struct {
-	Issuer       string // realm issuer, equal to the iss keycloak issues
-	ClientID     string
-	ClientSecret string
-	RedirectURL  string // <PublicURL>/api/v1/auth/callback
+	Issuer          string // realm issuer, equal to the iss keycloak issues
+	ClientID        string
+	ClientSecret    string
+	RedirectURL     string // <PublicURL>/api/v1/auth/callback
+	LogoutReturnURL string // <PublicURL>/, registered as a valid post-logout redirect URI
 }
 
 // Keycloak is the OIDC client for both login flows and session revalidation. discovery is lazy:
@@ -97,6 +98,7 @@ type discovery struct {
 	oauth         *oauth2.Config
 	verifier      *oidc.IDTokenVerifier
 	introspectURL string
+	endSessionURL string
 }
 
 // NewKeycloak returns a client for cfg without contacting keycloak.
@@ -126,6 +128,72 @@ func (k *Keycloak) AuthCodeURL(ctx context.Context, state, nonce, verifier strin
 		return "", err
 	}
 	return d.oauth.AuthCodeURL(state, oauth2.S256ChallengeOption(verifier), oidc.Nonce(nonce)), nil
+}
+
+// LogoutURL sends the browser through keycloak's RP-initiated logout, ending its shared realm
+// SSO session before returning to Lampa. the client_id identifies the client when no ID token is
+// retained in the session cookie.
+func (k *Keycloak) LogoutURL(ctx context.Context) (string, error) {
+	ctx, cancel := k.callContext(ctx)
+	defer cancel()
+	d, err := k.discover(ctx)
+	if err != nil {
+		return "", err
+	}
+	if k.cfg.LogoutReturnURL == "" {
+		return "", errors.New("keycloak logout: no return url")
+	}
+	u, err := k.logoutEndpoint(d)
+	if err != nil {
+		return "", err
+	}
+	q := u.Query()
+	q.Set("client_id", k.cfg.ClientID)
+	q.Set("post_logout_redirect_uri", k.cfg.LogoutReturnURL)
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
+// Logout ends the Keycloak user session represented by this refresh token, including its other
+// clients in the same browser session. The handler calls it only for browser sign-out.
+func (k *Keycloak) Logout(ctx context.Context, refreshToken string) error {
+	ctx, cancel := k.callContext(ctx)
+	defer cancel()
+	d, err := k.discover(ctx)
+	if err != nil {
+		return err
+	}
+	u, err := k.logoutEndpoint(d)
+	if err != nil {
+		return err
+	}
+	status, _, err := k.postForm(ctx, u.String(), url.Values{"refresh_token": {refreshToken}})
+	if err != nil {
+		return fmt.Errorf("logout: %w", err)
+	}
+	if status != http.StatusNoContent {
+		return fmt.Errorf("logout: keycloak status %d", status)
+	}
+	return nil
+}
+
+// logoutEndpoint must stay on the issuer origin: the POST sends both the client secret and a
+// refresh token, so a different discovery URL must never receive them.
+func (k *Keycloak) logoutEndpoint(d *discovery) (*url.URL, error) {
+	if d.endSessionURL == "" {
+		return nil, errors.New("keycloak discovery: no end session endpoint")
+	}
+	u, err := url.Parse(d.endSessionURL)
+	if err != nil {
+		return nil, errors.New("keycloak discovery: invalid end session endpoint")
+	}
+	issuer, err := url.Parse(k.cfg.Issuer)
+	if err != nil || u.Scheme != issuer.Scheme || u.Host != issuer.Host ||
+		(u.Scheme != "https" && u.Scheme != "http") || u.User != nil || u.Fragment != "" ||
+		!strings.HasPrefix(u.Path, strings.TrimRight(issuer.Path, "/")+"/") {
+		return nil, errors.New("keycloak discovery: invalid end session endpoint")
+	}
+	return u, nil
 }
 
 // Exchange redeems an authorization code, verifies the ID token and its nonce, and returns the
@@ -398,6 +466,7 @@ func (k *Keycloak) discover(ctx context.Context) (*discovery, error) {
 	}
 	var extra struct {
 		IntrospectionEndpoint string `json:"introspection_endpoint"`
+		EndSessionEndpoint    string `json:"end_session_endpoint"`
 	}
 	if err := provider.Claims(&extra); err != nil {
 		return nil, fmt.Errorf("keycloak discovery: %w", err)
@@ -420,6 +489,7 @@ func (k *Keycloak) discover(ctx context.Context) (*discovery, error) {
 		},
 		verifier:      provider.Verifier(&oidc.Config{ClientID: k.cfg.ClientID, Now: k.now}),
 		introspectURL: extra.IntrospectionEndpoint,
+		endSessionURL: extra.EndSessionEndpoint,
 	}
 	return k.disc, nil
 }

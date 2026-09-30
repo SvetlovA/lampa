@@ -165,7 +165,8 @@ to `/#svtlv-login=failed`. `/api/v1/session` still answers.
   against an `httptest` fake (discovery, JWKS signed with a test RSA key, device-authorization,
   token and introspection endpoints).
 - For a real login, configure the `svtlv-lampa` client in the selected Keycloak realm with
-  the redirect URI `<Authentication.PublicURL>/api/v1/auth/callback`. The Authority must equal
+  the redirect URI `<Authentication.PublicURL>/api/v1/auth/callback` and Valid Post Logout Redirect
+  URI `<Authentication.PublicURL>/`. The Authority must equal
   the `iss` Keycloak issues. To use a different realm locally, edit the appsettings file and
   rebuild the API; environment variables do not override non-secret settings.
 
@@ -215,10 +216,13 @@ break. Accepted costs:
 
 - while Keycloak is slow or down, each authenticated request waits up to the 3-second timeout;
 - a user disabled while Keycloak is unreachable keeps access until it answers again;
-- logout clears only this device's cookie and leaves the Keycloak session alone (a phone login
-  shares its browser's SSO session with other Svtlv apps), so a copied cookie stays valid until
-  that Keycloak session ends or the cookie expires. The device itself cannot be signed back in by
-  a request still in flight (another tab) renewing its cookie after the logout: logout also sets
+- TV logout clears the local session and pending login cookies. Browser logout also sends the
+  refresh token to Keycloak's end-session endpoint and visits its logout page, ending SSO for
+  apps in that browser. Other browsers keep their sessions; a TV approved from that browser may
+  share the Keycloak user session and be signed out too. When Keycloak is down,
+  local logout still succeeds and the add-on reports that browser SSO logout could not complete.
+  A copied TV cookie stays valid until its Keycloak session ends or the cookie expires. A request
+  still in flight (another tab) cannot sign the device back in with a renewed cookie: logout sets
   `lampa_logout` (the logout time, `Max-Age` = the absolute timeout), and a session created up to
   that time is refused; the next login deletes it.
 
@@ -240,7 +244,8 @@ headers are ever sent.
 
 In realm `svtlv`, the confidential client `svtlv-lampa`: Standard flow and OAuth 2.0 Device
 Authorization Grant on, direct access grants off, PKCE `S256` required, redirect URI
-`<Authentication.PublicURL>/api/v1/auth/callback`, no web origins, no `offline_access` default scope,
+`<Authentication.PublicURL>/api/v1/auth/callback`, Valid Post Logout Redirect URI
+`<Authentication.PublicURL>/`, no web origins, no `offline_access` default scope,
 and optionally a `picture` user-attribute mapper for avatars. Revalidation also relies on realm
 settings shared with Svtlv, which revalidates the same way: SSO Session Idle ≥ 31 days, SSO
 Session Max ≥ 180 days, the client's session idle/max unset or no shorter, and **Revoke Refresh
@@ -260,7 +265,8 @@ phones and browsers.
 | `GET /api/v1/auth/callback` | `302 <return>#svtlv-login=ok` + session cookie | `302 /#svtlv-login=failed` |
 | `POST /api/v1/auth/device/start` | `200` `{user_code, verification_uri, verification_uri_complete, expires_in, interval}` | `503 keycloak_unavailable` |
 | `POST /api/v1/auth/device/poll` | `202` `{status, interval}` (`pending` or `slow_down`); `200` signed-in body + session cookie | `400 no_device_login`, `403 access_denied`, `410 expired`, `500 login_failed`, `503 keycloak_unavailable` |
-| `POST /api/v1/auth/logout` | `204`, cookie cleared, `lampa_logout` set | — |
+| `POST /api/v1/auth/logout` | `204`, local cookies cleared, `lampa_logout` set | — |
+| `POST /api/v1/auth/logout?sso=1` | `200` `{sso_logged_out,logout_url?}`, local cookies cleared; browser follows `logout_url` | — |
 | `GET /api/v1/user-data` | `200` `{schema_version, data, updated_at}` | `401`, `404 user_data_not_found`, `500 connections_unreadable`, `503 storage_unavailable` / `session_unavailable` |
 | `PUT /api/v1/user-data` `{schema_version, data}` | `200` stored document | `400 invalid_document` / `unsupported_schema_version` / `invalid_json`, `401`, `413 request_too_large`, `415 unsupported_media_type`, `503` |
 | `DELETE /api/v1/user-data` | `204`, idempotent | `401`, `503` |
@@ -297,7 +303,8 @@ Any critical failure → `Unhealthy` (503); an advisory failure → `Degraded` (
 `Healthy` (200). Checks: `database` (critical) and `keycloak` (advisory). `keycloak` passes
 only on a `200` discovery document whose `issuer` equals `Auth.Issuer` (redirects not followed,
 64 KiB cap), so a wrong issuer shows as `Degraded` before any login fails. Sessions, `/session`
-and logout work with either dependency down; user data needs the database.
+and local logout work with either dependency down; browser SSO logout needs Keycloak. User data
+needs the database.
 
 ## Operational caveats
 

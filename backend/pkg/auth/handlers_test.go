@@ -23,8 +23,12 @@ import (
 type fakeKeycloakClient struct {
 	*fakeRevalidator
 
-	authURLErr error
-	authCalls  []loginState // state, nonce and verifier AuthCodeURL was called with
+	authURLErr     error
+	authCalls      []loginState // state, nonce and verifier AuthCodeURL was called with
+	logoutErr      error
+	logoutTokens   []string
+	logoutURL      string
+	logoutURLCalls int
 
 	exchangeErr    error
 	exchangeTokens Tokens
@@ -43,6 +47,7 @@ func newFakeKeycloakClient(active ...string) *fakeKeycloakClient {
 	return &fakeKeycloakClient{
 		fakeRevalidator: newFakeRevalidator(active...),
 		exchangeTokens:  testTokens(),
+		logoutURL:       "https://kc.example/logout?client_id=svtlv-lampa",
 		start: DeviceStart{
 			DeviceCode:              "device-code-secret",
 			Verifier:                "device-pkce-verifier",
@@ -61,6 +66,19 @@ func (f *fakeKeycloakClient) AuthCodeURL(_ context.Context, state, nonce, verifi
 		return "", f.authURLErr
 	}
 	return "https://kc.example/auth?state=" + url.QueryEscape(state), nil
+}
+
+func (f *fakeKeycloakClient) Logout(_ context.Context, refreshToken string) error {
+	f.logoutTokens = append(f.logoutTokens, refreshToken)
+	return f.logoutErr
+}
+
+func (f *fakeKeycloakClient) LogoutURL(context.Context) (string, error) {
+	f.logoutURLCalls++
+	if f.logoutErr != nil {
+		return "", f.logoutErr
+	}
+	return f.logoutURL, nil
 }
 
 func (f *fakeKeycloakClient) Exchange(_ context.Context, code, verifier, nonce string) (Profile, Tokens, error) {
@@ -733,14 +751,46 @@ func TestHandlers_Logout(t *testing.T) {
 			assert.Equal(t, http.StatusNoContent, rec.Code)
 			assert.Empty(t, rec.Body.String())
 			assertCleared(t, cookieNamed(t, rec, SessionCookie), SessionPath)
+			assertCleared(t, cookieNamed(t, rec, LoginCookie), LoginPath)
+			assertCleared(t, cookieNamed(t, rec, DeviceCookie), DevicePath)
 			mark := cookieNamed(t, rec, LogoutCookie)
 			assert.Equal(t, strconv.FormatInt(testNow.Unix(), 10), mark.Value, "the logout time")
 			assert.Equal(t, SessionPath, mark.Path)
 		})
 	}
 	refreshed, introspected := th.kc.calls()
-	assert.Empty(t, refreshed, "logout leaves the keycloak session alone")
+	assert.Empty(t, th.kc.logoutTokens, "TV logout leaves the phone's Keycloak browser session alone")
+	assert.Empty(t, refreshed)
 	assert.Empty(t, introspected)
+}
+
+func TestHandlers_LogoutBrowser(t *testing.T) {
+	th := newTestHandlers(t, newFakeKeycloakClient(testRefreshToken))
+	_, cookie := issue(t, th.c, testProfile, testTokens(), testNow)
+	rec := th.do(http.MethodPost, LogoutRoute+"?sso=1", cookie)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var body logoutJSON
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.True(t, body.SSOLoggedOut)
+	assert.Equal(t, th.kc.logoutURL, body.LogoutURL)
+	assert.Equal(t, []string{testRefreshToken}, th.kc.logoutTokens)
+	assert.Equal(t, 1, th.kc.logoutURLCalls)
+	assertCleared(t, cookieNamed(t, rec, SessionCookie), SessionPath)
+	assertCleared(t, cookieNamed(t, rec, LoginCookie), LoginPath)
+	assertCleared(t, cookieNamed(t, rec, DeviceCookie), DevicePath)
+}
+
+func TestHandlers_LogoutKeycloakUnavailable(t *testing.T) {
+	th := newTestHandlers(t, newFakeKeycloakClient(testRefreshToken))
+	th.kc.logoutErr = errors.New("unavailable")
+	_, cookie := issue(t, th.c, testProfile, testTokens(), testNow)
+	rec := th.do(http.MethodPost, LogoutRoute+"?sso=1", cookie)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var body logoutJSON
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.False(t, body.SSOLoggedOut)
+	assertCleared(t, cookieNamed(t, rec, SessionCookie), SessionPath)
+	assert.Contains(t, th.logs.String(), "keycloak SSO logout unavailable")
 }
 
 // another tab's /session request, in flight during the logout, answers with a renewed cookie

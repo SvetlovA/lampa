@@ -134,6 +134,7 @@ func (f *fakeKeycloak) serve(w http.ResponseWriter, r *http.Request) {
 			"token_endpoint":                        f.srv.URL + testOIDCPath + "/token",
 			"device_authorization_endpoint":         f.srv.URL + testOIDCPath + "/auth/device",
 			"introspection_endpoint":                f.srv.URL + testOIDCPath + "/token/introspect",
+			"end_session_endpoint":                  f.srv.URL + testOIDCPath + "/logout",
 			"jwks_uri":                              f.srv.URL + testOIDCPath + "/certs",
 			"id_token_signing_alg_values_supported": []string{"RS256"},
 		}
@@ -153,6 +154,8 @@ func (f *fakeKeycloak) serve(w http.ResponseWriter, r *http.Request) {
 		f.authenticated(w, r, introspect)
 	case testOIDCPath + "/auth/device":
 		f.authenticated(w, r, device)
+	case testOIDCPath + "/logout":
+		f.authenticated(w, r, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	default:
 		http.NotFound(w, r)
 	}
@@ -235,10 +238,11 @@ func loginResponse(idToken string) map[string]any {
 func newTestKeycloak(t *testing.T, f *fakeKeycloak) *Keycloak {
 	t.Helper()
 	k := NewKeycloak(KeycloakConfig{
-		Issuer:       f.issuer(),
-		ClientID:     testClientID,
-		ClientSecret: testClientSecret,
-		RedirectURL:  "http://100.64.0.1:8092/api/v1/auth/callback",
+		Issuer:          f.issuer(),
+		ClientID:        testClientID,
+		ClientSecret:    testClientSecret,
+		RedirectURL:     "http://100.64.0.1:8092/api/v1/auth/callback",
+		LogoutReturnURL: "http://100.64.0.1:8092/",
 	})
 	k.now = func() time.Time { return testNow }
 	return k
@@ -289,6 +293,40 @@ func TestKeycloak_AuthCodeURL(t *testing.T) {
 	assert.Equal(t, "S256", q.Get("code_challenge_method"))
 	assert.Equal(t, oauth2.S256ChallengeFromVerifier(verifier), q.Get("code_challenge"))
 	assert.Empty(t, q.Get("client_secret"))
+	assert.Empty(t, q.Get("prompt"))
+}
+
+func TestKeycloak_Logout(t *testing.T) {
+	f := newFakeKeycloak(t)
+	k := newTestKeycloak(t, f)
+	require.NoError(t, k.Logout(t.Context(), "refresh-1"))
+	reqs := f.recorded(testOIDCPath + "/logout")
+	require.Len(t, reqs, 1)
+	assert.Equal(t, "refresh-1", reqs[0].Form.Get("refresh_token"))
+	assert.Empty(t, reqs[0].Form.Get("client_secret"), "client credentials stay in Basic auth")
+
+	raw, err := k.LogoutURL(t.Context())
+	require.NoError(t, err)
+	u, err := url.Parse(raw)
+	require.NoError(t, err)
+	assert.Equal(t, f.srv.URL+testOIDCPath+"/logout", u.Scheme+"://"+u.Host+u.Path)
+	assert.Equal(t, testClientID, u.Query().Get("client_id"))
+	assert.Equal(t, "http://100.64.0.1:8092/", u.Query().Get("post_logout_redirect_uri"))
+	assert.Empty(t, u.Query().Get("client_secret"))
+	assert.Empty(t, u.Query().Get("refresh_token"))
+}
+
+func TestKeycloak_LogoutRejectsForeignEndpoint(t *testing.T) {
+	f := newFakeKeycloak(t)
+	k := newTestKeycloak(t, f)
+	_, err := k.AuthCodeURL(t.Context(), "s", "n", "v")
+	require.NoError(t, err)
+	k.disc.endSessionURL = "https://other.example/realms/svtlv/protocol/openid-connect/logout"
+
+	require.ErrorContains(t, k.Logout(t.Context(), "refresh-1"), "invalid end session endpoint")
+	_, err = k.LogoutURL(t.Context())
+	require.ErrorContains(t, err, "invalid end session endpoint")
+	assert.Empty(t, f.recorded(testOIDCPath+"/logout"))
 }
 
 func TestKeycloak_Exchange(t *testing.T) {

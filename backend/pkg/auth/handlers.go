@@ -38,6 +38,8 @@ const (
 type keycloakClient interface {
 	revalidator
 	AuthCodeURL(ctx context.Context, state, nonce, verifier string) (string, error)
+	Logout(ctx context.Context, refreshToken string) error
+	LogoutURL(ctx context.Context) (string, error)
 	Exchange(ctx context.Context, code, verifier, nonce string) (Profile, Tokens, error)
 	StartDevice(ctx context.Context) (DeviceStart, error)
 	PollDevice(ctx context.Context, deviceCode, verifier string) (DeviceResult, error)
@@ -87,6 +89,13 @@ type deviceStartJSON struct {
 type devicePendingJSON struct {
 	Status   string `json:"status"` // pending or slow_down
 	Interval int64  `json:"interval"`
+}
+
+// logoutJSON reports a failed server-side SSO logout and optionally gives the browser the
+// Keycloak logout URL to clear its browser cookie too.
+type logoutJSON struct {
+	SSOLoggedOut bool   `json:"sso_logged_out"`
+	LogoutURL    string `json:"logout_url,omitempty"`
 }
 
 // Handlers serves the session, login, device login and logout routes. like the authenticator it
@@ -238,11 +247,11 @@ func (h *Handlers) finishLogin(w http.ResponseWriter, r *http.Request) (string, 
 	}
 	q := r.URL.Query()
 	switch {
+	case subtle.ConstantTimeCompare([]byte(q.Get("state")), []byte(st.State)) != 1:
+		return "", errors.New("state mismatch")
 	case q.Get("error") != "":
 		// the error code is request input, so it is not logged
 		return "", errors.New("keycloak returned an error")
-	case subtle.ConstantTimeCompare([]byte(q.Get("state")), []byte(st.State)) != 1:
-		return "", errors.New("state mismatch")
 	case q.Get("code") == "":
 		return "", errors.New("no code")
 	}
@@ -334,12 +343,36 @@ func (h *Handlers) devicePoll(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// logout clears the session cookie of this device and marks it signed out, so a renewed cookie
-// from a request still in flight cannot sign it back in. it answers 204 also when already signed
-// out; the keycloak session is left alone (design §5.3).
-func (h *Handlers) logout(w http.ResponseWriter, _ *http.Request) {
+// logout clears local cookies. Browser callers also end the shared Keycloak browser session and
+// visit Keycloak to remove its SSO cookie. A TV logout leaves the phone's browser session alone.
+func (h *Handlers) logout(w http.ResponseWriter, r *http.Request) {
 	h.cookies.EndSession(w, h.now())
-	w.WriteHeader(http.StatusNoContent)
+	http.SetCookie(w, h.cookies.newCookie(LoginCookie, LoginPath, "", -1))
+	h.clearDeviceCookie(w)
+	if r.URL.Query().Get("sso") != "1" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	h.logoutBrowser(w, r)
+}
+
+func (h *Handlers) logoutBrowser(w http.ResponseWriter, r *http.Request) {
+	s, sessionErr := h.cookies.OpenSession(r, h.now())
+	loggedOut := false
+	if sessionErr == nil {
+		if err := h.keycloak.Logout(r.Context(), s.RefreshToken); err != nil {
+			h.logger.Printf("[WARN] logout: keycloak SSO logout unavailable: %v", err)
+		} else {
+			loggedOut = true
+		}
+	}
+	url, err := h.keycloak.LogoutURL(r.Context())
+	if err != nil {
+		h.logger.Printf("[WARN] logout: keycloak SSO logout unavailable: %v", err)
+		api.WriteJSON(w, http.StatusOK, logoutJSON{SSOLoggedOut: loggedOut})
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, logoutJSON{SSOLoggedOut: loggedOut, LogoutURL: url})
 }
 
 // setDeviceCookie seals st into lampa_device, expiring at st.ExpiresAt. it reports whether the

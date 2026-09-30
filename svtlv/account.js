@@ -56,8 +56,10 @@
       device_denied: 'Sign-in was denied',
       device_expired: 'The code has expired, start again',
       logout_confirm: 'Log out of Account?',
-      logout_descr: 'CUB and the settings on this device are not affected',
+      logout_descr_browser: 'Also signs out of Svtlv in this browser; a TV approved here may sign out too',
+      logout_descr_tv: 'Signs out on this TV; your phone may still be signed in to Svtlv',
       logout_failed: 'Could not log out, try again',
+      logout_sso_failed: 'Signed out here, but could not sign out of Svtlv in this browser',
       logged_out: 'Signed out of Account'
     },
     ru: {
@@ -90,8 +92,10 @@
       device_denied: 'Вход отклонён',
       device_expired: 'Срок действия кода истёк, начните заново',
       logout_confirm: 'Выйти из Аккаунта?',
-      logout_descr: 'CUB и настройки на этом устройстве не затрагиваются',
+      logout_descr_browser: 'Также выйдет из Svtlv в этом браузере; ТВ, подключённый через него, тоже может выйти',
+      logout_descr_tv: 'Выход на этом ТВ; на телефоне вход в Svtlv может сохраниться',
       logout_failed: 'Не удалось выйти, попробуйте ещё раз',
+      logout_sso_failed: 'Здесь вы вышли, но из Svtlv в этом браузере выйти не удалось',
       logged_out: 'Вы вышли из Аккаунта'
     }
   };
@@ -473,18 +477,19 @@
     loggingOut = true;
 
     whenSessionIdle(function () {
-      post(LOGOUT_URL, logOutDone);
+      post(LOGOUT_URL + (Lampa.Platform.tv() ? '' : '?sso=1'), logOutDone);
     });
   }
 
-  function logOutDone(status) {
+  function logOutDone(status, body) {
     loggingOut = false;
 
-    if (status == 204) {
+    if (status == 204 || status == 200) {
       applySession({
         authenticated: false
       });
-      Lampa.Noty.show(t('logged_out'));
+      if (status == 200 && body && body.logout_url) window.location.href = body.logout_url;
+      else Lampa.Noty.show(t(status == 200 && (!body || !body.sso_logged_out) ? 'logout_sso_failed' : 'logged_out'));
     } else Lampa.Noty.show(t('logout_failed'));
   }
 
@@ -494,7 +499,7 @@
       title: t('logout_confirm'),
       items: [{
         title: t('logout'),
-        subtitle: t('logout_descr'),
+        subtitle: t(Lampa.Platform.tv() ? 'logout_descr_tv' : 'logout_descr_browser'),
         logout: true
       }, {
         title: t('cancel')

@@ -365,23 +365,27 @@ their next request (decided 2026-09-27; §5.3.1).
   dropped, never truncated, names are length-limited, and the refresh token is
   never dropped or truncated: if it still does not fit, the login fails and is
   logged (after a refresh, the existing session is kept);
-- `POST /api/v1/auth/logout` clears the cookie on this device. It ends the
-  Lampa session only; the Keycloak SSO session is left alone, because a phone
-  login shares its browser's SSO session with other Svtlv apps. It also sets a
+- `POST /api/v1/auth/logout` clears the session and in-progress login cookies on
+  this device. On a TV it ends only the local session. A browser uses `?sso=1`
+  to end the associated Keycloak session through the refresh token and then
+  follows Keycloak's end-session URL to clear the browser SSO cookie. This signs
+  out Svtlv apps sharing that browser session, while other browsers keep their
+  sessions. A TV approved from that browser may share the same Keycloak user
+  session and be signed out too. It also sets a
   `lampa_logout` cookie holding the logout time (`Path=/api`, `Max-Age` = the
   absolute timeout, unsealed: it only affects the sender's own sessions), and a
   session created up to that time is refused, so a request of another tab still
   in flight cannot sign the device back in with a renewed cookie; the next login
   deletes it;
-- accepted costs of stateless sessions: a copied cookie stays valid after
-  logout until its Keycloak session ends or the cookie expires; revocation is
+- accepted costs of stateless sessions: a copied TV cookie stays valid after
+  local logout until its Keycloak session ends or the cookie expires; revocation is
   done in Keycloak, and ending one Keycloak session revokes every app session
   tied to it (browser logins on one device can share one SSO session); the
   profile (including the avatar) refreshes on the next login. Revoking every session at once is a code
   change that bumps the purpose label (`lampa-session-v2`) — never a rotation of
   `LAMPA_API_DATA_KEY`, which also seals user data at rest;
-- sessions, `GET /api/v1/session` and logout work with the database down;
-  they keep working with Keycloak down too (§5.3.1);
+- sessions, `GET /api/v1/session` and local logout work with the database down;
+  they keep working with Keycloak down too (§5.3.1). Browser SSO logout needs Keycloak;
 - the `Authenticator` seam (`api.Authenticator`) is implemented in `pkg/auth`:
   it opens the cookie, checks both expiries, revalidates (§5.3.1) and returns
   `sub`. A missing, tampered, expired or revoked cookie is
@@ -889,8 +893,9 @@ of one never touches the other. The add-on reads CUB state only through
 `/api/v1/auth/login?return=<current path>`. On success a `Lampa.Noty`
 "Signed in as <email>" appears and the icon and settings refresh.
 
-**Sign-out.** A `Lampa.Select` confirmation ("You will be signed out on this
-device only…"), then `POST /api/v1/auth/logout` with `X-Lampa-Csrf: 1`.
+**Sign-out.** A `Lampa.Select` confirmation, then `POST /api/v1/auth/logout`
+with `X-Lampa-Csrf: 1`. Browser callers add `?sso=1` and navigate to the
+returned Keycloak logout URL; TV callers clear only their local session.
 
 Strings (en and ru) live inside the add-on (§10.1). The add-on hides
 everything and leaves CUB's icon visible when `location.protocol` is not

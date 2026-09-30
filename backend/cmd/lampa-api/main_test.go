@@ -377,6 +377,7 @@ func newFakeKeycloak(t *testing.T) *fakeKeycloak {
 				"authorization_endpoint":                oidcPath + "/auth",
 				"token_endpoint":                        oidcPath + "/token",
 				"introspection_endpoint":                oidcPath + "/token/introspect",
+				"end_session_endpoint":                  oidcPath + "/logout",
 				"jwks_uri":                              oidcPath + "/certs",
 				"id_token_signing_alg_values_supported": []string{"RS256"},
 			})
@@ -388,6 +389,14 @@ func newFakeKeycloak(t *testing.T) *fakeKeycloak {
 			}
 			assert.Equal(t, testRefresh, r.PostFormValue("token"))
 			writeTestJSON(t, w, map[string]any{"active": f.active.Load()})
+		case testRealm + "/protocol/openid-connect/logout":
+			if user, pass, ok := r.BasicAuth(); !ok || user != "svtlv-lampa" || pass != "s" {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			assert.Equal(t, testRefresh, r.PostFormValue("refresh_token"))
+			f.active.Store(false)
+			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.NotFound(w, r)
 		}
