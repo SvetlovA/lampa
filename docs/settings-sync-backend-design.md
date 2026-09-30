@@ -134,7 +134,7 @@ same style as Ralphex, without copying Ralphex's CLI-specific `go-flags`
 configuration. The files follow Svtlv's `appsettings` layering:
 
 - `appsettings.json` holds the shared defaults and `appsettings.<Environment>.json`
-  overrides only what differs (the database host and port). Both are embedded
+  overrides only what differs (database location, public URL, and Keycloak realm). Both are embedded
   with `//go:embed` and decoded strictly into one struct, so an unknown key is an
   error;
 - the environment comes from `LAMPA_ENVIRONMENT` (`Development`, `Test` or
@@ -142,11 +142,9 @@ configuration. The files follow Svtlv's `appsettings` layering:
   database published on loopback `5434`;
 - secrets are `{ENV_VAR}` placeholders (`{LAMPA_DB_PASSWORD}`,
   `{LAMPA_API_DATA_KEY}`, `{LAMPA_KEYCLOAK_CLIENT_SECRET}`) resolved from the
-  environment; so are the non-secret `{LAMPA_PUBLIC_URL}` and
-  `{LAMPA_KEYCLOAK_ISSUER}`, which keep the Lampa and Keycloak addresses out of
-  the public repository (§14, Plan 2 deviations). Missing values fail startup
-  naming the variable, never the value. No other environment variable overrides
-  a file setting.
+  environment. `Authentication.PublicURL` and `Authentication.Keycloak.Authority`
+  are checked-in settings. Missing secrets fail startup naming the variable,
+  never the value. No other environment variable overrides a file setting.
 
 Ports follow the Svtlv series without colliding with it: the API listens on
 `5800` inside the Compose network and is reached only through the `lampa-web`
@@ -275,7 +273,7 @@ too, since the QR code points at Keycloak's verification page.
 
 Moving Lampa to HTTPS later (`tailscale cert` / `tailscale serve`, or a real
 certificate) needs TLS set up, the new `https://…/api/v1/auth/callback`
-registered in Keycloak, `LAMPA_PUBLIC_URL` (and possibly host, port and bind)
+registered in Keycloak, `Authentication.PublicURL` (and possibly host, port and bind)
 changed, and the address saved on every device updated; the `Secure` flag then
 follows automatically.
 
@@ -1036,15 +1034,14 @@ does not download, upload or replace any user data in this plan.
 Deviations recorded while implementing Plan 2
 (`docs/plans/20260924-keycloak-auth-account-ui.md`):
 
-- `Auth.PublicURL` and `Auth.Issuer` are `{LAMPA_PUBLIC_URL}` /
-  `{LAMPA_KEYCLOAK_ISSUER}` placeholders although they are not secret (§3.1
-  said only secrets are placeholders): the Lampa domain is deliberately kept out
-  of the public repository. They are GitHub repository variables; only
-  `LAMPA_KEYCLOAK_CLIENT_SECRET` is a secret. `PublicURL` is stricter than an
-  origin "without path": it must be exactly the lowercase `scheme://host[:port]`
-  a browser sends as `Origin` (no trailing slash, no default port), so the CSRF
-  check compares strings. With an `http://` public URL the deploy requires
-  `LAMPA_BIND_ADDRESS` to be a Tailscale address equal to its host;
+- The earlier placeholder approach for the non-secret public URL and Keycloak
+  issuer has been replaced with `Authentication.PublicURL` and
+  `Authentication.Keycloak.Authority` in the layered files. `PublicURL` must be
+  the lowercase `scheme://host[:port]` a browser sends as `Origin` (no trailing
+  slash, no default port), so the CSRF check compares strings. With an `http://`
+  public URL the deploy requires `LAMPA_BIND_ADDRESS` to be a Tailscale address;
+  it must equal the URL host when that host is an IP address. The `svtlv`
+  hostname is also accepted;
 - session lifetimes (30 days idle, 180 days absolute, §5.3) are constants in
   `pkg/auth`, not configuration: tests inject a clock, and embedded settings
   cannot change on the server without a redeploy anyway;

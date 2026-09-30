@@ -15,8 +15,8 @@ services:
     build:
       context: ..
       args:
-        domain: ${LAMPA_DOMAIN:?Set LAMPA_DOMAIN to the host used by MSX}
-        prefix: ${LAMPA_PREFIX:-https://}
+        domain: ${LAMPA_DOMAIN:-localhost:8092}
+        prefix: ${LAMPA_PREFIX:-http://}
       dockerfile: Dockerfile
     container_name: svtlvtv_lampa_web
     restart: unless-stopped
@@ -66,15 +66,8 @@ services:
       lampa-db:
         condition: service_healthy
     environment:
-      # selects appsettings.<env>.json; non-secret settings live in those files, not here, except
-      # LAMPA_PUBLIC_URL and LAMPA_KEYCLOAK_ISSUER, which keep the Lampa and Keycloak addresses out
-      # of the public repository
+      # selects appsettings.<env>.json; non-secret API settings live in those files
       LAMPA_ENVIRONMENT: ${LAMPA_ENVIRONMENT:-Test}
-      # the origin browsers load Lampa from, e.g. http://<tailscale-ip>:8092: gives the login
-      # redirect URI, the only accepted Origin and whether cookies are Secure
-      LAMPA_PUBLIC_URL: ${LAMPA_PUBLIC_URL:?Set LAMPA_PUBLIC_URL to the origin browsers load Lampa from}
-      # must equal the iss Keycloak issues, e.g. http://<keycloak-host>/realms/<realm>
-      LAMPA_KEYCLOAK_ISSUER: ${LAMPA_KEYCLOAK_ISSUER:?Set LAMPA_KEYCLOAK_ISSUER to the Keycloak realm issuer URL}
       LAMPA_KEYCLOAK_CLIENT_SECRET: ${LAMPA_KEYCLOAK_CLIENT_SECRET:?Set LAMPA_KEYCLOAK_CLIENT_SECRET to the svtlv-lampa client secret}
       LAMPA_DB_PASSWORD: ${LAMPA_DB_PASSWORD:?Set LAMPA_DB_PASSWORD for the lampa database role}
       # AES-256-GCM key that seals the TorrServer login and password and the Jackett and Prowlarr

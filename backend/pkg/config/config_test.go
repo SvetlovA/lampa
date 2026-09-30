@@ -19,7 +19,7 @@ const (
 	testPassword = "s3cret-pass"
 	testFile     = "appsettings.Test.json"
 	testOrigin   = "http://100.64.0.1:8092"
-	testIssuer   = "http://100.64.0.2:8080/realms/svtlv"
+	testIssuer   = "https://svtlv.fly.dev/realms/svtlv-test"
 	testClient   = "client-s3cret-value"
 )
 
@@ -30,8 +30,9 @@ const baseJSON = `{
   "Database": {"Host": "localhost", "Port": 5434, "Name": "lampa", "User": "lampa",
                "Password": "{LAMPA_DB_PASSWORD}", "SSLMode": "disable"},
   "DataKey": "{LAMPA_API_DATA_KEY}",
-  "Auth": {"PublicURL": "{LAMPA_PUBLIC_URL}", "Issuer": "{LAMPA_KEYCLOAK_ISSUER}", "ClientID": "svtlv-lampa",
-           "ClientSecret": "{LAMPA_KEYCLOAK_CLIENT_SECRET}"}
+  "Authentication": {"PublicURL": "http://100.64.0.1:8092", "Keycloak": {
+    "Authority": "https://svtlv.fly.dev/realms/svtlv-test", "ClientId": "svtlv-lampa",
+    "ClientSecret": "{LAMPA_KEYCLOAK_CLIENT_SECRET}", "RequireHttpsMetadata": false}}
 }`
 
 var (
@@ -45,8 +46,6 @@ func envOf(t *testing.T, overrides map[string]string) func(string) (string, bool
 	env := map[string]string{
 		"LAMPA_DB_PASSWORD":            testPassword,
 		"LAMPA_API_DATA_KEY":           testKeyB64,
-		"LAMPA_PUBLIC_URL":             testOrigin,
-		"LAMPA_KEYCLOAK_ISSUER":        testIssuer,
 		"LAMPA_KEYCLOAK_CLIENT_SECRET": testClient,
 	}
 	maps.Copy(env, overrides)
@@ -106,7 +105,8 @@ func TestLoad_auth(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := Load(fsOf(nil), envOf(t, map[string]string{"LAMPA_PUBLIC_URL": tc.origin, "LAMPA_KEYCLOAK_ISSUER": tc.issuer}))
+			override := fmt.Sprintf(`{"Authentication":{"PublicURL":%q,"Keycloak":{"Authority":%q}}}`, tc.origin, tc.issuer)
+			cfg, err := Load(fsOf(map[string]string{testFile: override}), envOf(t, nil))
 			require.NoError(t, err)
 			assert.Equal(t, tc.origin, cfg.Auth.PublicURL)
 			assert.Equal(t, tc.issuer, cfg.Auth.Issuer)
@@ -115,7 +115,7 @@ func TestLoad_auth(t *testing.T) {
 	}
 
 	t.Run("client id from an environment file", func(t *testing.T) {
-		cfg, err := Load(fsOf(map[string]string{testFile: `{"Auth": {"ClientID": "other-client"}}`}), envOf(t, nil))
+		cfg, err := Load(fsOf(map[string]string{testFile: `{"Authentication": {"Keycloak": {"ClientId": "other-client"}}}`}), envOf(t, nil))
 		require.NoError(t, err)
 		assert.Equal(t, "other-client", cfg.Auth.ClientID)
 		assert.Equal(t, testClient, cfg.Auth.ClientSecret)
@@ -295,64 +295,35 @@ func TestLoad_invalid(t *testing.T) {
 			wantErr: ErrInvalid, wantMsg: "DataKey: must decode to 32 bytes, got 16: invalid value", wantFull: true},
 		{name: "long key", env: map[string]string{"LAMPA_API_DATA_KEY": base64.StdEncoding.EncodeToString(make([]byte, 33))},
 			wantErr: ErrInvalid, wantMsg: "DataKey: must decode to 32 bytes, got 33"},
-		{name: "missing public url variable", env: map[string]string{"LAMPA_PUBLIC_URL": ""}, wantErr: ErrMissing,
-			wantMsg: "Auth.PublicURL: LAMPA_PUBLIC_URL: required value is not set", wantFull: true},
-		{name: "missing issuer variable", env: map[string]string{"LAMPA_KEYCLOAK_ISSUER": ""}, wantErr: ErrMissing,
-			wantMsg: "Auth.Issuer: LAMPA_KEYCLOAK_ISSUER: required value is not set", wantFull: true},
 		{name: "missing client secret variable", env: map[string]string{"LAMPA_KEYCLOAK_CLIENT_SECRET": ""}, wantErr: ErrMissing,
-			wantMsg: "Auth.ClientSecret: LAMPA_KEYCLOAK_CLIENT_SECRET: required value is not set", wantFull: true},
-		{name: "data key reported before auth variables",
-			env:     map[string]string{"LAMPA_API_DATA_KEY": "", "LAMPA_PUBLIC_URL": "", "LAMPA_KEYCLOAK_CLIENT_SECRET": ""},
+			wantMsg: "Authentication.Keycloak.ClientSecret: LAMPA_KEYCLOAK_CLIENT_SECRET: required value is not set", wantFull: true},
+		{name: "data key reported before client secret",
+			env:     map[string]string{"LAMPA_API_DATA_KEY": "", "LAMPA_KEYCLOAK_CLIENT_SECRET": ""},
 			wantErr: ErrMissing, wantMsg: "DataKey: LAMPA_API_DATA_KEY: required value is not set", wantFull: true},
-		{name: "public url reported before issuer and secret",
-			env:     map[string]string{"LAMPA_PUBLIC_URL": "", "LAMPA_KEYCLOAK_ISSUER": "", "LAMPA_KEYCLOAK_CLIENT_SECRET": ""},
-			wantErr: ErrMissing, wantMsg: "Auth.PublicURL: LAMPA_PUBLIC_URL: required value is not set", wantFull: true},
-		{name: "empty public url", files: map[string]string{testFile: `{"Auth": {"PublicURL": ""}}`}, wantErr: ErrMissing,
-			wantMsg: "Auth.PublicURL: required value is not set", wantFull: true},
-		{name: "public url with a path", env: map[string]string{"LAMPA_PUBLIC_URL": "http://100.64.0.1:8092/lampa"},
-			wantErr: ErrInvalid, wantMsg: "Auth.PublicURL: must be a lowercase origin scheme://host[:port] without user, path or query: invalid value",
+		{name: "empty public url", files: map[string]string{testFile: `{"Authentication": {"PublicURL": ""}}`}, wantErr: ErrMissing,
+			wantMsg: "Authentication.PublicURL: required value is not set", wantFull: true},
+		{name: "public url with a path", files: map[string]string{testFile: `{"Authentication": {"PublicURL": "http://100.64.0.1:8092/lampa"}}`},
+			wantErr: ErrInvalid, wantMsg: "Authentication.PublicURL: must be a lowercase origin scheme://host[:port] without user, path or query: invalid value",
 			wantFull: true},
-		{name: "public url with a trailing slash", env: map[string]string{"LAMPA_PUBLIC_URL": "http://100.64.0.9:8092/"},
-			wantErr: ErrInvalid, wantMsg: "Auth.PublicURL: must be a lowercase origin"},
-		{name: "public url with a query", env: map[string]string{"LAMPA_PUBLIC_URL": "http://100.64.0.9:8092?a=b"},
-			wantErr: ErrInvalid, wantMsg: "Auth.PublicURL: must be a lowercase origin"},
-		{name: "public url with a fragment", env: map[string]string{"LAMPA_PUBLIC_URL": "http://100.64.0.9:8092#x"},
-			wantErr: ErrInvalid, wantMsg: "Auth.PublicURL: must be a lowercase origin"},
-		{name: "public url with a user", env: map[string]string{"LAMPA_PUBLIC_URL": "http://me@100.64.0.9:8092"},
-			wantErr: ErrInvalid, wantMsg: "Auth.PublicURL: must be a lowercase origin"},
-		{name: "public url with uppercase host", env: map[string]string{"LAMPA_PUBLIC_URL": "https://Lampa.Example.org"},
-			wantErr: ErrInvalid, wantMsg: "Auth.PublicURL: must be a lowercase origin"},
-		{name: "public url with uppercase scheme", env: map[string]string{"LAMPA_PUBLIC_URL": "HTTPS://lampa.example.org"},
-			wantErr: ErrInvalid, wantMsg: "Auth.PublicURL: must be a lowercase origin"},
-		{name: "public url with another scheme", env: map[string]string{"LAMPA_PUBLIC_URL": "ftp://lampa.example.org"},
-			wantErr: ErrInvalid, wantMsg: "Auth.PublicURL: must be an absolute http or https URL: invalid value", wantFull: true},
-		{name: "relative public url", env: map[string]string{"LAMPA_PUBLIC_URL": "lampa.example.org:8092"},
-			wantErr: ErrInvalid, wantMsg: "Auth.PublicURL: must be an absolute http or https URL"},
-		{name: "public url without host", env: map[string]string{"LAMPA_PUBLIC_URL": "https:///x"},
-			wantErr: ErrInvalid, wantMsg: "Auth.PublicURL: must be an absolute http or https URL"},
-		{name: "unparsable public url", env: map[string]string{"LAMPA_PUBLIC_URL": "http://[::1"},
-			wantErr: ErrInvalid, wantMsg: "Auth.PublicURL: must be an absolute http or https URL"},
-		{name: "public url with the http default port", env: map[string]string{"LAMPA_PUBLIC_URL": "http://lampa.example.org:80"},
-			wantErr: ErrInvalid, wantMsg: "Auth.PublicURL: must omit the default port of its scheme: invalid value", wantFull: true},
-		{name: "public url with the https default port", env: map[string]string{"LAMPA_PUBLIC_URL": "https://lampa.example.org:443"},
-			wantErr: ErrInvalid, wantMsg: "Auth.PublicURL: must omit the default port"},
-		{name: "empty issuer", files: map[string]string{testFile: `{"Auth": {"Issuer": ""}}`}, wantErr: ErrMissing,
-			wantMsg: "Auth.Issuer: required value is not set", wantFull: true},
-		{name: "non-http issuer", env: map[string]string{"LAMPA_KEYCLOAK_ISSUER": "ldap://id.example.org/realms/svtlv"},
-			wantErr: ErrInvalid, wantMsg: "Auth.Issuer: must be an absolute http or https URL: invalid value", wantFull: true},
-		{name: "relative issuer", env: map[string]string{"LAMPA_KEYCLOAK_ISSUER": "/realms/svtlv"},
-			wantErr: ErrInvalid, wantMsg: "Auth.Issuer: must be an absolute http or https URL"},
-		{name: "issuer with a query", env: map[string]string{"LAMPA_KEYCLOAK_ISSUER": "https://id.example.org/realms/svtlv?x=1"},
-			wantErr: ErrInvalid, wantMsg: "Auth.Issuer: must not contain user, query or fragment: invalid value", wantFull: true},
-		{name: "issuer with a fragment", env: map[string]string{"LAMPA_KEYCLOAK_ISSUER": "https://id.example.org/realms/svtlv#x"},
-			wantErr: ErrInvalid, wantMsg: "Auth.Issuer: must not contain user, query or fragment"},
-		{name: "issuer with a user", env: map[string]string{"LAMPA_KEYCLOAK_ISSUER": "https://me:pw@id.example.org/realms/svtlv"},
-			wantErr: ErrInvalid, wantMsg: "Auth.Issuer: must not contain user, query or fragment"},
-		{name: "empty client id", files: map[string]string{testFile: `{"Auth": {"ClientID": ""}}`}, wantErr: ErrMissing,
-			wantMsg: "Auth.ClientID: required value is not set", wantFull: true},
-		{name: "empty client secret", files: map[string]string{testFile: `{"Auth": {"ClientSecret": ""}}`}, wantErr: ErrMissing,
-			wantMsg: "Auth.ClientSecret: required value is not set", wantFull: true},
-		{name: "unknown auth key", files: map[string]string{testFile: `{"Auth": {"RedirectURL": "x"}}`}, wantErr: ErrInvalid,
+		{name: "empty issuer", files: map[string]string{testFile: `{"Authentication": {"Keycloak": {"Authority": ""}}}`}, wantErr: ErrMissing,
+			wantMsg: "Authentication.Keycloak.Authority: required value is not set", wantFull: true},
+		{name: "non-http issuer", files: map[string]string{testFile: `{"Authentication": {"Keycloak": {"Authority": "ldap://id.example.org/realms/svtlv"}}}`},
+			wantErr: ErrInvalid, wantMsg: "Authentication.Keycloak.Authority: must be an absolute http or https URL: invalid value", wantFull: true},
+		{name: "relative issuer", files: map[string]string{testFile: `{"Authentication": {"Keycloak": {"Authority": "/realms/svtlv"}}}`},
+			wantErr: ErrInvalid, wantMsg: "Authentication.Keycloak.Authority: must be an absolute http or https URL"},
+		{name: "issuer with a query", files: map[string]string{testFile: `{"Authentication": {"Keycloak": {"Authority": "https://id.example.org/realms/svtlv?x=1"}}}`},
+			wantErr: ErrInvalid, wantMsg: "Authentication.Keycloak.Authority: must not contain user, query or fragment: invalid value", wantFull: true},
+		{name: "issuer with a fragment", files: map[string]string{testFile: `{"Authentication": {"Keycloak": {"Authority": "https://id.example.org/realms/svtlv#x"}}}`},
+			wantErr: ErrInvalid, wantMsg: "Authentication.Keycloak.Authority: must not contain user, query or fragment"},
+		{name: "issuer with a user", files: map[string]string{testFile: `{"Authentication": {"Keycloak": {"Authority": "https://me:pw@id.example.org/realms/svtlv"}}}`},
+			wantErr: ErrInvalid, wantMsg: "Authentication.Keycloak.Authority: must not contain user, query or fragment"},
+		{name: "http issuer when https metadata is required", files: map[string]string{testFile: `{"Authentication": {"Keycloak": {"Authority": "http://id.example.org/realms/svtlv", "RequireHttpsMetadata": true}}}`},
+			wantErr: ErrInvalid, wantMsg: "Authentication.Keycloak.Authority: HTTPS is required for metadata: invalid value", wantFull: true},
+		{name: "empty client id", files: map[string]string{testFile: `{"Authentication": {"Keycloak": {"ClientId": ""}}}`}, wantErr: ErrMissing,
+			wantMsg: "Authentication.Keycloak.ClientId: required value is not set", wantFull: true},
+		{name: "empty client secret", files: map[string]string{testFile: `{"Authentication": {"Keycloak": {"ClientSecret": ""}}}`}, wantErr: ErrMissing,
+			wantMsg: "Authentication.Keycloak.ClientSecret: required value is not set", wantFull: true},
+		{name: "unknown auth key", files: map[string]string{testFile: `{"Authentication": {"Keycloak": {"RedirectURL": "x"}}}`}, wantErr: ErrInvalid,
 			wantMsg: `unknown field "RedirectURL"`},
 	}
 
@@ -393,13 +364,17 @@ func TestLoad_embeddedDefaults(t *testing.T) {
 	assert.ElementsMatch(t, []string{"appsettings.json", "appsettings.Test.json", "appsettings.Production.json"}, names)
 
 	tests := []struct {
-		env      string
-		wantHost string
-		wantPort uint16
+		env               string
+		wantHost          string
+		wantPort          uint16
+		wantOrigin        string
+		wantIssuer        string
+		wantHTTPSMetadata bool
 	}{
-		{env: Development, wantHost: "localhost", wantPort: 5434},
-		{env: Test, wantHost: "lampa-db", wantPort: 5432},
-		{env: Production, wantHost: "lampa-db", wantPort: 5432},
+		{env: Development, wantHost: "localhost", wantPort: 5434, wantOrigin: "http://localhost:8092", wantIssuer: testIssuer},
+		{env: Test, wantHost: "lampa-db", wantPort: 5432, wantOrigin: "http://localhost:8092", wantIssuer: testIssuer},
+		{env: Production, wantHost: "lampa-db", wantPort: 5432,
+			wantOrigin: "http://svtlv:8092", wantIssuer: "https://svtlv.fly.dev/realms/svtlv", wantHTTPSMetadata: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.env, func(t *testing.T) {
@@ -420,7 +395,8 @@ func TestLoad_embeddedDefaults(t *testing.T) {
 			assert.Equal(t, testPassword, pc.Password)
 			assert.Equal(t, "sslmode=disable", mustURL(t, cfg.DBDSN).RawQuery)
 
-			assert.Equal(t, Auth{PublicURL: testOrigin, Issuer: testIssuer, ClientID: "svtlv-lampa", ClientSecret: testClient},
+			assert.Equal(t, Auth{PublicURL: tc.wantOrigin, Issuer: tc.wantIssuer, ClientID: "svtlv-lampa",
+				ClientSecret: testClient, RequireHTTPSMetadata: tc.wantHTTPSMetadata},
 				cfg.Auth)
 			assert.Contains(t, cfg.String(), "ClientSecret:[redacted]")
 			assert.NotContains(t, cfg.String(), testClient)
@@ -430,7 +406,7 @@ func TestLoad_embeddedDefaults(t *testing.T) {
 	t.Run("without auth variables", func(t *testing.T) {
 		env := envOf(t, map[string]string{EnvEnvironment: Production, "LAMPA_KEYCLOAK_CLIENT_SECRET": ""})
 		_, err := Load(Defaults, env)
-		require.EqualError(t, err, "Auth.ClientSecret: LAMPA_KEYCLOAK_CLIENT_SECRET: required value is not set")
+		require.EqualError(t, err, "Authentication.Keycloak.ClientSecret: LAMPA_KEYCLOAK_CLIENT_SECRET: required value is not set")
 	})
 
 	t.Run("without variables", func(t *testing.T) {
@@ -460,7 +436,7 @@ func TestConfig_String(t *testing.T) {
 			assert.NotContains(t, out, testClient)
 			assert.Contains(t, out, "DBDSN:[redacted] DataKey:[redacted]")
 			assert.Contains(t, out, "Auth:{PublicURL:"+testOrigin+" Issuer:"+testIssuer+
-				" ClientID:svtlv-lampa ClientSecret:[redacted] SecureCookies:false}")
+				" ClientID:svtlv-lampa ClientSecret:[redacted] RequireHTTPSMetadata:false SecureCookies:false}")
 			assert.Contains(t, out, "Environment:Test")
 			assert.Contains(t, out, ":5800")
 		})

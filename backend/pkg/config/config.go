@@ -1,8 +1,7 @@
 // Package config loads lampa-api settings from layered appsettings files and the environment.
 //
 // appsettings.json holds the shared defaults and appsettings.<Environment>.json, when present,
-// overrides some of them. secrets, and the deployment addresses kept out of the repository, are
-// {ENV_VAR} placeholders resolved from the environment.
+// overrides some of them. secrets are {ENV_VAR} placeholders resolved from the environment.
 package config
 
 import (
@@ -78,11 +77,12 @@ type Config struct {
 
 // Auth holds the keycloak sign-in settings. ClientSecret is a secret and never printed.
 type Auth struct {
-	PublicURL     string // origin users reach lampa at, scheme://host[:port] without path
-	Issuer        string // keycloak realm issuer, equal to the iss keycloak issues
-	ClientID      string // confidential keycloak client id
-	ClientSecret  string // keycloak client secret, secret
-	SecureCookies bool   // PublicURL is https, so every cookie is Secure
+	PublicURL            string // origin users reach lampa at, scheme://host[:port] without path
+	Issuer               string // keycloak realm issuer, equal to the iss keycloak issues
+	ClientID             string // confidential keycloak client id
+	ClientSecret         string // keycloak client secret, secret
+	RequireHTTPSMetadata bool   // require HTTPS for the keycloak discovery URL
+	SecureCookies        bool   // PublicURL is https, so every cookie is Secure
 }
 
 // settings mirrors the appsettings files; every layer decodes into the same value.
@@ -102,13 +102,16 @@ type settings struct {
 		Password string `json:"Password"`
 		SSLMode  string `json:"SSLMode"`
 	} `json:"Database"`
-	DataKey string `json:"DataKey"`
-	Auth    struct {
-		PublicURL    string `json:"PublicURL"`
-		Issuer       string `json:"Issuer"`
-		ClientID     string `json:"ClientID"`
-		ClientSecret string `json:"ClientSecret"`
-	} `json:"Auth"`
+	DataKey        string `json:"DataKey"`
+	Authentication struct {
+		PublicURL string `json:"PublicURL"`
+		Keycloak  struct {
+			Authority            string `json:"Authority"`
+			ClientID             string `json:"ClientId"`
+			ClientSecret         string `json:"ClientSecret"`
+			RequireHTTPSMetadata bool   `json:"RequireHttpsMetadata"`
+		} `json:"Keycloak"`
+	} `json:"Authentication"`
 }
 
 // Load reads appsettings.json and the optional appsettings.<Environment>.json from fsys
@@ -124,17 +127,14 @@ func Load(fsys fs.FS, lookup func(string) (string, bool)) (Config, error) {
 		return Config{}, err
 	}
 
-	// fixed order: the password is resolved and reported before the data key, then the auth
-	// settings in file order
+	// fixed order: the password is resolved and reported before the data key and client secret.
 	for _, f := range []struct {
 		path string
 		v    *string
 	}{
 		{"Database.Password", &s.Database.Password},
 		{"DataKey", &s.DataKey},
-		{"Auth.PublicURL", &s.Auth.PublicURL},
-		{"Auth.Issuer", &s.Auth.Issuer},
-		{"Auth.ClientSecret", &s.Auth.ClientSecret},
+		{"Authentication.Keycloak.ClientSecret", &s.Authentication.Keycloak.ClientSecret},
 	} {
 		if *f.v, err = resolve(f.path, *f.v, lookup); err != nil {
 			return Config{}, err
@@ -153,11 +153,12 @@ func Load(fsys fs.FS, lookup func(string) (string, bool)) (Config, error) {
 		DataKey:      key,
 		MaxBodyBytes: s.API.MaxBodyBytes,
 		Auth: Auth{
-			PublicURL:     s.Auth.PublicURL,
-			Issuer:        s.Auth.Issuer,
-			ClientID:      s.Auth.ClientID,
-			ClientSecret:  s.Auth.ClientSecret,
-			SecureCookies: strings.HasPrefix(s.Auth.PublicURL, "https://"),
+			PublicURL:            s.Authentication.PublicURL,
+			Issuer:               s.Authentication.Keycloak.Authority,
+			ClientID:             s.Authentication.Keycloak.ClientID,
+			ClientSecret:         s.Authentication.Keycloak.ClientSecret,
+			RequireHTTPSMetadata: s.Authentication.Keycloak.RequireHTTPSMetadata,
+			SecureCookies:        strings.HasPrefix(s.Authentication.PublicURL, "https://"),
 		},
 	}, nil
 }
@@ -176,8 +177,8 @@ func (c Config) GoString() string {
 
 // String returns a printable form with the client secret redacted.
 func (a Auth) String() string {
-	return fmt.Sprintf("{PublicURL:%s Issuer:%s ClientID:%s ClientSecret:%s SecureCookies:%t}",
-		a.PublicURL, a.Issuer, a.ClientID, redact(a.ClientSecret != ""), a.SecureCookies)
+	return fmt.Sprintf("{PublicURL:%s Issuer:%s ClientID:%s ClientSecret:%s RequireHTTPSMetadata:%t SecureCookies:%t}",
+		a.PublicURL, a.Issuer, a.ClientID, redact(a.ClientSecret != ""), a.RequireHTTPSMetadata, a.SecureCookies)
 }
 
 // GoString keeps %#v redacted as well.
@@ -286,17 +287,20 @@ func (s *settings) validate() ([DataKeySize]byte, error) {
 		return none, fmt.Errorf("DataKey: %w", err)
 	}
 
-	if err = validateOrigin(s.Auth.PublicURL); err != nil {
-		return none, fmt.Errorf("Auth.PublicURL: %w", err)
+	if err = validateOrigin(s.Authentication.PublicURL); err != nil {
+		return none, fmt.Errorf("Authentication.PublicURL: %w", err)
 	}
-	if err = validateIssuer(s.Auth.Issuer); err != nil {
-		return none, fmt.Errorf("Auth.Issuer: %w", err)
+	if err = validateIssuer(s.Authentication.Keycloak.Authority); err != nil {
+		return none, fmt.Errorf("Authentication.Keycloak.Authority: %w", err)
 	}
-	if s.Auth.ClientID == "" {
-		return none, fmt.Errorf("Auth.ClientID: %w", ErrMissing)
+	if s.Authentication.Keycloak.RequireHTTPSMetadata && !strings.HasPrefix(s.Authentication.Keycloak.Authority, "https://") {
+		return none, fmt.Errorf("Authentication.Keycloak.Authority: HTTPS is required for metadata: %w", ErrInvalid)
 	}
-	if s.Auth.ClientSecret == "" {
-		return none, fmt.Errorf("Auth.ClientSecret: %w", ErrMissing)
+	if s.Authentication.Keycloak.ClientID == "" {
+		return none, fmt.Errorf("Authentication.Keycloak.ClientId: %w", ErrMissing)
+	}
+	if s.Authentication.Keycloak.ClientSecret == "" {
+		return none, fmt.Errorf("Authentication.Keycloak.ClientSecret: %w", ErrMissing)
 	}
 	return key, nil
 }

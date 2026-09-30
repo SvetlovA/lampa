@@ -94,13 +94,13 @@ external `svtlv_monitoring_external` network, which must exist:
 
 ```bash
 cd devops
-cp .env.example .env                               # adjust values, replace secrets
+cp .env.example .env                               # replace the placeholder secrets
 docker network create svtlv_monitoring_external    # once
-docker compose up -d --build                       # or: up -d --build lampa-web
+docker compose -p lampa up -d --build              # or: up -d --build lampa-web
 ```
 
-`.env.example` sets `COMPOSE_PROJECT_NAME=lampa`, so a local stack does not share
-Svtlv's `devops` project. The API runs in the `Test` environment by default; see
+Use `-p lampa` so a local stack does not share Svtlv's `devops` project.
+The API runs in the `Test` environment by default; see
 "Configuration" and "Local run" in [`backend/README.md`](backend/README.md),
 including the Development mode (a host `go run` against the published database).
 
@@ -108,16 +108,14 @@ The Compose services use these values:
 
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
-| `LAMPA_DOMAIN` | Yes, to build `lampa-web` | None | MSX host without a protocol |
-| `LAMPA_PREFIX` | No | `https://` | Protocol written to `msx/start.json` |
+| `LAMPA_DOMAIN` | No | `localhost:8092` | MSX host without a protocol; optional Compose override |
+| `LAMPA_PREFIX` | No | `http://` | Protocol written to `msx/start.json`; optional Compose override |
 | `LAMPA_BIND_ADDRESS` | No | `0.0.0.0` | Published host interface for `lampa-web` |
 | `LAMPA_PORT` | No | `8092` | Host port mapped to Apache port 80 |
 | `LAMPA_ENVIRONMENT` | No | `Test` | `lampa-api` environment: `Development`, `Test` or `Production` |
 | `LAMPA_DB_PORT` | No | `5434` | Loopback host port mapped to PostgreSQL 5432 |
 | `LAMPA_DB_PASSWORD` | Yes | None | Password of the `lampa` database role (`openssl rand -hex 32`) |
 | `LAMPA_API_DATA_KEY` | Yes | None | Base64 of 32 bytes that seal stored credentials (`openssl rand -base64 32`) |
-| `LAMPA_PUBLIC_URL` | Yes | None | Exact lowercase origin browsers load Lampa from (`scheme://host[:port]`, no trailing slash) |
-| `LAMPA_KEYCLOAK_ISSUER` | Yes | None | Keycloak realm issuer URL; must equal the `iss` Keycloak issues |
 | `LAMPA_KEYCLOAK_CLIENT_SECRET` | Yes | None | Secret of the `svtlv-lampa` Keycloak client |
 
 `lampa-api` publishes no port: browsers reach it only through the `/api/v1/`
@@ -173,12 +171,15 @@ The workflow has a single input:
 | --- | --- | --- |
 | `environment` | `Production` | `lampa-api` environment written to the server `.env` as `LAMPA_ENVIRONMENT`: `Development`, `Test` or `Production`. Development is for a local `go run` only (a container cannot reach the database), so the workflow rejects it before building or stopping anything |
 
+`Test` currently has a localhost public origin for local Compose. Set a reachable
+Test origin in `appsettings.Test.json` before dispatching a Test server deploy.
+
 The workflow performs the following operations:
 
 1. Validates the branch and all required repository secrets and variables,
-   including the format of `LAMPA_DB_PASSWORD`, `LAMPA_API_DATA_KEY`,
-   `LAMPA_PUBLIC_URL` and `LAMPA_KEYCLOAK_ISSUER`, and for an `http://` public
-   URL that the bind address and port match it (see "GitHub Actions variables").
+   including the format of `LAMPA_DB_PASSWORD` and `LAMPA_API_DATA_KEY`, and
+   reads the selected `Authentication.PublicURL` to check the bind address and
+   port when it uses `http://` (see "GitHub Actions variables").
 2. Builds `ghcr.io/<owner>/lampa-web` and `ghcr.io/<owner>/lampa-api` and publishes
    them to GitHub Container Registry (GHCR) with the branch, `<branch>-<sha>` and
    `latest` tags.
@@ -257,19 +258,18 @@ out the repository and push the images produced by the workflow.
 ### GitHub Actions variables
 
 Configure these under **Repository settings → Secrets and variables → Actions →
-Variables**. They are not secret; they are variables only to keep the Lampa and
-Keycloak addresses out of this public repository.
+Variables**. The public URL and Keycloak Authority are checked into the
+environment-specific appsettings files.
 
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
-| `LAMPA_PUBLIC_URL` | Yes | None | Exact lowercase origin browsers load Lampa from (`scheme://host[:port]`, no trailing slash) |
-| `LAMPA_KEYCLOAK_ISSUER` | Yes | None | Keycloak realm issuer URL; must equal the `iss` Keycloak issues |
 | `LAMPA_PREFIX` | No | `https://` | Protocol written to the MSX descriptor |
 | `LAMPA_BIND_ADDRESS` | No | `0.0.0.0` | Published server interface for `lampa-web` |
 
-An `http://` `LAMPA_PUBLIC_URL` is accepted only over the tailnet: then
-`LAMPA_BIND_ADDRESS` must be set to the Tailscale address that is the URL's host,
-and `LAMPA_PORT` must equal the URL's port.
+An `http://` `Authentication.PublicURL` is accepted only over the tailnet:
+`LAMPA_BIND_ADDRESS` must be a Tailscale address, and `LAMPA_PORT` must equal
+the URL's port. For an IP origin, the bind address must equal the URL host;
+the `svtlv` hostname is also accepted.
 
 ### Run a deployment
 
@@ -293,8 +293,8 @@ With `DEPLOY_DIR=/opt/svtlvtv/lampa-web`, a successful run produces:
 ```
 
 The generated `.env` file is set to mode `600`. It records `LAMPA_ENVIRONMENT`,
-the published ports and bind address, the public URL, the Keycloak issuer and
-client secret, the database password and the data key;
+the published ports and bind address, the Keycloak client secret, the database
+password and the data key;
 SSH, Tailscale, and registry credentials are not written into it or into the
 application images. It sets no `COMPOSE_PROJECT_NAME`, so the project name stays
 the `DEPLOY_DIR` basename and container and volume names are stable across
@@ -307,11 +307,11 @@ On the server:
 ```bash
 DEPLOY_DIR=/opt/svtlvtv/lampa-web
 cd "$DEPLOY_DIR"
-LAMPA_PUBLIC_URL=$(sed -n 's/^LAMPA_PUBLIC_URL=//p' .env)
+PUBLIC_URL=http://svtlv:8092
 docker-compose ps lampa-web
 docker inspect --format '{{.State.Health.Status}}' svtlvtv_lampa_web
 docker-compose logs --tail 100 lampa-web
-curl --fail "$LAMPA_PUBLIC_URL/"
+curl --fail "$PUBLIC_URL/"
 ```
 
 With a Tailscale bind address the web port answers only on that address, not on
@@ -323,7 +323,7 @@ host, so query it from inside the container:
 ```bash
 docker inspect --format '{{.State.Health.Status}}' svtlvtv_lampa_api svtlvtv_lampa_db
 docker exec svtlvtv_lampa_api curl -s http://localhost:8081/health
-curl -s -w ' %{http_code}\n' "$LAMPA_PUBLIC_URL/api/v1/session"
+curl -s -w ' %{http_code}\n' "$PUBLIC_URL/api/v1/session"
 docker-compose logs lampa-api | grep -m1 Environment
 ```
 

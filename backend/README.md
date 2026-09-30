@@ -46,14 +46,17 @@ the files are the single source of non-secret settings.
 | `Database.Password` | `{LAMPA_DB_PASSWORD}` | required, never logged |
 | `Database.SSLMode` | `disable` | a libpq `sslmode` |
 | `DataKey` | `{LAMPA_API_DATA_KEY}` | required, base64 of exactly 32 bytes, never logged |
-| `Auth.PublicURL` | `{LAMPA_PUBLIC_URL}` | the origin browsers load Lampa from, exactly `scheme://host[:port]`: `http`/`https`, lowercase, no path or trailing slash, no default port |
-| `Auth.Issuer` | `{LAMPA_KEYCLOAK_ISSUER}` | the realm issuer, an absolute `http`/`https` URL equal byte for byte to the `iss` Keycloak issues; no user, query or fragment |
-| `Auth.ClientID` | `svtlv-lampa` | required |
-| `Auth.ClientSecret` | `{LAMPA_KEYCLOAK_CLIENT_SECRET}` | required, never logged |
+| `Authentication.PublicURL` | `http://localhost:8092` | the origin browsers load Lampa from; Production uses `http://svtlv:8092` (no trailing slash) |
+| `Authentication.Keycloak.Authority` | `https://svtlv.fly.dev/realms/svtlv-test` | Test uses the same realm; Production uses `https://svtlv.fly.dev/realms/svtlv` |
+| `Authentication.Keycloak.ClientId` | `svtlv-lampa` | required |
+| `Authentication.Keycloak.ClientSecret` | `{LAMPA_KEYCLOAK_CLIENT_SECRET}` | required, never logged |
+| `Authentication.Keycloak.RequireHttpsMetadata` | `false` | Production sets `true`, requiring an HTTPS Authority |
 
-`Auth.PublicURL` gives the login redirect URI (`<PublicURL>/api/v1/auth/callback`), the only
+`Authentication.PublicURL` gives the login redirect URI (`<PublicURL>/api/v1/auth/callback`), the only
 `Origin` accepted on state-changing requests, and whether cookies are `Secure` (only for
 `https`). It must equal the address saved on devices, or every POST fails the Origin check.
+The current Test origin is for local Compose. A server deploy with `environment=Test` needs
+its own reachable Test origin in `appsettings.Test.json` before the deploy guard will pass.
 
 The environment comes from `LAMPA_ENVIRONMENT`:
 
@@ -64,10 +67,10 @@ The environment comes from `LAMPA_ENVIRONMENT`:
 | `Development` | a local `go run` against the DB published on `localhost:5434`; inside a container it cannot reach the DB |
 
 Secrets are `{ENV_VAR}` placeholders, resolved from the environment in a fixed order
-(`Database.Password`, `DataKey`, `Auth.PublicURL`, `Auth.Issuer`, `Auth.ClientSecret`); only
-those five keys are resolved, so a new placeholder needs its own entry in `config.Load`.
-`LAMPA_PUBLIC_URL` and `LAMPA_KEYCLOAK_ISSUER` are not secret: they are placeholders only to
-keep the Lampa and Keycloak addresses out of this public repository. An unset or empty variable
+(`Database.Password`, `DataKey`, `Authentication.Keycloak.ClientSecret`); only
+those three keys are resolved, so a new placeholder needs its own entry in `config.Load`.
+The public URL and Keycloak Authority are checked-in settings selected by `LAMPA_ENVIRONMENT`.
+An unset or empty secret variable
 fails startup with a message naming the variable and the key path, never the value. The
 startup log prints the environment and redacts the DSN, the data key and the client secret.
 
@@ -135,7 +138,7 @@ reads `devops/.env` (gitignored). Test is the default environment:
 cd devops
 cp .env.example .env                               # then replace the placeholder secrets
 docker network create svtlv_monitoring_external    # once
-docker-compose up -d --build
+docker compose -p lampa up -d --build
 ```
 
 The API is not published: reach it through the web container's proxy, for example
@@ -143,13 +146,12 @@ The API is not published: reach it through the web container's proxy, for exampl
 container-internal: `docker exec svtlvtv_lampa_api curl -s http://localhost:8081/health`.
 
 For Development, start only the DB and run the binary on the host; the base settings already
-point at `localhost:5434` (`LAMPA_DB_PORT`, published on loopback only):
+point at `localhost:5434` (published on loopback only):
 
 ```sh
-cd devops && docker-compose up -d lampa-db
+cd devops && docker compose -p lampa up -d lampa-db
 cd ../backend
 LAMPA_ENVIRONMENT=Development LAMPA_DB_PASSWORD=... LAMPA_API_DATA_KEY=... \
-  LAMPA_PUBLIC_URL=http://localhost:5800 LAMPA_KEYCLOAK_ISSUER=http://localhost:8080/realms/svtlv \
   LAMPA_KEYCLOAK_CLIENT_SECRET=... go run ./cmd/lampa-api
 ```
 
@@ -162,13 +164,10 @@ to `/#svtlv-login=failed`. `/api/v1/session` still answers.
 - Automated tests never need Keycloak: `pkg/auth` and `cmd/lampa-api` run the real flows
   against an `httptest` fake (discovery, JWKS signed with a test RSA key, device-authorization,
   token and introspection endpoints).
-- For a real login, run Keycloak locally (for example `quay.io/keycloak/keycloak start-dev` on
-  `:8080`), create realm `svtlv` and a client set up as in
-  [Keycloak prerequisites](#keycloak-prerequisites) with the redirect URI
-  `<LAMPA_PUBLIC_URL>/api/v1/auth/callback`, and point `LAMPA_KEYCLOAK_ISSUER` /
-  `LAMPA_KEYCLOAK_CLIENT_SECRET` at it. The issuer must be an address the API can reach **and**
-  the one Keycloak puts in `iss`; `localhost` inside a container is the container itself, so
-  under Compose use a host address both sides agree on.
+- For a real login, configure the `svtlv-lampa` client in the selected Keycloak realm with
+  the redirect URI `<Authentication.PublicURL>/api/v1/auth/callback`. The Authority must equal
+  the `iss` Keycloak issues. To use a different realm locally, edit the appsettings file and
+  rebuild the API; environment variables do not override non-secret settings.
 
 ## Authentication
 
@@ -240,7 +239,7 @@ headers are ever sent.
 
 In realm `svtlv`, the confidential client `svtlv-lampa`: Standard flow and OAuth 2.0 Device
 Authorization Grant on, direct access grants off, PKCE `S256` required, redirect URI
-`<LAMPA_PUBLIC_URL>/api/v1/auth/callback`, no web origins, no `offline_access` default scope,
+`<Authentication.PublicURL>/api/v1/auth/callback`, no web origins, no `offline_access` default scope,
 and optionally a `picture` user-attribute mapper for avatars. Revalidation also relies on realm
 settings shared with Svtlv, which revalidates the same way: SSO Session Idle ≥ 31 days, SSO
 Session Max ≥ 180 days, the client's session idle/max unset or no shorter, and **Revoke Refresh
@@ -320,11 +319,10 @@ pushes to `svtlvtv`.
 `.github/workflows/deploy-docker.yaml` (`workflow_dispatch` only, default branch only) has one
 input, `environment` (Development / Test / Production, default Production), written into the
 server `.env` as `LAMPA_ENVIRONMENT`; Development fails the `prepare` job, since it only works
-for a local `go run`. `LAMPA_PUBLIC_URL` and `LAMPA_KEYCLOAK_ISSUER` are repository variables
-and `LAMPA_KEYCLOAK_CLIENT_SECRET` is a secret; all three are required, checked in `prepare`
-(the origin rule above; no whitespace, quotes, `$` or `#` in the issuer and the secret, which
-are written unquoted) and written to the server `.env`. With an `http://` public URL,
-`LAMPA_BIND_ADDRESS` must be a Tailscale address equal to its host (IPv6 in brackets). It builds `ghcr.io/<owner>/lampa-web` and
+for a local `go run`. The public URL and Keycloak Authority come from the selected appsettings
+files. `LAMPA_KEYCLOAK_CLIENT_SECRET` remains a required secret. With an `http://` public URL,
+`LAMPA_BIND_ADDRESS` must be a Tailscale address; it must equal the URL host when that host is
+an IP address. The `svtlv` hostname is also accepted. It builds `ghcr.io/<owner>/lampa-web` and
 `ghcr.io/<owner>/lampa-api` (branch, `<branch>-<sha>` and `latest` tags), swaps the `:dev`
 images for `:latest`, strips the `build:` blocks with `sed`, and deploys over Tailscale + SSH,
 waiting up to 3 minutes for `svtlvtv_lampa_api` to be healthy. It does not run the tests

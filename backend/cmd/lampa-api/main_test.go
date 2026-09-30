@@ -38,11 +38,9 @@ var testKey = base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, config.D
 
 func noEnv(string) (string, bool) { return "", false }
 
-// withAuth returns m plus the three auth variables testSettings refers to.
+// withAuth returns m plus the Keycloak client secret testSettings refers to.
 func withAuth(m map[string]string) map[string]string {
 	out := map[string]string{
-		"LAMPA_PUBLIC_URL":             "http://100.64.0.1:8092",
-		"LAMPA_KEYCLOAK_ISSUER":        "http://100.64.0.2:8080/realms/svtlv",
 		"LAMPA_KEYCLOAK_CLIENT_SECRET": testSecret,
 	}
 	maps.Copy(out, m)
@@ -92,18 +90,23 @@ func testConfig(dsn string) config.Config {
 }
 
 // testSettings returns an appsettings.json with the given database and listeners; the password
-// and data key come from the LAMPA_DB_PASSWORD and LAMPA_API_DATA_KEY placeholders, the auth
-// settings from the variables withAuth adds.
-func testSettings(t *testing.T, host string, port uint16, apiListen, healthListen string) fstest.MapFS {
+// and data key come from the LAMPA_DB_PASSWORD and LAMPA_API_DATA_KEY placeholders; the
+// Keycloak client secret comes from withAuth. An optional origin overrides the default.
+func testSettings(t *testing.T, host string, port uint16, apiListen, healthListen string, origin ...string) fstest.MapFS {
 	t.Helper()
+	publicURL := "http://100.64.0.1:8092"
+	if len(origin) != 0 {
+		publicURL = origin[0]
+	}
 	data, err := json.Marshal(map[string]any{
 		"Api":    map[string]any{"Listen": apiListen, "MaxBodyBytes": 1 << 20},
 		"Health": map[string]any{"Listen": healthListen},
 		"Database": map[string]any{"Host": host, "Port": port, "Name": "lampa", "User": "lampa",
 			"Password": "{LAMPA_DB_PASSWORD}", "SSLMode": "disable"},
 		"DataKey": "{LAMPA_API_DATA_KEY}",
-		"Auth": map[string]any{"PublicURL": "{LAMPA_PUBLIC_URL}", "Issuer": "{LAMPA_KEYCLOAK_ISSUER}",
-			"ClientID": "svtlv-lampa", "ClientSecret": "{LAMPA_KEYCLOAK_CLIENT_SECRET}"},
+		"Authentication": map[string]any{"PublicURL": publicURL, "Keycloak": map[string]any{
+			"Authority": "https://svtlv.fly.dev/realms/svtlv-test", "ClientId": "svtlv-lampa",
+			"ClientSecret": "{LAMPA_KEYCLOAK_CLIENT_SECRET}", "RequireHttpsMetadata": false}},
 	})
 	require.NoError(t, err)
 	return fstest.MapFS{"appsettings.json": {Data: data}}
@@ -197,8 +200,8 @@ func TestRun_invalidConfig(t *testing.T) {
 			env: withAuth(map[string]string{"LAMPA_DB_PASSWORD": testSecret, "LAMPA_API_DATA_KEY": testKey}), wantErr: config.ErrInvalid},
 		{name: "missing auth variable", settings: settings,
 			env: map[string]string{"LAMPA_DB_PASSWORD": testSecret, "LAMPA_API_DATA_KEY": testKey}, wantErr: config.ErrMissing},
-		{name: "bad public url", settings: settings, env: withAuth(map[string]string{"LAMPA_DB_PASSWORD": testSecret,
-			"LAMPA_API_DATA_KEY": testKey, "LAMPA_PUBLIC_URL": "http://100.64.0.1:8092/path"}), wantErr: config.ErrInvalid},
+		{name: "bad public url", settings: testSettings(t, "127.0.0.1", 1, ":9000", ":9001", "http://100.64.0.1:8092/path"),
+			env: withAuth(map[string]string{"LAMPA_DB_PASSWORD": testSecret, "LAMPA_API_DATA_KEY": testKey}), wantErr: config.ErrInvalid},
 		{name: "unknown environment", settings: settings, env: map[string]string{"LAMPA_ENVIRONMENT": "Staging"},
 			wantErr: config.ErrInvalid},
 	}
