@@ -396,8 +396,7 @@ func TestLoad_embeddedDefaults(t *testing.T) {
 			assert.Equal(t, "sslmode=disable", mustURL(t, cfg.DBDSN).RawQuery)
 
 			assert.Equal(t, Auth{PublicURL: tc.wantOrigin, Issuer: tc.wantIssuer, ClientID: "svtlv-lampa",
-				ClientSecret: testClient, RequireHTTPSMetadata: tc.wantHTTPSMetadata},
-				cfg.Auth)
+				ClientSecret: testClient, RequireHTTPSMetadata: tc.wantHTTPSMetadata}, cfg.Auth)
 			assert.Contains(t, cfg.String(), "ClientSecret:[redacted]")
 			assert.NotContains(t, cfg.String(), testClient)
 		})

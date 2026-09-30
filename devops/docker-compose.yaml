@@ -15,13 +15,13 @@ services:
     build:
       context: ..
       args:
-        domain: ${LAMPA_DOMAIN:-localhost:8092}
-        prefix: ${LAMPA_PREFIX:-http://}
+        domain: localhost:8092
+        prefix: http://
       dockerfile: Dockerfile
     container_name: svtlvtv_lampa_web
     restart: unless-stopped
     ports:
-      - "${LAMPA_BIND_ADDRESS:-0.0.0.0}:${LAMPA_PORT:-8092}:80"
+      - "0.0.0.0:8092:80"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
       interval: 10s
@@ -43,7 +43,7 @@ services:
       POSTGRES_PASSWORD: ${LAMPA_DB_PASSWORD:?Set LAMPA_DB_PASSWORD for the lampa database role}
     ports:
       # loopback only: reachable by a Development "go run" on the host, never from outside
-      - "127.0.0.1:${LAMPA_DB_PORT:-5434}:5432"
+      - "127.0.0.1:5434:5432"
     volumes:
       # postgres 18+ images keep PGDATA in a versioned subdirectory of /var/lib/postgresql
       - lampa_db_data:/var/lib/postgresql

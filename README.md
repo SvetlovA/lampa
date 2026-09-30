@@ -104,16 +104,13 @@ The API runs in the `Test` environment by default; see
 "Configuration" and "Local run" in [`backend/README.md`](backend/README.md),
 including the Development mode (a host `go run` against the published database).
 
-The Compose services use these values:
+Local Compose uses `http://localhost:8092` for MSX, publishes the web service on
+`0.0.0.0:8092`, and publishes PostgreSQL on `127.0.0.1:5434`. Its `.env` contains
+only the environment selector and secrets:
 
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
-| `LAMPA_DOMAIN` | No | `localhost:8092` | MSX host without a protocol; optional Compose override |
-| `LAMPA_PREFIX` | No | `http://` | Protocol written to `msx/start.json`; optional Compose override |
-| `LAMPA_BIND_ADDRESS` | No | `0.0.0.0` | Published host interface for `lampa-web` |
-| `LAMPA_PORT` | No | `8092` | Host port mapped to Apache port 80 |
 | `LAMPA_ENVIRONMENT` | No | `Test` | `lampa-api` environment: `Development`, `Test` or `Production` |
-| `LAMPA_DB_PORT` | No | `5434` | Loopback host port mapped to PostgreSQL 5432 |
 | `LAMPA_DB_PASSWORD` | Yes | None | Password of the `lampa` database role (`openssl rand -hex 32`) |
 | `LAMPA_API_DATA_KEY` | Yes | None | Base64 of 32 bytes that seal stored credentials (`openssl rand -base64 32`) |
 | `LAMPA_KEYCLOAK_CLIENT_SECRET` | Yes | None | Secret of the `svtlv-lampa` Keycloak client |
@@ -210,16 +207,14 @@ The target server must have:
 - Docker Engine;
 - the `docker-compose` executable;
 - an SSH user that can create `DEPLOY_DIR` and run Docker commands;
-- Tailscale connectivity from the GitHub Actions runner to `SERVER_HOST`;
-- the configured `LAMPA_PORT` available to bind, or a reverse proxy prepared to
-  use that port;
+- Tailscale connectivity from the GitHub Actions runner to `svtlv`;
+- Tailscale address `100.105.140.19` and port `8092` available for `lampa-web`;
 - loopback port `5434` (`lampa-db`) free;
 - a `svtlv-lampa` client in the Svtlv Keycloak realm, set up as described in
   [`backend/README.md`](backend/README.md#keycloak-prerequisites).
 
-Local Compose and automated deployments default to port `8092` because port
-`8080` is already used by Keycloak on the Svtlv server. The optional
-`LAMPA_PORT` secret overrides that default. The API publishes no port; it is
+Local Compose and automated deployments use port `8092` because port `8080` is
+already used by Keycloak on the Svtlv server. The API publishes no port; it is
 reached through the `/api/v1/` proxy in `lampa-web`.
 
 ### Required GitHub Actions secrets
@@ -230,9 +225,7 @@ Secrets**:
 | Secret | Description |
 | --- | --- |
 | `DEPLOY_DIR` | Absolute deployment path, such as `/opt/svtlvtv/lampa-web` |
-| `LAMPA_DOMAIN` | Public MSX host without a protocol |
 | `TAILSCALE_AUTHKEY` | Auth key for runner tailnet access |
-| `SERVER_HOST` | Server's Tailscale hostname or IP |
 | `SSH_USER` | User that performs the remote deployment |
 | `SSH_PRIVATE_KEY` | Private SSH key authorized for `SSH_USER` on the server |
 | `GHCR_PAT` | GitHub personal access token with `read:packages` permission |
@@ -249,27 +242,10 @@ rotation is not implemented. `LAMPA_DB_PASSWORD` applies only when the
 `GITHUB_TOKEN` is supplied automatically by GitHub Actions and is used to check
 out the repository and push the images produced by the workflow.
 
-### Optional GitHub Actions secret
-
-| Secret | Default | Description |
-| --- | --- | --- |
-| `LAMPA_PORT` | `8092` | Server port mapped to the container's port 80 |
-
-### GitHub Actions variables
-
-Configure these under **Repository settings → Secrets and variables → Actions →
-Variables**. The public URL and Keycloak Authority are checked into the
-environment-specific appsettings files.
-
-| Variable | Required | Default | Description |
-| --- | --- | --- | --- |
-| `LAMPA_PREFIX` | No | `https://` | Protocol written to the MSX descriptor |
-| `LAMPA_BIND_ADDRESS` | No | `0.0.0.0` | Published server interface for `lampa-web` |
-
-An `http://` `Authentication.PublicURL` is accepted only over the tailnet:
-`LAMPA_BIND_ADDRESS` must be a Tailscale address, and `LAMPA_PORT` must equal
-the URL's port. For an IP origin, the bind address must equal the URL host;
-the `svtlv` hostname is also accepted.
+The workflow hardcodes `svtlv:8092` and `http://` in the MSX build, connects to
+`svtlv` over Tailscale, and binds the released web service to
+`100.105.140.19:8092`. The public URL and Keycloak Authority are checked into
+the environment-specific appsettings files.
 
 ### Run a deployment
 
@@ -293,8 +269,7 @@ With `DEPLOY_DIR=/opt/svtlvtv/lampa-web`, a successful run produces:
 ```
 
 The generated `.env` file is set to mode `600`. It records `LAMPA_ENVIRONMENT`,
-the published ports and bind address, the Keycloak client secret, the database
-password and the data key;
+the Keycloak client secret, the database password and the data key;
 SSH, Tailscale, and registry credentials are not written into it or into the
 application images. It sets no `COMPOSE_PROJECT_NAME`, so the project name stays
 the `DEPLOY_DIR` basename and container and volume names are stable across
@@ -342,14 +317,14 @@ The workflow has no rollback inputs. To roll back, revert the offending commit o
 
 - **Missing required repository secret or variable** — add the named secret or
   variable and start the workflow again.
-- **Tailscale ping fails** — confirm the auth key is valid and `SERVER_HOST` is
+- **Tailscale ping fails** — confirm the auth key is valid and `svtlv` is
   reachable from the same tailnet.
 - **SSH authentication fails** — verify `SSH_USER`, the private key, and the matching
   public key in the server user's `authorized_keys` file.
 - **GHCR returns `denied` or `unauthorized`** — verify that `GHCR_PAT` belongs
   to a user with package access and includes `read:packages`.
-- **Port is already allocated** — set `LAMPA_PORT` to an unused port or stop the
-  conflicting service.
+- **Port is already allocated** — stop the conflicting service before deploying
+  on `100.105.140.19:8092`.
 - **Container is unhealthy** — inspect
   `docker-compose logs --tail 100 lampa-web` and confirm that Apache can serve
   `/` inside the container.

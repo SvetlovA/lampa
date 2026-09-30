@@ -251,13 +251,12 @@ first-party cookies apply (the app has no cookie code; WebView defaults accept
 and persist them). Its saved address must equal the configured public URL.
 
 The production deployment is reachable only inside the Tailscale network, at
-`http://<tailscale-ip>:8092` (decided 2026-09-26). WireGuard encrypts that
+`http://svtlv:8092` (bound to `100.105.140.19:8092`). WireGuard encrypts that
 link, but browsers treat it as plain HTTP: a `Secure` cookie is never stored
 there. So every Lampa cookie (session, login and device flow) carries `Secure`
 only when the public URL is `https://`; `HttpOnly` and `SameSite=Lax` always
-apply. This is safe only while the Lampa port is bound to the Tailscale address
-(`LAMPA_BIND_ADDRESS`), never to a public or LAN interface; the deploy
-workflow refuses any other bind for an `http://` public URL.
+apply. The release Compose file binds the Lampa port to the Tailscale address;
+the deploy workflow verifies that mapping before deploying.
 
 Keycloak may likewise be reached over HTTP inside the tailnet. The configured
 issuer must equal, character for character, the `iss` Keycloak puts in its
@@ -1039,9 +1038,8 @@ Deviations recorded while implementing Plan 2
   `Authentication.Keycloak.Authority` in the layered files. `PublicURL` must be
   the lowercase `scheme://host[:port]` a browser sends as `Origin` (no trailing
   slash, no default port), so the CSRF check compares strings. With an `http://`
-  public URL the deploy requires `LAMPA_BIND_ADDRESS` to be a Tailscale address;
-  it must equal the URL host when that host is an IP address. The `svtlv`
-  hostname is also accepted;
+  public URL the deploy requires host `svtlv` and port `8092`, and the release
+  Compose file binds that port to `100.105.140.19`;
 - session lifetimes (30 days idle, 180 days absolute, §5.3) are constants in
   `pkg/auth`, not configuration: tests inject a clock, and embedded settings
   cannot change on the server without a redeploy anyway;

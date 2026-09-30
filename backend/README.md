@@ -320,9 +320,8 @@ pushes to `svtlvtv`.
 input, `environment` (Development / Test / Production, default Production), written into the
 server `.env` as `LAMPA_ENVIRONMENT`; Development fails the `prepare` job, since it only works
 for a local `go run`. The public URL and Keycloak Authority come from the selected appsettings
-files. `LAMPA_KEYCLOAK_CLIENT_SECRET` remains a required secret. With an `http://` public URL,
-`LAMPA_BIND_ADDRESS` must be a Tailscale address; it must equal the URL host when that host is
-an IP address. The `svtlv` hostname is also accepted. It builds `ghcr.io/<owner>/lampa-web` and
+files. `LAMPA_KEYCLOAK_CLIENT_SECRET` remains a required secret. The release web port binds to
+`100.105.140.19:8092` on the `svtlv` Tailscale host. It builds `ghcr.io/<owner>/lampa-web` and
 `ghcr.io/<owner>/lampa-api` (branch, `<branch>-<sha>` and `latest` tags), swaps the `:dev`
 images for `:latest`, strips the `build:` blocks with `sed`, and deploys over Tailscale + SSH,
 waiting up to 3 minutes for `svtlvtv_lampa_api` to be healthy. It does not run the tests
