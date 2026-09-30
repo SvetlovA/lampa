@@ -69,6 +69,11 @@ jobs:
           echo "value=${PREFIX}" >> "$GITHUB_OUTPUT"
           echo "::notice::Image prefix set to: ${PREFIX}"
 
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
       - name: Validate required configuration
         shell: bash
         env:
