@@ -1,0 +1,75 @@
+/*
+ * Svtlv Account add-on styles (Plan 2, design §10.5).
+ * Loaded unconditionally from index.html, so every rule must be scoped to an
+ * element or body class the add-on adds itself: without the add-on active,
+ * nothing here may change how Lampa looks.
+ */
+.svtlv-account .settings-param-text {
+  opacity: 0.7;
+}
+
+/* the add-on's icon takes CUB's header slot; CUB stays reachable from its menu */
+body.svtlv-account--active .head .open--profile {
+  display: none !important;
+}
+
+.head__action.open--account {
+  padding: 0.2em;
+}
+.head__action.open--account img,
+.head__action.open--account svg,
+.svtlv-account__profile .selectbox-item__icon img {
+  -webkit-border-radius: 100%;
+     -moz-border-radius: 100%;
+          border-radius: 100%;
+  width: 2.4em !important;
+  height: 2.4em !important;
+}
+.svtlv-account__initials {
+  width: 2.4em;
+  height: 2.4em;
+  line-height: 2.4em;
+  -webkit-border-radius: 100%;
+     -moz-border-radius: 100%;
+          border-radius: 100%;
+  background-color: rgba(255, 255, 255, 0.2);
+  color: #fff;
+  font-weight: 600;
+  text-align: center;
+  overflow: hidden;
+}
+.head__action.open--account.focus .svtlv-account__initials,
+.head__action.open--account.hover .svtlv-account__initials {
+  background-color: rgba(0, 0, 0, 0.15);
+  color: #000;
+}
+
+/* device sign-in (screen 3A): Lampa's account-modal-split layout plus the code and status */
+.svtlv-account-device__uri {
+  font-size: 1.3em;
+  color: #D8C39A;
+  margin-bottom: 1em;
+  word-break: break-all;
+}
+.svtlv-account-device__code {
+  margin-bottom: 1em;
+}
+.svtlv-account-device__code > span {
+  display: inline-block;
+  font-size: 2.6em;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  padding: 0.2em 0.4em;
+  margin-right: 0.3em;
+  -webkit-border-radius: 0.2em;
+     -moz-border-radius: 0.2em;
+          border-radius: 0.2em;
+  background-color: rgba(255, 255, 255, 0.06);
+}
+.svtlv-account-device__status {
+  font-size: 1.2em;
+}
+.svtlv-account-device__timer {
+  opacity: 0.6;
+  margin-bottom: 2em;
+}
