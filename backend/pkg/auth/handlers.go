@@ -40,7 +40,7 @@ type keycloakClient interface {
 	AuthCodeURL(ctx context.Context, state, nonce, verifier string) (string, error)
 	Exchange(ctx context.Context, code, verifier, nonce string) (Profile, Tokens, error)
 	StartDevice(ctx context.Context) (DeviceStart, error)
-	PollDevice(ctx context.Context, deviceCode string) (DeviceResult, error)
+	PollDevice(ctx context.Context, deviceCode, verifier string) (DeviceResult, error)
 }
 
 // loginState is the sealed content of the lampa_login cookie.
@@ -51,10 +51,11 @@ type loginState struct {
 	Return   string `json:"return"`
 }
 
-// deviceState is the sealed content of the lampa_device cookie. the device code never leaves the
-// server any other way.
+// deviceState is the sealed content of the lampa_device cookie. the device code and PKCE verifier
+// never leave the server any other way.
 type deviceState struct {
 	DeviceCode string `json:"device_code"`
+	Verifier   string `json:"verifier"`
 	Interval   int64  `json:"interval"`   // seconds between polls
 	ExpiresAt  int64  `json:"expires_at"` // unix seconds, kept when the cookie is re-sealed
 }
@@ -267,7 +268,7 @@ func (h *Handlers) deviceStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	expiresIn := int64(ds.ExpiresIn / time.Second)
-	st := deviceState{DeviceCode: ds.DeviceCode, Interval: int64(ds.Interval / time.Second), ExpiresAt: now.Unix() + expiresIn}
+	st := deviceState{DeviceCode: ds.DeviceCode, Verifier: ds.Verifier, Interval: int64(ds.Interval / time.Second), ExpiresAt: now.Unix() + expiresIn}
 	if !h.setDeviceCookie(w, st, now) {
 		api.WriteError(w, http.StatusServiceUnavailable, "keycloak_unavailable", "sign-in is unavailable")
 		return
@@ -294,11 +295,11 @@ func (h *Handlers) devicePoll(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		err = h.cookies.sealer.Open(PurposeDevice, cookie.Value, now, &st)
 	}
-	if err != nil {
+	if err != nil || st.Verifier == "" {
 		api.WriteError(w, http.StatusBadRequest, "no_device_login", "no device login in progress")
 		return
 	}
-	res, err := h.keycloak.PollDevice(r.Context(), st.DeviceCode)
+	res, err := h.keycloak.PollDevice(r.Context(), st.DeviceCode, st.Verifier)
 	if err != nil {
 		h.logger.Printf("[WARN] device login: poll failed: %v", err)
 		api.WriteError(w, http.StatusServiceUnavailable, "keycloak_unavailable", "sign-in is unavailable")

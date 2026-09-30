@@ -382,6 +382,9 @@ func TestKeycloak_StartDevice(t *testing.T) {
 
 	start, err := k.StartDevice(t.Context())
 	require.NoError(t, err)
+	assert.GreaterOrEqual(t, len(start.Verifier), 43, "RFC 7636 verifier length")
+	verifier := start.Verifier
+	start.Verifier = ""
 	assert.Equal(t, DeviceStart{
 		DeviceCode:              "dev-code",
 		UserCode:                "ABCD-EFGH",
@@ -395,6 +398,9 @@ func TestKeycloak_StartDevice(t *testing.T) {
 	require.Len(t, reqs, 1)
 	assert.Equal(t, testClientSecret, reqs[0].Form.Get("client_secret"))
 	assert.Equal(t, "openid profile email", reqs[0].Form.Get("scope"))
+	assert.Equal(t, "S256", reqs[0].Form.Get("code_challenge_method"))
+	assert.Equal(t, oauth2.S256ChallengeFromVerifier(verifier), reqs[0].Form.Get("code_challenge"))
+	assert.Empty(t, reqs[0].Form.Get("code_verifier"), "the verifier is sent only to the token endpoint")
 }
 
 func TestKeycloak_StartDeviceErrors(t *testing.T) {
@@ -437,7 +443,7 @@ func TestKeycloak_PollDevice(t *testing.T) {
 	// a device-flow ID token carries no nonce
 	f.setToken(respond(http.StatusOK, loginResponse(f.idToken(t, nil))))
 
-	res, err := k.PollDevice(t.Context(), "dev-code")
+	res, err := k.PollDevice(t.Context(), "dev-code", "device-pkce-verifier")
 	require.NoError(t, err)
 	assert.Equal(t, DeviceResult{
 		Status:  DeviceAuthorized,
@@ -449,6 +455,7 @@ func TestKeycloak_PollDevice(t *testing.T) {
 	require.Len(t, reqs, 1)
 	assert.Equal(t, deviceGrantType, reqs[0].Form.Get("grant_type"))
 	assert.Equal(t, "dev-code", reqs[0].Form.Get("device_code"))
+	assert.Equal(t, "device-pkce-verifier", reqs[0].Form.Get("code_verifier"))
 }
 
 func TestKeycloak_PollDeviceResults(t *testing.T) {
@@ -466,7 +473,7 @@ func TestKeycloak_PollDeviceResults(t *testing.T) {
 		t.Run(tt.code, func(t *testing.T) {
 			k := newTestKeycloak(t, f)
 			f.setToken(respond(http.StatusBadRequest, map[string]string{"error": tt.code}))
-			res, err := k.PollDevice(t.Context(), "dev-code")
+			res, err := k.PollDevice(t.Context(), "dev-code", "device-pkce-verifier")
 			require.NoError(t, err)
 			assert.Equal(t, DeviceResult{Status: tt.want}, res)
 		})
@@ -500,7 +507,7 @@ func TestKeycloak_PollDeviceErrors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			k := newTestKeycloak(t, f)
 			f.setToken(tt.handler())
-			_, err := k.PollDevice(t.Context(), "dev-code")
+			_, err := k.PollDevice(t.Context(), "dev-code", "device-pkce-verifier")
 			require.Error(t, err)
 		})
 	}
@@ -508,7 +515,7 @@ func TestKeycloak_PollDeviceErrors(t *testing.T) {
 	t.Run("wrong client secret", func(t *testing.T) {
 		k := NewKeycloak(KeycloakConfig{Issuer: f.issuer(), ClientID: testClientID, ClientSecret: "wrong"})
 		f.setToken(respond(http.StatusOK, loginResponse(f.idToken(t, nil))))
-		_, err := k.PollDevice(t.Context(), "dev-code")
+		_, err := k.PollDevice(t.Context(), "dev-code", "device-pkce-verifier")
 		require.ErrorContains(t, err, "status 401")
 	})
 }

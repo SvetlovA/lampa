@@ -33,9 +33,10 @@ type fakeKeycloakClient struct {
 	start    DeviceStart
 	startErr error
 
-	poll      DeviceResult
-	pollErr   error
-	pollCodes []string
+	poll          DeviceResult
+	pollErr       error
+	pollCodes     []string
+	pollVerifiers []string
 }
 
 func newFakeKeycloakClient(active ...string) *fakeKeycloakClient {
@@ -44,6 +45,7 @@ func newFakeKeycloakClient(active ...string) *fakeKeycloakClient {
 		exchangeTokens:  testTokens(),
 		start: DeviceStart{
 			DeviceCode:              "device-code-secret",
+			Verifier:                "device-pkce-verifier",
 			UserCode:                "WDJB-MJHT",
 			VerificationURI:         "https://kc.example/device",
 			VerificationURIComplete: "https://kc.example/device?user_code=WDJB-MJHT",
@@ -76,8 +78,9 @@ func (f *fakeKeycloakClient) StartDevice(context.Context) (DeviceStart, error) {
 	return f.start, nil
 }
 
-func (f *fakeKeycloakClient) PollDevice(_ context.Context, deviceCode string) (DeviceResult, error) {
+func (f *fakeKeycloakClient) PollDevice(_ context.Context, deviceCode, verifier string) (DeviceResult, error) {
 	f.pollCodes = append(f.pollCodes, deviceCode)
+	f.pollVerifiers = append(f.pollVerifiers, verifier)
 	if f.pollErr != nil {
 		return DeviceResult{}, f.pollErr
 	}
@@ -521,6 +524,7 @@ func TestHandlers_DeviceStart(t *testing.T) {
 	assert.JSONEq(t, `{"user_code":"WDJB-MJHT","verification_uri":"https://kc.example/device",
 		"verification_uri_complete":"https://kc.example/device?user_code=WDJB-MJHT","expires_in":600,"interval":5}`, rec.Body.String())
 	assert.NotContains(t, rec.Body.String(), "device-code-secret", "the device code stays on the server")
+	assert.NotContains(t, rec.Body.String(), "device-pkce-verifier", "the PKCE verifier stays on the server")
 
 	dc := cookieNamed(t, rec, DeviceCookie)
 	assert.Equal(t, DevicePath, dc.Path)
@@ -528,7 +532,7 @@ func TestHandlers_DeviceStart(t *testing.T) {
 	assert.True(t, dc.HttpOnly)
 	var st deviceState
 	require.NoError(t, th.c.sealer.Open(PurposeDevice, dc.Value, testNow, &st))
-	assert.Equal(t, deviceState{DeviceCode: "device-code-secret", Interval: 5, ExpiresAt: testNow.Add(600 * time.Second).Unix()}, st)
+	assert.Equal(t, deviceState{DeviceCode: "device-code-secret", Verifier: "device-pkce-verifier", Interval: 5, ExpiresAt: testNow.Add(600 * time.Second).Unix()}, st)
 	assert.ErrorIs(t, th.c.sealer.Open(PurposeDevice, dc.Value, testNow.Add(600*time.Second), &st), ErrCookieExpired)
 }
 
@@ -567,7 +571,7 @@ func TestHandlers_DeviceStartErrors(t *testing.T) {
 func (th *testHandlers) deviceCookie(t *testing.T) *http.Cookie {
 	t.Helper()
 	return th.sealed(t, DeviceCookie, PurposeDevice,
-		deviceState{DeviceCode: "device-code-secret", Interval: 5, ExpiresAt: testNow.Add(600 * time.Second).Unix()},
+		deviceState{DeviceCode: "device-code-secret", Verifier: "device-pkce-verifier", Interval: 5, ExpiresAt: testNow.Add(600 * time.Second).Unix()},
 		testNow.Add(600*time.Second))
 }
 
@@ -580,6 +584,7 @@ func TestHandlers_DevicePollAuthorized(t *testing.T) {
 	rec := th.do(http.MethodPost, DevicePollRoute, th.deviceCookie(t))
 	assertSignedIn(t, rec)
 	assert.Equal(t, []string{"device-code-secret"}, kc.pollCodes)
+	assert.Equal(t, []string{"device-pkce-verifier"}, kc.pollVerifiers)
 	assertCleared(t, cookieNamed(t, rec, DeviceCookie), DevicePath)
 	s, err := th.c.OpenSession(requestWith(cookieNamed(t, rec, SessionCookie)), th.now)
 	require.NoError(t, err)
@@ -612,11 +617,13 @@ func TestHandlers_DevicePollSlowDown(t *testing.T) {
 	require.NoError(t, th.c.sealer.Open(PurposeDevice, dc.Value, th.now, &st))
 	assert.Equal(t, int64(10), st.Interval)
 	assert.Equal(t, "device-code-secret", st.DeviceCode)
+	assert.Equal(t, "device-pkce-verifier", st.Verifier)
 
 	// the next poll answers with the slower interval
 	kc.poll = DeviceResult{Status: DevicePending}
 	rec = th.do(http.MethodPost, DevicePollRoute, dc)
 	assert.JSONEq(t, `{"status":"pending","interval":10}`, rec.Body.String())
+	assert.Equal(t, []string{"device-pkce-verifier", "device-pkce-verifier"}, kc.pollVerifiers)
 }
 
 func TestHandlers_DevicePollSlowDownNearExpiry(t *testing.T) {
@@ -683,6 +690,12 @@ func TestHandlers_DevicePollErrors(t *testing.T) {
 			cookie: func(t *testing.T, th *testHandlers) *http.Cookie {
 				c := th.sealed(t, DeviceCookie, PurposeLogin, deviceState{DeviceCode: "x"}, testNow.Add(time.Hour))
 				return c
+			}},
+		{name: "old device cookie without verifier", status: http.StatusBadRequest, code: "no_device_login",
+			cookie: func(t *testing.T, th *testHandlers) *http.Cookie {
+				return th.sealed(t, DeviceCookie, PurposeDevice,
+					deviceState{DeviceCode: "device-code-secret", Interval: 5, ExpiresAt: testNow.Add(600 * time.Second).Unix()},
+					testNow.Add(600*time.Second))
 			}},
 		{name: "keycloak down", status: http.StatusServiceUnavailable, code: "keycloak_unavailable",
 			cookie: func(t *testing.T, th *testHandlers) *http.Cookie { return th.deviceCookie(t) },

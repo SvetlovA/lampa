@@ -302,15 +302,17 @@ is not used: it is also true for non-touch desktop browsers.
 - **TV (`Platform.tv()` true): OAuth 2.0 Device Authorization Grant (RFC 8628).**
   1. `POST /api/v1/auth/device/start` — the backend calls Keycloak's device
      endpoint and returns `user_code`, `verification_uri`,
-     `verification_uri_complete`, `expires_in` and `interval`. The secret
-     `device_code` never reaches the browser: it is sealed into a short-lived
-     `HttpOnly` cookie scoped to `/api/v1/auth/device`.
+     `verification_uri_complete`, `expires_in` and `interval`. The backend sends
+     an S256 PKCE challenge. The secret `device_code` and PKCE verifier are sealed
+     into a short-lived `HttpOnly` cookie scoped to `/api/v1/auth/device`; neither
+     reaches the browser in plaintext.
   2. The TV shows a QR code of `verification_uri_complete` and the `user_code`
      (layout of CUB's `account-modal-split` window, without its keypad) with a
      pending status and the expiry countdown.
   3. The user scans the code and signs in to Keycloak on a phone.
   4. The TV calls `POST /api/v1/auth/device/poll` every `interval` seconds. The
-     backend exchanges the sealed `device_code` at Keycloak's token endpoint:
+     backend exchanges the sealed `device_code` with its PKCE verifier at Keycloak's
+     token endpoint:
      `authorization_pending` → `202 {"status":"pending"}`; `slow_down` → `202`
      with a larger interval; `expired_token` → `410`; `access_denied` → `403`;
      success → the ID token is verified, the session is created and the response

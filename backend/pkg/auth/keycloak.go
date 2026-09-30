@@ -60,9 +60,10 @@ type DeviceResult struct {
 	Tokens  Tokens
 }
 
-// DeviceStart is a started device login. DeviceCode stays on the server.
+// DeviceStart is a started device login. DeviceCode and Verifier stay on the server.
 type DeviceStart struct {
 	DeviceCode              string
+	Verifier                string
 	UserCode                string
 	VerificationURI         string
 	VerificationURIComplete string
@@ -148,8 +149,9 @@ func (k *Keycloak) Exchange(ctx context.Context, code, verifier, nonce string) (
 	}, nonce)
 }
 
-// StartDevice starts a device login. keycloak authenticates confidential clients at its device
-// endpoint, and oauth2.Config.DeviceAuth sends only client_id, so the secret is added explicitly.
+// StartDevice starts a device login with S256 PKCE. keycloak authenticates confidential clients
+// at its device endpoint, and oauth2.Config.DeviceAuth sends only client_id, so the secret is
+// added explicitly.
 func (k *Keycloak) StartDevice(ctx context.Context) (DeviceStart, error) {
 	ctx, cancel := k.callContext(ctx)
 	defer cancel()
@@ -157,7 +159,10 @@ func (k *Keycloak) StartDevice(ctx context.Context) (DeviceStart, error) {
 	if err != nil {
 		return DeviceStart{}, err
 	}
-	resp, err := d.oauth.DeviceAuth(ctx, oauth2.SetAuthURLParam("client_secret", k.cfg.ClientSecret))
+	verifier := oauth2.GenerateVerifier()
+	resp, err := d.oauth.DeviceAuth(ctx,
+		oauth2.SetAuthURLParam("client_secret", k.cfg.ClientSecret),
+		oauth2.S256ChallengeOption(verifier))
 	if err != nil {
 		return DeviceStart{}, tokenError("start device login", err)
 	}
@@ -174,6 +179,7 @@ func (k *Keycloak) StartDevice(ctx context.Context) (DeviceStart, error) {
 	}
 	return DeviceStart{
 		DeviceCode:              resp.DeviceCode,
+		Verifier:                verifier,
 		UserCode:                resp.UserCode,
 		VerificationURI:         resp.VerificationURI,
 		VerificationURIComplete: resp.VerificationURIComplete,
@@ -185,7 +191,7 @@ func (k *Keycloak) StartDevice(ctx context.Context) (DeviceStart, error) {
 // PollDevice makes one device token request. oauth2.Config.DeviceAccessToken is not used: it
 // sleeps an interval before its first request and blocks until the login ends. the pending,
 // slow-down, expired and denied answers are results, not errors.
-func (k *Keycloak) PollDevice(ctx context.Context, deviceCode string) (DeviceResult, error) {
+func (k *Keycloak) PollDevice(ctx context.Context, deviceCode, verifier string) (DeviceResult, error) {
 	ctx, cancel := k.callContext(ctx)
 	defer cancel()
 	d, err := k.discover(ctx)
@@ -193,8 +199,9 @@ func (k *Keycloak) PollDevice(ctx context.Context, deviceCode string) (DeviceRes
 		return DeviceResult{}, err
 	}
 	status, body, err := k.postForm(ctx, d.oauth.Endpoint.TokenURL, url.Values{
-		"grant_type":  {deviceGrantType},
-		"device_code": {deviceCode},
+		"grant_type":    {deviceGrantType},
+		"device_code":   {deviceCode},
+		"code_verifier": {verifier},
 	})
 	if err != nil {
 		return DeviceResult{}, fmt.Errorf("poll device login: %w", err)

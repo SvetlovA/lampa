@@ -174,9 +174,10 @@ to `/#svtlv-login=failed`. `/api/v1/session` still answers.
 Two login flows end in the same session:
 
 - **TV** (OAuth 2.0 Device Authorization Grant): `device/start` returns a user code and a
-  verification URL to open on a phone. The device code never leaves the server; it is sealed
-  into the `lampa_device` cookie (Path `/api/v1/auth/device`). The TV polls `device/poll` at
-  the returned `interval`, one token request per poll.
+  verification URL to open on a phone. The backend sends an S256 PKCE challenge to Keycloak;
+  the device code and verifier are sealed into the `lampa_device` cookie (Path
+  `/api/v1/auth/device`) and are never exposed in plaintext to the browser. The TV polls
+  `device/poll` at the returned `interval`, one token request with the verifier per poll.
 - **Phone and computer** (Authorization Code + PKCE): `auth/login?return=<path>` seals the
   state, nonce, verifier and return path into `lampa_login` (Path `/api/v1/auth/callback`,
   10 minutes) and redirects to Keycloak. The callback redirects to the return path with
