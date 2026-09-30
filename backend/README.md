@@ -46,17 +46,16 @@ the files are the single source of non-secret settings.
 | `Database.Password` | `{LAMPA_DB_PASSWORD}` | required, never logged |
 | `Database.SSLMode` | `disable` | a libpq `sslmode` |
 | `DataKey` | `{LAMPA_API_DATA_KEY}` | required, base64 of exactly 32 bytes, never logged |
-| `Authentication.PublicURL` | `http://localhost:8092` | the origin browsers load Lampa from; Production uses `http://svtlv:8092` (no trailing slash) |
 | `Authentication.Keycloak.Authority` | `https://svtlv.fly.dev/realms/svtlv-test` | Test uses the same realm; Production uses `https://svtlv.fly.dev/realms/svtlv` |
 | `Authentication.Keycloak.ClientId` | `svtlv-lampa` | required |
 | `Authentication.Keycloak.ClientSecret` | `{LAMPA_KEYCLOAK_CLIENT_SECRET}` | required, never logged |
 | `Authentication.Keycloak.RequireHttpsMetadata` | `false` | Production sets `true`, requiring an HTTPS Authority |
 
-`Authentication.PublicURL` gives the login redirect URI (`<PublicURL>/api/v1/auth/callback`), the only
-`Origin` accepted on state-changing requests, and whether cookies are `Secure` (only for
-`https`). It must equal the address saved on devices, or every POST fails the Origin check.
-The current Test origin is for local Compose. A server deploy with `environment=Test` needs
-its own reachable Test origin in `appsettings.Test.json` before the deploy guard will pass.
+The login and logout return URLs use the host and scheme of each browser request. Apache preserves
+the browser's Host and replaces `X-Lampa-Proto` with its own request scheme before proxying the API.
+The API rejects malformed hosts, compares a supplied `Origin` with that request origin on writes,
+and marks cookies `Secure` for HTTPS. Each host gets its own host-only cookie. Register every
+browser-facing origin separately in Keycloak; do not use a wildcard redirect URI.
 
 The environment comes from `LAMPA_ENVIRONMENT`:
 
@@ -165,8 +164,8 @@ to `/#svtlv-login=failed`. `/api/v1/session` still answers.
   against an `httptest` fake (discovery, JWKS signed with a test RSA key, device-authorization,
   token and introspection endpoints).
 - For a real login, configure the `svtlv-lampa` client in the selected Keycloak realm with
-  the redirect URI `<Authentication.PublicURL>/api/v1/auth/callback` and Valid Post Logout Redirect
-  URI `<Authentication.PublicURL>/`. The Authority must equal
+  `<origin>/api/v1/auth/callback` as a Valid Redirect URI and `<origin>/` as a Valid Post Logout
+  Redirect URI for **each** host and scheme users open. The Authority must equal
   the `iss` Keycloak issues. To use a different realm locally, edit the appsettings file and
   rebuild the API; environment variables do not override non-secret settings.
 
@@ -236,16 +235,16 @@ network errors as "service unavailable" and keeps its state.
 ### CSRF
 
 Every request other than `GET`, `HEAD` and `OPTIONS` needs `X-Lampa-Csrf: 1` and, when it has
-an `Origin`, exactly `Auth.PublicURL`; otherwise it gets `403 csrf_rejected` before any handler
+an `Origin`, exactly the scheme and Host of that request; otherwise it gets `403 csrf_rejected` before any handler
 runs. An absent `Origin` is allowed (old TV WebViews omit it on same-origin requests). No CORS
 headers are ever sent.
 
 ### Keycloak prerequisites
 
 In realm `svtlv`, the confidential client `svtlv-lampa`: Standard flow and OAuth 2.0 Device
-Authorization Grant on, direct access grants off, PKCE `S256` required, redirect URI
-`<Authentication.PublicURL>/api/v1/auth/callback`, Valid Post Logout Redirect URI
-`<Authentication.PublicURL>/`, no web origins, no `offline_access` default scope,
+Authorization Grant on, direct access grants off, PKCE `S256` required, exact redirect URI
+`<origin>/api/v1/auth/callback` and Valid Post Logout Redirect URI `<origin>/` for each browser
+address, no web origins, no `offline_access` default scope,
 and optionally a `picture` user-attribute mapper for avatars. Revalidation also relies on realm
 settings shared with Svtlv, which revalidates the same way: SSO Session Idle ≥ 31 days, SSO
 Session Max ≥ 180 days, the client's session idle/max unset or no shorter, and **Revoke Refresh

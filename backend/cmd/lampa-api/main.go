@@ -131,15 +131,13 @@ func newAPI(cfg config.Config, svc api.UserData, logger *log.Logger) (*api.Serve
 	if err != nil {
 		return nil, fmt.Errorf("create cookie sealer: %w", err)
 	}
-	cookies := auth.NewCookies(sealer, cfg.Auth.SecureCookies)
+	cookies := auth.NewCookies(sealer, false)
 	keycloak := auth.NewKeycloak(auth.KeycloakConfig{
-		Issuer:          cfg.Auth.Issuer,
-		ClientID:        cfg.Auth.ClientID,
-		ClientSecret:    cfg.Auth.ClientSecret,
-		RedirectURL:     cfg.Auth.PublicURL + auth.CallbackRoute,
-		LogoutReturnURL: cfg.Auth.PublicURL + "/",
+		Issuer:       cfg.Auth.Issuer,
+		ClientID:     cfg.Auth.ClientID,
+		ClientSecret: cfg.Auth.ClientSecret,
 	})
-	apiCfg := api.ServerConfig{Addr: cfg.Listen, MaxBodyBytes: cfg.MaxBodyBytes, PublicOrigin: cfg.Auth.PublicURL}
+	apiCfg := api.ServerConfig{Addr: cfg.Listen, MaxBodyBytes: cfg.MaxBodyBytes}
 	srv, err := api.NewServer(apiCfg, svc, auth.NewSessionAuthenticator(cookies, keycloak, logger),
 		auth.NewHandlers(cookies, keycloak, logger), logger)
 	if err != nil {

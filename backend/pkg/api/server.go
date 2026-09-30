@@ -58,7 +58,6 @@ type Logger interface {
 type ServerConfig struct {
 	Addr         string // listen address used by Start, host:port
 	MaxBodyBytes int64  // request body limit, bytes
-	PublicOrigin string // the only Origin accepted on state-changing requests, scheme://host[:port]
 }
 
 // Server serves the user-data API and mounts the auth routes.
@@ -72,8 +71,7 @@ type Server struct {
 }
 
 // NewServer creates a Server. authRoutes serves /api/v1/auth/* and /api/v1/session behind the same
-// middleware chain as user data. every dependency is required, the public origin must be set and
-// the body limit must be positive.
+// middleware chain as user data. every dependency is required and the body limit must be positive.
 func NewServer(cfg ServerConfig, svc UserData, auth Authenticator, authRoutes http.Handler, logger Logger) (*Server, error) {
 	switch {
 	case svc == nil:
@@ -84,8 +82,6 @@ func NewServer(cfg ServerConfig, svc UserData, auth Authenticator, authRoutes ht
 		return nil, errors.New("nil auth routes")
 	case logger == nil:
 		return nil, errors.New("nil logger")
-	case cfg.PublicOrigin == "":
-		return nil, errors.New("empty public origin")
 	case cfg.MaxBodyBytes <= 0:
 		return nil, errors.New("max body bytes must be positive")
 	}
@@ -115,7 +111,8 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 }
 
 // routes registers method patterns plus json fallbacks, since ServeMux answers 404/405 in plain text.
-// middleware order, outermost first: access log, recover, body limit, deadline, csrf, authenticator (per route).
+// middleware order, outermost first: access log, recover, body limit, deadline, origin, csrf,
+// authenticator (per route).
 // csrf runs before routing, so a rejected request never reaches a handler or the authenticator.
 func (s *Server) routes() http.Handler {
 	methodNotAllowed := func(w http.ResponseWriter, _ *http.Request) {
@@ -138,7 +135,7 @@ func (s *Server) routes() http.Handler {
 	// without it ServeMux redirects the bare prefix to authPrefix with a plain-text 307
 	mux.HandleFunc(strings.TrimSuffix(authPrefix, "/"), notFound)
 	mux.HandleFunc("/", notFound)
-	return s.accessLog(s.recoverPanic(s.limitBody(s.withDeadline(s.csrf(mux)))))
+	return s.accessLog(s.recoverPanic(s.limitBody(s.withDeadline(validOrigin(s.csrf(mux))))))
 }
 
 // ServeHandler runs an http.Server with the hardening timeouts serving h on ln until ctx is canceled

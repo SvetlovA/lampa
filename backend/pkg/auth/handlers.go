@@ -37,10 +37,10 @@ const (
 // keycloakClient is the part of Keycloak the handlers use.
 type keycloakClient interface {
 	revalidator
-	AuthCodeURL(ctx context.Context, state, nonce, verifier string) (string, error)
+	AuthCodeURL(ctx context.Context, redirectURL, state, nonce, verifier string) (string, error)
 	Logout(ctx context.Context, refreshToken string) error
-	LogoutURL(ctx context.Context) (string, error)
-	Exchange(ctx context.Context, code, verifier, nonce string) (Profile, Tokens, error)
+	LogoutURL(ctx context.Context, returnURL string) (string, error)
+	Exchange(ctx context.Context, redirectURL, code, verifier, nonce string) (Profile, Tokens, error)
 	StartDevice(ctx context.Context) (DeviceStart, error)
 	PollDevice(ctx context.Context, deviceCode, verifier string) (DeviceResult, error)
 }
@@ -50,6 +50,7 @@ type loginState struct {
 	State    string `json:"state"`
 	Nonce    string `json:"nonce"`
 	Verifier string `json:"verifier"`
+	Origin   string `json:"origin"`
 	Return   string `json:"return"`
 }
 
@@ -160,24 +161,25 @@ func methodNotAllowed(allow string) http.HandlerFunc {
 // idle expiry. an unusable or revoked cookie is cleared and the answer is anonymous.
 func (h *Handlers) session(w http.ResponseWriter, r *http.Request) {
 	now := h.now()
-	s, err := h.cookies.OpenSession(r, now)
+	cookies := h.cookies.ForRequest(r)
+	s, err := cookies.OpenSession(r, now)
 	if err != nil {
 		if _, cerr := r.Cookie(SessionCookie); cerr == nil {
-			h.cookies.ClearSession(w)
+			cookies.ClearSession(w)
 		}
 		api.WriteJSON(w, http.StatusOK, sessionJSON{})
 		return
 	}
 	tokens, refreshed, err := revalidate(r.Context(), h.keycloak, h.logger, s, now)
 	if err != nil {
-		h.cookies.ClearSession(w)
+		cookies.ClearSession(w)
 		api.WriteJSON(w, http.StatusOK, sessionJSON{})
 		return
 	}
 	if refreshed {
 		next := s
 		next.Tokens, next.RefreshedAt = tokens, unixTime(now.Unix())
-		renewed, rerr := h.cookies.RenewSession(w, next, now)
+		renewed, rerr := cookies.RenewSession(w, next, now)
 		if rerr == nil {
 			api.WriteJSON(w, http.StatusOK, signedIn(renewed.Profile))
 			return
@@ -185,7 +187,7 @@ func (h *Handlers) session(w http.ResponseWriter, r *http.Request) {
 		// nothing was written: the old refresh token stays in use
 		h.logger.Printf("[WARN] refreshed session not written, session kept: %v", rerr)
 	}
-	if renewed, rerr := h.cookies.RenewSession(w, s, now); rerr != nil {
+	if renewed, rerr := cookies.RenewSession(w, s, now); rerr != nil {
 		// the old cookie stays valid until its own idle expiry
 		h.logger.Printf("[WARN] session not renewed: %v", rerr)
 	} else {
@@ -194,17 +196,23 @@ func (h *Handlers) session(w http.ResponseWriter, r *http.Request) {
 	api.WriteJSON(w, http.StatusOK, signedIn(s.Profile))
 }
 
-// login starts an authorization code login with PKCE: the state, nonce, verifier and return
-// path are sealed into lampa_login and the browser is sent to keycloak.
+// login starts an authorization code login with PKCE: the state, nonce, verifier, request origin
+// and return path are sealed into lampa_login and the browser is sent to keycloak.
 func (h *Handlers) login(w http.ResponseWriter, r *http.Request) {
 	now := h.now()
+	origin, err := api.RequestOrigin(r)
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "invalid_host", "invalid request host")
+		return
+	}
 	st := loginState{
 		State:    rand.Text(),
 		Nonce:    rand.Text(),
 		Verifier: oauth2.GenerateVerifier(),
+		Origin:   origin,
 		Return:   returnPath(r.URL.Query().Get("return")),
 	}
-	target, err := h.keycloak.AuthCodeURL(r.Context(), st.State, st.Nonce, st.Verifier)
+	target, err := h.keycloak.AuthCodeURL(r.Context(), origin+CallbackRoute, st.State, st.Nonce, st.Verifier)
 	if err != nil {
 		h.logger.Printf("[WARN] login: keycloak unavailable: %v", err)
 		redirect(w, loginFailedLocation)
@@ -216,7 +224,7 @@ func (h *Handlers) login(w http.ResponseWriter, r *http.Request) {
 		redirect(w, loginFailedLocation)
 		return
 	}
-	http.SetCookie(w, h.cookies.newCookie(LoginCookie, LoginPath, value, int(loginTimeout/time.Second)))
+	http.SetCookie(w, h.cookies.ForRequest(r).newCookie(LoginCookie, LoginPath, value, int(loginTimeout/time.Second)))
 	redirect(w, target)
 }
 
@@ -224,7 +232,7 @@ func (h *Handlers) login(w http.ResponseWriter, r *http.Request) {
 // browser to the failure fragment, never to a json page.
 func (h *Handlers) callback(w http.ResponseWriter, r *http.Request) {
 	ret, err := h.finishLogin(w, r)
-	http.SetCookie(w, h.cookies.newCookie(LoginCookie, LoginPath, "", -1))
+	http.SetCookie(w, h.cookies.ForRequest(r).newCookie(LoginCookie, LoginPath, "", -1))
 	if err != nil {
 		h.logger.Printf("[WARN] login callback failed: %v", err)
 		redirect(w, loginFailedLocation)
@@ -246,6 +254,10 @@ func (h *Handlers) finishLogin(w http.ResponseWriter, r *http.Request) (string, 
 		return "", oerr
 	}
 	q := r.URL.Query()
+	origin, err := api.RequestOrigin(r)
+	if err != nil || origin != st.Origin {
+		return "", errors.New("login origin mismatch")
+	}
 	switch {
 	case subtle.ConstantTimeCompare([]byte(q.Get("state")), []byte(st.State)) != 1:
 		return "", errors.New("state mismatch")
@@ -255,14 +267,15 @@ func (h *Handlers) finishLogin(w http.ResponseWriter, r *http.Request) (string, 
 	case q.Get("code") == "":
 		return "", errors.New("no code")
 	}
-	profile, tokens, err := h.keycloak.Exchange(r.Context(), q.Get("code"), st.Verifier, st.Nonce)
+	profile, tokens, err := h.keycloak.Exchange(r.Context(), origin+CallbackRoute, q.Get("code"), st.Verifier, st.Nonce)
 	if err != nil {
 		return "", fmt.Errorf("exchange: %w", err)
 	}
-	if _, err = h.cookies.IssueSession(w, profile, tokens, now); err != nil {
+	cookies := h.cookies.ForRequest(r)
+	if _, err = cookies.IssueSession(w, profile, tokens, now); err != nil {
 		return "", err
 	}
-	h.cookies.ClearLogoutMark(w, r)
+	cookies.ClearLogoutMark(w, r)
 	return returnPath(st.Return), nil
 }
 
@@ -278,7 +291,7 @@ func (h *Handlers) deviceStart(w http.ResponseWriter, r *http.Request) {
 	}
 	expiresIn := int64(ds.ExpiresIn / time.Second)
 	st := deviceState{DeviceCode: ds.DeviceCode, Verifier: ds.Verifier, Interval: int64(ds.Interval / time.Second), ExpiresAt: now.Unix() + expiresIn}
-	if !h.setDeviceCookie(w, st, now) {
+	if !h.setDeviceCookie(w, r, st, now) {
 		api.WriteError(w, http.StatusServiceUnavailable, "keycloak_unavailable", "sign-in is unavailable")
 		return
 	}
@@ -319,23 +332,24 @@ func (h *Handlers) devicePoll(w http.ResponseWriter, r *http.Request) {
 		api.WriteJSON(w, http.StatusAccepted, devicePendingJSON{Status: "pending", Interval: st.Interval})
 	case DeviceSlowDown:
 		st.Interval += int64(slowDownStep / time.Second)
-		h.setDeviceCookie(w, st, now) // on failure the old interval stays in the cookie
+		h.setDeviceCookie(w, r, st, now) // on failure the old interval stays in the cookie
 		api.WriteJSON(w, http.StatusAccepted, devicePendingJSON{Status: "slow_down", Interval: st.Interval})
 	case DeviceExpired:
-		h.clearDeviceCookie(w)
+		h.clearDeviceCookie(w, r)
 		api.WriteError(w, http.StatusGone, "expired", "device login expired")
 	case DeviceDenied:
-		h.clearDeviceCookie(w)
+		h.clearDeviceCookie(w, r)
 		api.WriteError(w, http.StatusForbidden, "access_denied", "device login denied")
 	case DeviceAuthorized:
-		h.clearDeviceCookie(w)
-		s, err := h.cookies.IssueSession(w, res.Profile, res.Tokens, now)
+		h.clearDeviceCookie(w, r)
+		cookies := h.cookies.ForRequest(r)
+		s, err := cookies.IssueSession(w, res.Profile, res.Tokens, now)
 		if err != nil {
 			h.logger.Printf("[WARN] device login: session not written: %v", err)
 			api.WriteError(w, http.StatusInternalServerError, "login_failed", "sign-in failed")
 			return
 		}
-		h.cookies.ClearLogoutMark(w, r)
+		cookies.ClearLogoutMark(w, r)
 		api.WriteJSON(w, http.StatusOK, signedIn(s.Profile))
 	default:
 		h.logger.Printf("[WARN] device login: unknown poll status %d", res.Status)
@@ -346,9 +360,10 @@ func (h *Handlers) devicePoll(w http.ResponseWriter, r *http.Request) {
 // logout clears local cookies. Browser callers also end the shared Keycloak browser session and
 // visit Keycloak to remove its SSO cookie. A TV logout leaves the phone's browser session alone.
 func (h *Handlers) logout(w http.ResponseWriter, r *http.Request) {
-	h.cookies.EndSession(w, h.now())
-	http.SetCookie(w, h.cookies.newCookie(LoginCookie, LoginPath, "", -1))
-	h.clearDeviceCookie(w)
+	cookies := h.cookies.ForRequest(r)
+	cookies.EndSession(w, h.now())
+	http.SetCookie(w, cookies.newCookie(LoginCookie, LoginPath, "", -1))
+	h.clearDeviceCookie(w, r)
 	if r.URL.Query().Get("sso") != "1" {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -366,7 +381,12 @@ func (h *Handlers) logoutBrowser(w http.ResponseWriter, r *http.Request) {
 			loggedOut = true
 		}
 	}
-	url, err := h.keycloak.LogoutURL(r.Context())
+	origin, originErr := api.RequestOrigin(r)
+	if originErr != nil {
+		api.WriteJSON(w, http.StatusOK, logoutJSON{SSOLoggedOut: loggedOut})
+		return
+	}
+	url, err := h.keycloak.LogoutURL(r.Context(), origin+"/")
 	if err != nil {
 		h.logger.Printf("[WARN] logout: keycloak SSO logout unavailable: %v", err)
 		api.WriteJSON(w, http.StatusOK, logoutJSON{SSOLoggedOut: loggedOut})
@@ -377,7 +397,7 @@ func (h *Handlers) logoutBrowser(w http.ResponseWriter, r *http.Request) {
 
 // setDeviceCookie seals st into lampa_device, expiring at st.ExpiresAt. it reports whether the
 // cookie was written.
-func (h *Handlers) setDeviceCookie(w http.ResponseWriter, st deviceState, now time.Time) bool {
+func (h *Handlers) setDeviceCookie(w http.ResponseWriter, r *http.Request, st deviceState, now time.Time) bool {
 	expiresAt := unixTime(st.ExpiresAt)
 	maxAge := int(expiresAt.Sub(now) / time.Second)
 	if maxAge <= 0 {
@@ -388,12 +408,12 @@ func (h *Handlers) setDeviceCookie(w http.ResponseWriter, st deviceState, now ti
 		h.logger.Printf("[WARN] device login: seal state: %v", err)
 		return false
 	}
-	http.SetCookie(w, h.cookies.newCookie(DeviceCookie, DevicePath, value, maxAge))
+	http.SetCookie(w, h.cookies.ForRequest(r).newCookie(DeviceCookie, DevicePath, value, maxAge))
 	return true
 }
 
-func (h *Handlers) clearDeviceCookie(w http.ResponseWriter) {
-	http.SetCookie(w, h.cookies.newCookie(DeviceCookie, DevicePath, "", -1))
+func (h *Handlers) clearDeviceCookie(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, h.cookies.ForRequest(r).newCookie(DeviceCookie, DevicePath, "", -1))
 }
 
 func signedIn(p Profile) sessionJSON {

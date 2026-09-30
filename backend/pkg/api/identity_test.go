@@ -52,7 +52,7 @@ func newTestServer(t *testing.T, svc UserData, auth Authenticator) (*Server, *by
 func newTestServerWithRoutes(t *testing.T, svc UserData, auth Authenticator, authRoutes http.Handler) (*Server, *bytes.Buffer) {
 	t.Helper()
 	var buf bytes.Buffer
-	cfg := ServerConfig{Addr: "127.0.0.1:0", MaxBodyBytes: 1 << 10, PublicOrigin: testOrigin}
+	cfg := ServerConfig{Addr: "127.0.0.1:0", MaxBodyBytes: 1 << 10}
 	srv, err := NewServer(cfg, svc, auth, authRoutes, log.New(&buf, "", 0))
 	require.NoError(t, err)
 	return srv, &buf

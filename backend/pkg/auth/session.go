@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -93,9 +94,17 @@ type Cookies struct {
 }
 
 // NewCookies returns Cookies sealing with sealer; secure sets the Secure attribute on every
-// cookie and comes from config.Auth.SecureCookies.
+// cookie. Production overrides it per request with ForRequest.
 func NewCookies(sealer *CookieSealer, secure bool) *Cookies {
 	return &Cookies{sealer: sealer, secure: secure}
+}
+
+// ForRequest keeps cookies host-only and marks them Secure when this request arrived over HTTPS.
+func (c *Cookies) ForRequest(r *http.Request) *Cookies {
+	requestCookies := *c
+	origin, err := api.RequestOrigin(r)
+	requestCookies.secure = err == nil && strings.HasPrefix(origin, "https://")
+	return &requestCookies
 }
 
 // IssueSession starts a new session for profile and writes its cookie. name and email are
@@ -198,7 +207,7 @@ func logoutMark(r *http.Request) (time.Time, bool) {
 }
 
 // newCookie builds an auth cookie: HttpOnly, SameSite=Lax (the login callback arrives as a
-// cross-site top-level redirect from keycloak) and Secure when the public url is https.
+// cross-site top-level redirect from keycloak) and Secure when the request is HTTPS.
 // maxAge follows http.Cookie: negative deletes the cookie.
 func (c *Cookies) newCookie(name, path, value string, maxAge int) *http.Cookie {
 	return &http.Cookie{ //nolint:gosec // Secure is off only for the http-over-tailnet deployment, design §5.1

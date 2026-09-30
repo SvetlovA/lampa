@@ -7,7 +7,7 @@ import "net/http"
 const CSRFHeader = "X-Lampa-Csrf"
 
 // csrf rejects state-changing requests (any method but GET, HEAD and OPTIONS) that lack CSRFHeader
-// or carry an Origin other than the configured public origin. an absent Origin is allowed, since
+// or carry an Origin other than this request's public origin. an absent Origin is allowed, since
 // old tv webviews omit it on same-origin requests; the header alone still blocks cross-site forms.
 func (s *Server) csrf(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -24,8 +24,8 @@ func (s *Server) csrf(next http.Handler) http.Handler {
 	})
 }
 
-// sameSite reports whether r carries the csrf header and, when it has an Origin, only the public origin.
-// "Origin: null" (sandboxed frames, some redirects) never equals the public origin and is rejected.
+// sameSite reports whether r carries the csrf header and, when it has an Origin, only the request origin.
+// "Origin: null" (sandboxed frames, some redirects) never equals the request origin and is rejected.
 func (s *Server) sameSite(r *http.Request) bool {
 	if r.Header.Get(CSRFHeader) != "1" {
 		return false
@@ -35,7 +35,8 @@ func (s *Server) sameSite(r *http.Request) bool {
 	case 0:
 		return true
 	case 1:
-		return origins[0] == s.cfg.PublicOrigin
+		origin, err := RequestOrigin(r)
+		return err == nil && origins[0] == origin
 	default:
 		return false
 	}

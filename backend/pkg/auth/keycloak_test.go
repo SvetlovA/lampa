@@ -238,11 +238,9 @@ func loginResponse(idToken string) map[string]any {
 func newTestKeycloak(t *testing.T, f *fakeKeycloak) *Keycloak {
 	t.Helper()
 	k := NewKeycloak(KeycloakConfig{
-		Issuer:          f.issuer(),
-		ClientID:        testClientID,
-		ClientSecret:    testClientSecret,
-		RedirectURL:     "http://100.64.0.1:8092/api/v1/auth/callback",
-		LogoutReturnURL: "http://100.64.0.1:8092/",
+		Issuer:       f.issuer(),
+		ClientID:     testClientID,
+		ClientSecret: testClientSecret,
 	})
 	k.now = func() time.Time { return testNow }
 	return k
@@ -254,13 +252,13 @@ func TestKeycloak_lazyDiscovery(t *testing.T) {
 	k := newTestKeycloak(t, f)
 	assert.Zero(t, f.total(), "construction never calls keycloak")
 
-	_, err := k.AuthCodeURL(t.Context(), "state", "nonce", "verifier")
+	_, err := k.AuthCodeURL(t.Context(), "http://100.64.0.1:8092"+CallbackRoute, "state", "nonce", "verifier")
 	require.Error(t, err)
 
 	f.down.Store(false)
-	_, err = k.AuthCodeURL(t.Context(), "state", "nonce", "verifier")
+	_, err = k.AuthCodeURL(t.Context(), "http://100.64.0.1:8092"+CallbackRoute, "state", "nonce", "verifier")
 	require.NoError(t, err)
-	_, err = k.AuthCodeURL(t.Context(), "state", "nonce", "verifier")
+	_, err = k.AuthCodeURL(t.Context(), "http://100.64.0.1:8092"+CallbackRoute, "state", "nonce", "verifier")
 	require.NoError(t, err)
 	assert.Len(t, f.recorded(testRealmPath+"/.well-known/openid-configuration"), 2, "cached after the first success")
 }
@@ -268,7 +266,7 @@ func TestKeycloak_lazyDiscovery(t *testing.T) {
 func TestKeycloak_discoveryIssuerMismatch(t *testing.T) {
 	f := newFakeKeycloak(t)
 	k := NewKeycloak(KeycloakConfig{Issuer: f.issuer() + "/", ClientID: testClientID, ClientSecret: testClientSecret})
-	_, err := k.AuthCodeURL(t.Context(), "state", "nonce", "verifier")
+	_, err := k.AuthCodeURL(t.Context(), "http://100.64.0.1:8092"+CallbackRoute, "state", "nonce", "verifier")
 	require.Error(t, err)
 }
 
@@ -277,7 +275,7 @@ func TestKeycloak_AuthCodeURL(t *testing.T) {
 	k := newTestKeycloak(t, f)
 	verifier := oauth2.GenerateVerifier()
 
-	raw, err := k.AuthCodeURL(t.Context(), "st", "nc", verifier)
+	raw, err := k.AuthCodeURL(t.Context(), "http://100.64.0.1:8092"+CallbackRoute, "st", "nc", verifier)
 	require.NoError(t, err)
 	u, err := url.Parse(raw)
 	require.NoError(t, err)
@@ -294,6 +292,13 @@ func TestKeycloak_AuthCodeURL(t *testing.T) {
 	assert.Equal(t, oauth2.S256ChallengeFromVerifier(verifier), q.Get("code_challenge"))
 	assert.Empty(t, q.Get("client_secret"))
 	assert.Empty(t, q.Get("prompt"))
+
+	other, err := k.AuthCodeURL(t.Context(), "https://lampa.example"+CallbackRoute, "st2", "nc2", verifier)
+	require.NoError(t, err)
+	otherURL, err := url.Parse(other)
+	require.NoError(t, err)
+	assert.Equal(t, "https://lampa.example"+CallbackRoute, otherURL.Query().Get("redirect_uri"))
+	assert.Equal(t, "http://100.64.0.1:8092"+CallbackRoute, q.Get("redirect_uri"), "shared discovery config stays unchanged")
 }
 
 func TestKeycloak_Logout(t *testing.T) {
@@ -305,7 +310,7 @@ func TestKeycloak_Logout(t *testing.T) {
 	assert.Equal(t, "refresh-1", reqs[0].Form.Get("refresh_token"))
 	assert.Empty(t, reqs[0].Form.Get("client_secret"), "client credentials stay in Basic auth")
 
-	raw, err := k.LogoutURL(t.Context())
+	raw, err := k.LogoutURL(t.Context(), "http://100.64.0.1:8092/")
 	require.NoError(t, err)
 	u, err := url.Parse(raw)
 	require.NoError(t, err)
@@ -319,12 +324,12 @@ func TestKeycloak_Logout(t *testing.T) {
 func TestKeycloak_LogoutRejectsForeignEndpoint(t *testing.T) {
 	f := newFakeKeycloak(t)
 	k := newTestKeycloak(t, f)
-	_, err := k.AuthCodeURL(t.Context(), "s", "n", "v")
+	_, err := k.AuthCodeURL(t.Context(), "http://100.64.0.1:8092"+CallbackRoute, "s", "n", "v")
 	require.NoError(t, err)
 	k.disc.endSessionURL = "https://other.example/realms/svtlv/protocol/openid-connect/logout"
 
 	require.ErrorContains(t, k.Logout(t.Context(), "refresh-1"), "invalid end session endpoint")
-	_, err = k.LogoutURL(t.Context())
+	_, err = k.LogoutURL(t.Context(), "http://100.64.0.1:8092/")
 	require.ErrorContains(t, err, "invalid end session endpoint")
 	assert.Empty(t, f.recorded(testOIDCPath+"/logout"))
 }
@@ -334,7 +339,7 @@ func TestKeycloak_Exchange(t *testing.T) {
 	k := newTestKeycloak(t, f)
 	f.setToken(respond(http.StatusOK, loginResponse(f.idToken(t, map[string]any{"nonce": "nc"}))))
 
-	profile, tokens, err := k.Exchange(t.Context(), "the-code", "the-verifier", "nc")
+	profile, tokens, err := k.Exchange(t.Context(), "http://100.64.0.1:8092"+CallbackRoute, "the-code", "the-verifier", "nc")
 	require.NoError(t, err)
 	assert.Equal(t, testProfile, profile)
 	assert.Equal(t, Tokens{RefreshToken: "refresh-1", RefreshExpiresAt: testNow.Add(1800 * time.Second)}, tokens)
@@ -399,7 +404,7 @@ func TestKeycloak_ExchangeErrors(t *testing.T) {
 			k := newTestKeycloak(t, f)
 			status, body := tt.resp()
 			f.setToken(respond(status, body))
-			_, _, err := k.Exchange(t.Context(), "code", "verifier", "nc")
+			_, _, err := k.Exchange(t.Context(), "http://100.64.0.1:8092"+CallbackRoute, "code", "verifier", "nc")
 			require.Error(t, err)
 			assert.NotContains(t, err.Error(), "Code not valid", "response data stays out of errors")
 		})
@@ -665,7 +670,7 @@ func TestKeycloak_IntrospectNoEndpoint(t *testing.T) {
 func TestKeycloak_timeout(t *testing.T) {
 	f := newFakeKeycloak(t)
 	k := newTestKeycloak(t, f)
-	_, err := k.AuthCodeURL(t.Context(), "s", "n", "v") // discover before shortening the timeout
+	_, err := k.AuthCodeURL(t.Context(), "http://100.64.0.1:8092"+CallbackRoute, "s", "n", "v") // discover before shortening the timeout
 	require.NoError(t, err)
 	k.timeout = 100 * time.Millisecond
 	release := make(chan struct{})

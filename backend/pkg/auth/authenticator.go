@@ -43,17 +43,18 @@ func NewSessionAuthenticator(cookies *Cookies, keycloak *Keycloak, logger api.Lo
 // a keycloak failure keeps the session: auth fails open.
 func (a *SessionAuthenticator) Authenticate(w http.ResponseWriter, r *http.Request) (string, error) {
 	now := a.now()
-	s, err := a.cookies.OpenSession(r, now)
+	cookies := a.cookies.ForRequest(r)
+	s, err := cookies.OpenSession(r, now)
 	if err != nil {
 		return "", err
 	}
 	tokens, refreshed, err := revalidate(r.Context(), a.keycloak, a.logger, s, now)
 	if err != nil {
-		a.cookies.ClearSession(w)
+		cookies.ClearSession(w)
 		return "", err
 	}
 	if refreshed {
-		if _, err := a.cookies.ReplaceTokens(w, s, tokens, now); err != nil {
+		if _, err := cookies.ReplaceTokens(w, s, tokens, now); err != nil {
 			// nothing was written: the old cookie and its refresh token stay in use
 			a.logger.Printf("[WARN] refreshed session not written, session kept: %v", err)
 		}

@@ -73,7 +73,7 @@ func newFlowServer(t *testing.T) (*Server, *fakeStore) {
 	svc, err := storage.NewService(store, sealer, limits, logger)
 	require.NoError(t, err)
 	auth := authFunc(func(_ http.ResponseWriter, r *http.Request) (string, error) { return r.Header.Get("X-Test-User"), nil })
-	srv, err := NewServer(ServerConfig{MaxBodyBytes: limits.MaxBodyBytes, PublicOrigin: testOrigin}, svc, auth, notFoundRoutes(), logger)
+	srv, err := NewServer(ServerConfig{MaxBodyBytes: limits.MaxBodyBytes}, svc, auth, notFoundRoutes(), logger)
 	require.NoError(t, err)
 	return srv, store
 }

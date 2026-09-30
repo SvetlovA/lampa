@@ -20,6 +20,8 @@ func TestServer_csrf(t *testing.T) {
 		method   string
 		header   []string // CSRFHeader values, nil for none
 		origins  []string // Origin values, nil for none
+		host     string
+		scheme   string
 		rejected bool
 	}{
 		{name: "get without header", method: http.MethodGet},
@@ -28,6 +30,9 @@ func TestServer_csrf(t *testing.T) {
 		{name: "options without header", method: http.MethodOptions},
 		{name: "post with header and no origin", method: http.MethodPost, header: []string{"1"}},
 		{name: "post with header and same origin", method: http.MethodPost, header: []string{"1"}, origins: []string{testOrigin}},
+		{name: "second host", method: http.MethodPost, header: []string{"1"}, origins: []string{"http://lampa.example:8092"}, host: "lampa.example:8092"},
+		{name: "https host", method: http.MethodPost, header: []string{"1"}, origins: []string{"https://lampa.example"}, host: "lampa.example", scheme: "https"},
+		{name: "https host wrong origin", method: http.MethodPost, header: []string{"1"}, origins: []string{"http://lampa.example"}, host: "lampa.example", scheme: "https", rejected: true},
 		{name: "put with header", method: http.MethodPut, header: []string{"1"}, origins: []string{testOrigin}},
 		{name: "delete with header", method: http.MethodDelete, header: []string{"1"}},
 		{name: "post without header", method: http.MethodPost, origins: []string{testOrigin}, rejected: true},
@@ -57,6 +62,13 @@ func TestServer_csrf(t *testing.T) {
 			}))
 
 			req := httptest.NewRequest(tc.method, "/x", http.NoBody)
+			req.Host = "100.64.0.1:8092"
+			if tc.host != "" {
+				req.Host = tc.host
+			}
+			if tc.scheme != "" {
+				req.Header.Set(proxySchemeHeader, tc.scheme)
+			}
 			for _, v := range tc.header {
 				req.Header.Add(CSRFHeader, v)
 			}

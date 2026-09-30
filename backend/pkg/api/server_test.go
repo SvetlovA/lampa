@@ -19,7 +19,7 @@ import (
 )
 
 func TestNewServer(t *testing.T) {
-	cfg := ServerConfig{Addr: ":8080", MaxBodyBytes: 1, PublicOrigin: testOrigin}
+	cfg := ServerConfig{Addr: ":8080", MaxBodyBytes: 1}
 	logger := log.New(io.Discard, "", 0)
 	routes := notFoundRoutes()
 	tests := []struct {
@@ -36,9 +36,7 @@ func TestNewServer(t *testing.T) {
 		{name: "nil authenticator", cfg: cfg, svc: &mocks.UserDataMock{}, routes: routes, logger: logger, wantErr: "nil authenticator"},
 		{name: "nil auth routes", cfg: cfg, svc: &mocks.UserDataMock{}, auth: DenyAll{}, logger: logger, wantErr: "nil auth routes"},
 		{name: "nil logger", cfg: cfg, svc: &mocks.UserDataMock{}, auth: DenyAll{}, routes: routes, wantErr: "nil logger"},
-		{name: "empty public origin", cfg: ServerConfig{Addr: ":8080", MaxBodyBytes: 1}, svc: &mocks.UserDataMock{}, auth: DenyAll{},
-			routes: routes, logger: logger, wantErr: "empty public origin"},
-		{name: "zero body limit", cfg: ServerConfig{Addr: ":8080", PublicOrigin: testOrigin}, svc: &mocks.UserDataMock{}, auth: DenyAll{},
+		{name: "zero body limit", cfg: ServerConfig{Addr: ":8080"}, svc: &mocks.UserDataMock{}, auth: DenyAll{},
 			routes: routes, logger: logger, wantErr: "max body bytes must be positive"},
 	}
 	for _, tc := range tests {
@@ -244,7 +242,7 @@ func TestServer_Start(t *testing.T) {
 	defer busy.Close()
 
 	t.Run("bind failure", func(t *testing.T) {
-		srv, err := NewServer(ServerConfig{Addr: busy.Addr().String(), MaxBodyBytes: 1, PublicOrigin: testOrigin}, &mocks.UserDataMock{}, DenyAll{}, notFoundRoutes(),
+		srv, err := NewServer(ServerConfig{Addr: busy.Addr().String(), MaxBodyBytes: 1}, &mocks.UserDataMock{}, DenyAll{}, notFoundRoutes(),
 			log.New(io.Discard, "", 0))
 		require.NoError(t, err)
 		err = srv.Start(t.Context())
@@ -258,7 +256,7 @@ func TestServer_Start(t *testing.T) {
 		addr := free.Addr().String()
 		require.NoError(t, free.Close())
 
-		srv, err := NewServer(ServerConfig{Addr: addr, MaxBodyBytes: 1, PublicOrigin: testOrigin}, &mocks.UserDataMock{}, DenyAll{}, notFoundRoutes(),
+		srv, err := NewServer(ServerConfig{Addr: addr, MaxBodyBytes: 1}, &mocks.UserDataMock{}, DenyAll{}, notFoundRoutes(),
 			log.New(io.Discard, "", 0))
 		require.NoError(t, err)
 		ctx, cancel := context.WithCancel(t.Context())

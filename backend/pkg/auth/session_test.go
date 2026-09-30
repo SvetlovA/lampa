@@ -34,6 +34,20 @@ func newTestCookies(t *testing.T, secure bool) *Cookies {
 	return NewCookies(newTestCookieSealer(t, 1), secure)
 }
 
+func TestCookies_ForRequest(t *testing.T) {
+	c := newTestCookies(t, false)
+	httpRequest := httptest.NewRequest(http.MethodGet, "http://lampa.example/api/v1/session", http.NoBody)
+	httpsRequest := httptest.NewRequest(http.MethodGet, "http://lampa.example/api/v1/session", http.NoBody)
+	httpsRequest.Header.Set("X-Lampa-Proto", "https")
+	httpCookie := c.ForRequest(httpRequest).newCookie(SessionCookie, SessionPath, "v", 60)
+	httpsCookie := c.ForRequest(httpsRequest).newCookie(SessionCookie, SessionPath, "v", 60)
+	assert.False(t, httpCookie.Secure)
+	assert.True(t, httpsCookie.Secure)
+	assert.Empty(t, httpCookie.Domain)
+	assert.Empty(t, httpsCookie.Domain)
+	assert.False(t, c.secure, "per-request choice does not mutate shared cookies")
+}
+
 // setCookie returns the single cookie written to rec.
 func setCookie(t *testing.T, rec *httptest.ResponseRecorder) *http.Cookie {
 	t.Helper()

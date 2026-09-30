@@ -77,12 +77,10 @@ type Config struct {
 
 // Auth holds the keycloak sign-in settings. ClientSecret is a secret and never printed.
 type Auth struct {
-	PublicURL            string // origin users reach lampa at, scheme://host[:port] without path
 	Issuer               string // keycloak realm issuer, equal to the iss keycloak issues
 	ClientID             string // confidential keycloak client id
 	ClientSecret         string // keycloak client secret, secret
 	RequireHTTPSMetadata bool   // require HTTPS for the keycloak discovery URL
-	SecureCookies        bool   // PublicURL is https, so every cookie is Secure
 }
 
 // settings mirrors the appsettings files; every layer decodes into the same value.
@@ -104,8 +102,7 @@ type settings struct {
 	} `json:"Database"`
 	DataKey        string `json:"DataKey"`
 	Authentication struct {
-		PublicURL string `json:"PublicURL"`
-		Keycloak  struct {
+		Keycloak struct {
 			Authority            string `json:"Authority"`
 			ClientID             string `json:"ClientId"`
 			ClientSecret         string `json:"ClientSecret"`
@@ -153,12 +150,10 @@ func Load(fsys fs.FS, lookup func(string) (string, bool)) (Config, error) {
 		DataKey:      key,
 		MaxBodyBytes: s.API.MaxBodyBytes,
 		Auth: Auth{
-			PublicURL:            s.Authentication.PublicURL,
 			Issuer:               s.Authentication.Keycloak.Authority,
 			ClientID:             s.Authentication.Keycloak.ClientID,
 			ClientSecret:         s.Authentication.Keycloak.ClientSecret,
 			RequireHTTPSMetadata: s.Authentication.Keycloak.RequireHTTPSMetadata,
-			SecureCookies:        strings.HasPrefix(s.Authentication.PublicURL, "https://"),
 		},
 	}, nil
 }
@@ -177,8 +172,8 @@ func (c Config) GoString() string {
 
 // String returns a printable form with the client secret redacted.
 func (a Auth) String() string {
-	return fmt.Sprintf("{PublicURL:%s Issuer:%s ClientID:%s ClientSecret:%s RequireHTTPSMetadata:%t SecureCookies:%t}",
-		a.PublicURL, a.Issuer, a.ClientID, redact(a.ClientSecret != ""), a.RequireHTTPSMetadata, a.SecureCookies)
+	return fmt.Sprintf("{Issuer:%s ClientID:%s ClientSecret:%s RequireHTTPSMetadata:%t}",
+		a.Issuer, a.ClientID, redact(a.ClientSecret != ""), a.RequireHTTPSMetadata)
 }
 
 // GoString keeps %#v redacted as well.
@@ -287,9 +282,6 @@ func (s *settings) validate() ([DataKeySize]byte, error) {
 		return none, fmt.Errorf("DataKey: %w", err)
 	}
 
-	if err = validateOrigin(s.Authentication.PublicURL); err != nil {
-		return none, fmt.Errorf("Authentication.PublicURL: %w", err)
-	}
 	if err = validateIssuer(s.Authentication.Keycloak.Authority); err != nil {
 		return none, fmt.Errorf("Authentication.Keycloak.Authority: %w", err)
 	}
@@ -327,26 +319,6 @@ func validateAddr(addr string) error {
 	}
 	if _, err := strconv.ParseUint(port, 10, 16); err != nil {
 		return fmt.Errorf("port must be 0-65535: %w", ErrInvalid)
-	}
-	return nil
-}
-
-// validateOrigin accepts a lowercase http or https origin, scheme://host[:port] without the
-// scheme's default port, exactly as a browser sends it in the Origin header. errors never
-// include the value.
-func validateOrigin(v string) error {
-	if v == "" {
-		return ErrMissing
-	}
-	u, err := url.Parse(v)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return fmt.Errorf("must be an absolute http or https URL: %w", ErrInvalid)
-	}
-	if u.User != nil || v != u.Scheme+"://"+strings.ToLower(u.Host) {
-		return fmt.Errorf("must be a lowercase origin scheme://host[:port] without user, path or query: %w", ErrInvalid)
-	}
-	if (u.Scheme == "http" && u.Port() == "80") || (u.Scheme == "https" && u.Port() == "443") {
-		return fmt.Errorf("must omit the default port of its scheme: %w", ErrInvalid)
 	}
 	return nil
 }

@@ -134,7 +134,7 @@ same style as Ralphex, without copying Ralphex's CLI-specific `go-flags`
 configuration. The files follow Svtlv's `appsettings` layering:
 
 - `appsettings.json` holds the shared defaults and `appsettings.<Environment>.json`
-  overrides only what differs (database location, public URL, and Keycloak realm). Both are embedded
+  overrides only what differs (database location and Keycloak realm). Both are embedded
   with `//go:embed` and decoded strictly into one struct, so an unknown key is an
   error;
 - the environment comes from `LAMPA_ENVIRONMENT` (`Development`, `Test` or
@@ -142,8 +142,7 @@ configuration. The files follow Svtlv's `appsettings` layering:
   database published on loopback `5434`;
 - secrets are `{ENV_VAR}` placeholders (`{LAMPA_DB_PASSWORD}`,
   `{LAMPA_API_DATA_KEY}`, `{LAMPA_KEYCLOAK_CLIENT_SECRET}`) resolved from the
-  environment. `Authentication.PublicURL` and `Authentication.Keycloak.Authority`
-  are checked-in settings. Missing secrets fail startup naming the variable,
+  environment. `Authentication.Keycloak.Authority` is a checked-in setting. Missing secrets fail startup naming the variable,
   never the value. No other environment variable overrides a file setting.
 
 Ports follow the Svtlv series without colliding with it: the API listens on
@@ -271,10 +270,10 @@ an HTTP issuer the phone used for the TV device login must be on the tailnet
 too, since the QR code points at Keycloak's verification page.
 
 Moving Lampa to HTTPS later (`tailscale cert` / `tailscale serve`, or a real
-certificate) needs TLS set up, the new `https://…/api/v1/auth/callback`
-registered in Keycloak, `Authentication.PublicURL` (and possibly host, port and bind)
-changed, and the address saved on every device updated; the `Secure` flag then
-follows automatically.
+certificate) needs TLS set up at Apache, the new `https://…/api/v1/auth/callback`
+and `https://…/` post-logout redirect registered in Keycloak, and the address
+saved on every device updated. Apache must pass the browser-facing scheme to the
+API; the `Secure` cookie flag then follows automatically.
 
 Shells whose document runs from `file://` or an app origin and only load
 `app.min.js` remotely (`index.html` `AndroidJS.getLampaURL()` branch, packaged
@@ -456,7 +455,7 @@ Every state-changing route (`POST`, `PUT`, `DELETE` — logout, device start/pol
 user data) requires the header `X-Lampa-Csrf: 1`. Any XHR can set it (including
 jQuery on Safari 5.1-era TV engines); a cross-site form cannot, and a cross-origin
 script would need a CORS preflight the API never grants. In addition a request
-whose `Origin` header is present and differs from the configured public origin is
+whose `Origin` header is present and differs from the request's scheme and Host is
 rejected. A missing `Origin` or `Sec-Fetch-Site` alone never rejects a request,
 because old TV engines send neither. Plugins run same-origin and can set the
 header; CSRF protection cannot isolate them, and SECURITY.md already treats
@@ -466,8 +465,8 @@ plugins as untrusted code.
 
 `svtlv-lampa` in the `svtlv` realm: confidential client, Standard flow on,
 "OAuth 2.0 Device Authorization Grant" on, direct access grants off, valid
-redirect URI `<public URL>/api/v1/auth/callback` (today
-`http://<tailscale-ip>:8092/api/v1/auth/callback`), no web origins
+redirect URI `<origin>/api/v1/auth/callback` and post-logout redirect URI
+`<origin>/` for every browser-facing host (exact Keycloak registrations), no web origins
 (the browser never calls Keycloak with CORS). Optional: a `picture`
 user-attribute mapper (§5.4). The backend is configured with the realm issuer
 URL, the client ID and the client secret (`{LAMPA_KEYCLOAK_CLIENT_SECRET}`).
@@ -1040,13 +1039,12 @@ does not download, upload or replace any user data in this plan.
 Deviations recorded while implementing Plan 2
 (`docs/plans/20260924-keycloak-auth-account-ui.md`):
 
-- The earlier placeholder approach for the non-secret public URL and Keycloak
-  issuer has been replaced with `Authentication.PublicURL` and
-  `Authentication.Keycloak.Authority` in the layered files. `PublicURL` must be
-  the lowercase `scheme://host[:port]` a browser sends as `Origin` (no trailing
-  slash, no default port), so the CSRF check compares strings. With an `http://`
-  public URL the deploy requires host `svtlv` and port `8092`, and the release
-  Compose file binds that port to `100.105.140.19`;
+- The public URL is derived per request from Apache's preserved Host and trusted
+  `X-Lampa-Proto` header. The API uses it for OIDC redirects, CSRF Origin checks
+  and the cookie Secure flag; every browser-facing callback and logout return URL
+  must be registered exactly in Keycloak. The Keycloak issuer remains the
+  checked-in `Authentication.Keycloak.Authority` setting. The release Compose file
+  binds port `8092` to `100.105.140.19`;
 - session lifetimes (30 days idle, 180 days absolute, §5.3) are constants in
   `pkg/auth`, not configuration: tests inject a clock, and embedded settings
   cannot change on the server without a redeploy anyway;

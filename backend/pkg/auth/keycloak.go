@@ -73,11 +73,9 @@ type DeviceStart struct {
 
 // KeycloakConfig is the confidential keycloak client lampa-api signs in with.
 type KeycloakConfig struct {
-	Issuer          string // realm issuer, equal to the iss keycloak issues
-	ClientID        string
-	ClientSecret    string
-	RedirectURL     string // <PublicURL>/api/v1/auth/callback
-	LogoutReturnURL string // <PublicURL>/, registered as a valid post-logout redirect URI
+	Issuer       string // realm issuer, equal to the iss keycloak issues
+	ClientID     string
+	ClientSecret string
 }
 
 // Keycloak is the OIDC client for both login flows and session revalidation. discovery is lazy:
@@ -119,28 +117,30 @@ func NewKeycloak(cfg KeycloakConfig) *Keycloak {
 }
 
 // AuthCodeURL returns the keycloak authorization url for an authorization code login with an
-// S256 PKCE challenge for verifier and the given state and nonce.
-func (k *Keycloak) AuthCodeURL(ctx context.Context, state, nonce, verifier string) (string, error) {
+// S256 PKCE challenge for verifier and this request's callback URL, state and nonce.
+func (k *Keycloak) AuthCodeURL(ctx context.Context, redirectURL, state, nonce, verifier string) (string, error) {
 	ctx, cancel := k.callContext(ctx)
 	defer cancel()
 	d, err := k.discover(ctx)
 	if err != nil {
 		return "", err
 	}
-	return d.oauth.AuthCodeURL(state, oauth2.S256ChallengeOption(verifier), oidc.Nonce(nonce)), nil
+	oauth := *d.oauth
+	oauth.RedirectURL = redirectURL
+	return oauth.AuthCodeURL(state, oauth2.S256ChallengeOption(verifier), oidc.Nonce(nonce)), nil
 }
 
 // LogoutURL sends the browser through keycloak's RP-initiated logout, ending its shared realm
 // SSO session before returning to Lampa. the client_id identifies the client when no ID token is
 // retained in the session cookie.
-func (k *Keycloak) LogoutURL(ctx context.Context) (string, error) {
+func (k *Keycloak) LogoutURL(ctx context.Context, returnURL string) (string, error) {
 	ctx, cancel := k.callContext(ctx)
 	defer cancel()
 	d, err := k.discover(ctx)
 	if err != nil {
 		return "", err
 	}
-	if k.cfg.LogoutReturnURL == "" {
+	if returnURL == "" {
 		return "", errors.New("keycloak logout: no return url")
 	}
 	u, err := k.logoutEndpoint(d)
@@ -149,7 +149,7 @@ func (k *Keycloak) LogoutURL(ctx context.Context) (string, error) {
 	}
 	q := u.Query()
 	q.Set("client_id", k.cfg.ClientID)
-	q.Set("post_logout_redirect_uri", k.cfg.LogoutReturnURL)
+	q.Set("post_logout_redirect_uri", returnURL)
 	u.RawQuery = q.Encode()
 	return u.String(), nil
 }
@@ -198,14 +198,16 @@ func (k *Keycloak) logoutEndpoint(d *discovery) (*url.URL, error) {
 
 // Exchange redeems an authorization code, verifies the ID token and its nonce, and returns the
 // user's profile with the refresh token. the access and ID tokens are discarded.
-func (k *Keycloak) Exchange(ctx context.Context, code, verifier, nonce string) (Profile, Tokens, error) {
+func (k *Keycloak) Exchange(ctx context.Context, redirectURL, code, verifier, nonce string) (Profile, Tokens, error) {
 	ctx, cancel := k.callContext(ctx)
 	defer cancel()
 	d, err := k.discover(ctx)
 	if err != nil {
 		return Profile{}, Tokens{}, err
 	}
-	tok, err := d.oauth.Exchange(ctx, code, oauth2.VerifierOption(verifier))
+	oauth := *d.oauth
+	oauth.RedirectURL = redirectURL
+	tok, err := oauth.Exchange(ctx, code, oauth2.VerifierOption(verifier))
 	if err != nil {
 		return Profile{}, Tokens{}, tokenError("exchange code", err)
 	}
@@ -483,7 +485,6 @@ func (k *Keycloak) discover(ctx context.Context) (*discovery, error) {
 			ClientID:     k.cfg.ClientID,
 			ClientSecret: k.cfg.ClientSecret,
 			Endpoint:     endpoint,
-			RedirectURL:  k.cfg.RedirectURL,
 			// never offline_access: the refresh token must end with the keycloak session
 			Scopes: []string{oidc.ScopeOpenID, "profile", "email"},
 		},

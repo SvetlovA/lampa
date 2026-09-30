@@ -60,8 +60,8 @@ func newFakeKeycloakClient(active ...string) *fakeKeycloakClient {
 	}
 }
 
-func (f *fakeKeycloakClient) AuthCodeURL(_ context.Context, state, nonce, verifier string) (string, error) {
-	f.authCalls = append(f.authCalls, loginState{State: state, Nonce: nonce, Verifier: verifier})
+func (f *fakeKeycloakClient) AuthCodeURL(_ context.Context, redirectURL, state, nonce, verifier string) (string, error) {
+	f.authCalls = append(f.authCalls, loginState{State: state, Nonce: nonce, Verifier: verifier, Origin: redirectURL})
 	if f.authURLErr != nil {
 		return "", f.authURLErr
 	}
@@ -73,16 +73,16 @@ func (f *fakeKeycloakClient) Logout(_ context.Context, refreshToken string) erro
 	return f.logoutErr
 }
 
-func (f *fakeKeycloakClient) LogoutURL(context.Context) (string, error) {
+func (f *fakeKeycloakClient) LogoutURL(_ context.Context, returnURL string) (string, error) {
 	f.logoutURLCalls++
 	if f.logoutErr != nil {
 		return "", f.logoutErr
 	}
-	return f.logoutURL, nil
+	return f.logoutURL + "&post_logout_redirect_uri=" + url.QueryEscape(returnURL), nil
 }
 
-func (f *fakeKeycloakClient) Exchange(_ context.Context, code, verifier, nonce string) (Profile, Tokens, error) {
-	f.exchangeCalls = append(f.exchangeCalls, loginState{State: code, Nonce: nonce, Verifier: verifier})
+func (f *fakeKeycloakClient) Exchange(_ context.Context, redirectURL, code, verifier, nonce string) (Profile, Tokens, error) {
+	f.exchangeCalls = append(f.exchangeCalls, loginState{State: code, Nonce: nonce, Verifier: verifier, Origin: redirectURL})
 	if f.exchangeErr != nil {
 		return Profile{}, Tokens{}, f.exchangeErr
 	}
@@ -124,6 +124,21 @@ func newTestHandlers(t *testing.T, kc *fakeKeycloakClient) *testHandlers {
 // do serves method target with cookies and returns the recorder.
 func (th *testHandlers) do(method, target string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(method, target, http.NoBody)
+	for _, c := range cookies {
+		r.AddCookie(c)
+	}
+	rec := httptest.NewRecorder()
+	th.h.ServeHTTP(rec, r)
+	return rec
+}
+
+func (th *testHandlers) doAt(method, origin, target string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(method, origin+target, http.NoBody)
+	parsed, err := url.Parse(origin)
+	if err != nil {
+		panic(err)
+	}
+	r.Header.Set("X-Lampa-Proto", parsed.Scheme)
 	for _, c := range cookies {
 		r.AddCookie(c)
 	}
@@ -367,7 +382,8 @@ func TestHandlers_Login(t *testing.T) {
 	assert.Equal(t, http.SameSiteLaxMode, lc.SameSite)
 	var st loginState
 	require.NoError(t, th.c.sealer.Open(PurposeLogin, lc.Value, testNow, &st))
-	assert.Equal(t, loginState{State: call.State, Nonce: call.Nonce, Verifier: call.Verifier, Return: "/?card=42&source=tmdb"}, st)
+	assert.Equal(t, loginState{State: call.State, Nonce: call.Nonce, Verifier: call.Verifier, Origin: "http://example.com", Return: "/?card=42&source=tmdb"}, st)
+	assert.Equal(t, "http://example.com"+CallbackRoute, call.Origin)
 	assert.NotEqual(t, st.State, st.Nonce)
 	assert.GreaterOrEqual(t, len(st.Verifier), 43, "RFC 7636 verifier length")
 	require.ErrorIs(t, th.c.sealer.Open(PurposeLogin, lc.Value, testNow.Add(loginTimeout), &st), ErrCookieExpired)
@@ -436,7 +452,7 @@ func TestHandlers_Callback(t *testing.T) {
 	rec := th.do(http.MethodGet, CallbackRoute+"?code=the-code&state="+url.QueryEscape(call.State), lc)
 	require.Equal(t, http.StatusFound, rec.Code)
 	assert.Equal(t, "/?card=42#svtlv-login=ok", rec.Header().Get("Location"))
-	assert.Equal(t, []loginState{{State: "the-code", Nonce: call.Nonce, Verifier: call.Verifier}}, th.kc.exchangeCalls)
+	assert.Equal(t, []loginState{{State: "the-code", Nonce: call.Nonce, Verifier: call.Verifier, Origin: "http://example.com" + CallbackRoute}}, th.kc.exchangeCalls)
 	assertCleared(t, cookieNamed(t, rec, LoginCookie), LoginPath)
 
 	s, err := th.c.OpenSession(requestWith(cookieNamed(t, rec, SessionCookie)), th.now)
@@ -445,6 +461,48 @@ func TestHandlers_Callback(t *testing.T) {
 	assert.Equal(t, testTokens(), s.Tokens)
 	assert.Equal(t, th.now, s.CreatedAt)
 	assert.Empty(t, th.logs.String())
+}
+
+func TestHandlers_CallbackRejectsDifferentHost(t *testing.T) {
+	th := newTestHandlers(t, newFakeKeycloakClient())
+	lc, call := th.startLogin(t, "/")
+	r := httptest.NewRequest(http.MethodGet, CallbackRoute+"?code=the-code&state="+url.QueryEscape(call.State), http.NoBody)
+	r.Host = "other.example"
+	r.AddCookie(lc)
+	rec := httptest.NewRecorder()
+	th.h.ServeHTTP(rec, r)
+	assert.Equal(t, "/#svtlv-login=failed", rec.Header().Get("Location"))
+	assert.Empty(t, th.kc.exchangeCalls)
+	assert.Contains(t, th.logs.String(), "login origin mismatch")
+}
+
+func TestHandlers_LoginAndLogoutOnTwoHosts(t *testing.T) {
+	th := newTestHandlers(t, newFakeKeycloakClient())
+	for _, origin := range []string{"http://svtlv:8092", "https://lampa.example"} {
+		t.Run(origin, func(t *testing.T) {
+			login := th.doAt(http.MethodGet, origin, LoginRoute)
+			require.Equal(t, http.StatusFound, login.Code)
+			state := th.kc.authCalls[len(th.kc.authCalls)-1]
+			assert.Equal(t, origin+CallbackRoute, state.Origin)
+			loginCookie := cookieNamed(t, login, LoginCookie)
+			assert.Equal(t, strings.HasPrefix(origin, "https://"), loginCookie.Secure)
+			assert.Empty(t, loginCookie.Domain)
+
+			callback := th.doAt(http.MethodGet, origin, CallbackRoute+"?code=ok&state="+url.QueryEscape(state.State), loginCookie)
+			assert.Equal(t, "/#svtlv-login=ok", callback.Header().Get("Location"))
+			assert.Equal(t, origin+CallbackRoute, th.kc.exchangeCalls[len(th.kc.exchangeCalls)-1].Origin)
+			sessionCookie := cookieNamed(t, callback, SessionCookie)
+			assert.Equal(t, strings.HasPrefix(origin, "https://"), sessionCookie.Secure)
+
+			logout := th.doAt(http.MethodPost, origin, LogoutRoute+"?sso=1", sessionCookie)
+			require.Equal(t, http.StatusOK, logout.Code)
+			body := decodeJSON[logoutJSON](t, logout)
+			logoutURL, err := url.Parse(body.LogoutURL)
+			require.NoError(t, err)
+			assert.Equal(t, origin+"/", logoutURL.Query().Get("post_logout_redirect_uri"))
+			assert.Equal(t, strings.HasPrefix(origin, "https://"), cookieNamed(t, logout, SessionCookie).Secure)
+		})
+	}
 }
 
 func TestHandlers_CallbackOpenRedirect(t *testing.T) {
@@ -772,7 +830,7 @@ func TestHandlers_LogoutBrowser(t *testing.T) {
 	var body logoutJSON
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.True(t, body.SSOLoggedOut)
-	assert.Equal(t, th.kc.logoutURL, body.LogoutURL)
+	assert.Equal(t, th.kc.logoutURL+"&post_logout_redirect_uri="+url.QueryEscape("http://example.com/"), body.LogoutURL)
 	assert.Equal(t, []string{testRefreshToken}, th.kc.logoutTokens)
 	assert.Equal(t, 1, th.kc.logoutURLCalls)
 	assertCleared(t, cookieNamed(t, rec, SessionCookie), SessionPath)
