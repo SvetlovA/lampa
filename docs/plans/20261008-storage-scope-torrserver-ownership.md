@@ -4,7 +4,7 @@
 - Plan 3 of `docs/settings-sync-backend-design.md` (§14), covering §10.3 (storage ownership audit) and §10.4 (TorrServer data ownership).
 - **Storage classification**: every storage key the current bundle uses gets an explicit scope in one machine-readable file, `svtlv/storage-scope.json`. A Go drift test fails CI when an upstream pull adds an unclassified key, the same way `TestSensitiveSettings_matchUI` already guards settings inputs. Plan 4's sync adapter reads this file as its allowlist.
 - **TorrServer ownership**: Lampa keeps talking to TorrServer directly, exactly as today. A new `svtlv/` add-on wraps the public `Lampa.Torserver` object so that, for a signed-in user, My Torrents shows only torrents that user added on that TorrServer. Ownership rows `(user, TorrServer, torrent hash)` live in `lampa-api` behind three small authenticated routes.
-- The goal is to separate what each account sees, not to change Lampa's logic: add, play and remove behave exactly as now. Anonymous users see no change.
+- Add and playback keep calling TorrServer directly. Signed-in removal deletes only the current user's PostgreSQL row. Anonymous My Torrents uses a device-local guest list; guest removal deletes only its local entry. Neither removal sends `action: rem` to TorrServer.
 - No change to TorrServer, Jackett, `app.min.js`, `css/app.css` or `lang/*`, and no new settings, configuration or secrets.
 
 ## Context (from discovery)
@@ -43,7 +43,7 @@
 - **CRITICAL: all tests must pass before starting next task** - no exceptions
 - **CRITICAL: update this plan file when scope changes during implementation**
 - run tests after each change (`make test`, `make race`, `make lint` inside WSL Ubuntu from `backend/`)
-- maintain backward compatibility: anonymous Lampa and every existing API route unchanged
+- keep every existing API route compatible; anonymous torrent behavior follows the agreed device-local guest policy below
 
 ## Testing Strategy
 - **unit tests**: required for every task. Table-driven Go tests; DB tests through `pgtest` testcontainers (`postgres:18.6`); handler tests with moq mocks; one `_test.go` per source file.
@@ -59,24 +59,47 @@
 
 ## Solution Overview
 
-**Decisions made with the user (2026-10-08), not to be reopened during implementation:**
+**Decisions made with the user (2026-10-08; removal and guest policy revised 2026-10-11):**
 
 1. **The browser keeps calling TorrServer directly.** `lampa-api` never contacts TorrServer, so there is no proxy and no SSRF surface, and the backend never stores or sees TorrServer URLs.
 2. **Ownership key is `(user_id, server_id, hash)`.** `server_id` identifies the TorrServer without a new setting: a hash of the normalized `torrserver_url`, or of `torrserver_url_two` when slot one is empty. If the TorrServer changes, its rows stop showing; switch back and they show again. Rows are never pruned automatically. This assumes both slots are addresses of the same TorrServer, which is how Lampa presents them ("link one / link two").
-3. **Lampa's behavior is unchanged.** Add, playback and remove call TorrServer exactly as today. The add-on only (a) records a row after a successful add or playback-add, using the canonical hash TorrServer returned, (b) deletes the row after a successful remove, and (c) filters My Torrents before it renders.
-4. **Remove still deletes from TorrServer (`action: rem`).** If two accounts own the same torrent, one removal deletes it for both; the other account's row remains but has nothing to show. This deliberately changes the §15 criterion "one user's removal does not remove the other's membership" and is recorded as a Plan 3 deviation.
-5. **Torrents already on TorrServer have no owner** and stay hidden from signed-in users. There is no claim UI and no automatic assignment; anonymous users still see everything.
+3. **Add and playback keep their existing TorrServer calls.** The add-on (a) records a row after a successful add or playback-add, using the canonical hash TorrServer returned, (b) handles signed-in removal through the ownership API only, and (c) filters My Torrents before it renders.
+4. **Remove deletes only the current user's database row.** `DELETE` matches the authenticated `user_id`, `server_id` and torrent hash. It never calls `Torserver.remove` / `action: rem`, even when this is the last ownership row. If A and B own X, A removing X leaves X on TorrServer and visible to B. Physical deletion is an operator action outside this plan; there is no reference-count cleanup because guests and other clients can also use the torrent. This restores the original §10.4 / §15 membership-isolation requirement.
+5. **Torrents already on TorrServer have no owner** and stay hidden from signed-in users and guests. There is no claim UI or automatic assignment; a guest must re-add a torrent to put its hash in that device's list.
 6. **The TorrServer URL and credentials are synced by Plan 4, not here.** Plan 3 classifies `torrserver_url`, `torrserver_url_two`, `torrserver_auth`, `torrserver_login` and `torrserver_password` as user-scoped connection keys, and `torrserver_use_link` as device-only. Plan 4's rule: on first login, if the device has values and the server has none, upload them; once the server has values, the server always wins until the user changes them. Until Plan 4, each device keys rows by its own URL, so devices with different slot-one URLs see different sets; after Plan 4 they converge.
-7. **Shared `/viewed` timecodes stay out of the signed-in flow** (§10.4, §15). While signed in, `Torserver.viewed` reports failure (Lampa then renders without TorrServer marks) and `viewedSet` is a no-op. Lampa's own local `file_view*` progress keeps working.
-8. **Signed-in, fail closed.** If the ownership lookup fails while the user is (or was last known to be) signed in, My Torrents shows the empty state plus a notification, never the unfiltered list.
+7. **Shared `/viewed` timecodes stay out of both account and guest flows** (§10.4, §15). `Torserver.viewed` reports failure (Lampa then renders without TorrServer marks) and `viewedSet` is a no-op. Lampa's own local `file_view*` progress keeps working.
+8. **Lists fail closed.** If signed-in ownership lookup fails, guest storage is unavailable or corrupt, or account status is unresolved at startup, My Torrents shows an empty state plus a notification; it never shows the unfiltered TorrServer list. A previously confirmed guest remains in guest mode through a later session-refresh outage.
 
 **Simplifications chosen after review:** no per-user row cap (a Keycloak-gated family server does not need one, and dropping it removes the transaction and advisory lock); no `addon_keys` exemption (add-on keys are not classified, and anything unclassified is device-only by definition).
+
+### Anonymous users: agreed policy (2026-10-11)
+
+Guests have a device-local My Torrents list. The three ownership routes remain authenticated; there are no anonymous database users or shared guest account. Guest removal cannot delete a signed-in user's torrent.
+
+| Operation | Signed in | Anonymous guest |
+|---|---|---|
+| List | TorrServer list intersected with the user's database hashes | TorrServer list intersected with this browser's guest hashes for this server |
+| Explicit add / playback-add | Original TorrServer call; record returned canonical hash in PostgreSQL | Original TorrServer call; record returned canonical hash locally |
+| Remove | Delete only the user's database row | Delete only the local guest hash |
+| Physical deletion | Operator action outside Lampa's ownership flow | Same; never call `action: rem` |
+
+Guest implementation details:
+- Store a versioned map of `server_id` to canonical hashes in plain `localStorage['svtlv_torrserver_guest_hashes']`, outside `Lampa.Storage` and Plan 4's sync allowlist. It identifies a browser profile/origin, not a person: people sharing that profile share its guest list. No cross-device sync; clearing browser data loses the list, not the TorrServer torrents.
+- Record a hash only after a successful original add/hash response, with the same Android external-client limitation as signed-in ownership. Membership alone does not make a torrent persistent when `torrserver_savedb` is off. Existing torrents are not automatically imported; re-adding one makes it visible locally.
+- Removal updates only local storage and succeeds only if the write succeeds. If storage is unavailable/corrupt, show a notification and fail closed for the list; never fall back to the unfiltered list or physical deletion. Playback can continue when membership recording fails, with a notification.
+- Keep guest data separate on login and logout; no automatic transfer into an account and no copying account hashes into guest storage. After logout, show the pre-existing guest list. Capture the guest/account mode and server at invocation, and ignore stale list responses after a mode change. Never redirect an in-flight account operation into guest storage after a `401`.
+- An expired session fails closed for the current call. Mark account status as checking before re-fetching `/session`; subsequent calls wait until it resolves. A confirmed anonymous response selects guest mode. On an unavailable response, retain only a guest mode already confirmed during this page lifetime; otherwise fail closed. While initial session status is unknown, do not expose any list or route mutations using a guessed identity. Refresh the active My Torrents list when the session resolves.
+- Suppress shared `/viewed` reads/writes for guests too; local Lampa progress continues to work.
+- No automatic TorrServer cleanup when a guest removes a hash or clears storage. Guest references are not known to the backend, and other clients may also use those torrents.
+
+Manual checks cover two browser profiles with independent guest lists, guest/account transitions, guest and account sharing X, guest removal preserving X for the account, clearing local storage, and API outages in guest mode.
 
 **How it fits:**
 ```
 Lampa UI ──Torserver.my/add/hash/remove──▶ svtlv/torrserver-ownership.js (wraps Lampa.Torserver)
-                                              │ original call, unchanged ──▶ TorrServer (direct, as today)
-                                              └ /api/v1/torrservers/{server_id}/hashes ──▶ lampa-api ──▶ PostgreSQL
+                                              │ list/add/play calls ──▶ TorrServer (direct, as today)
+                                              ├ signed-in membership ──▶ lampa-api ──▶ PostgreSQL
+                                              └ guest membership ──▶ device localStorage
 ```
 
 ## Technical Details
@@ -103,7 +126,7 @@ There is no foreign key to `lampa_user_data`: a user can own torrents without ha
 |---|---|
 | `GET /api/v1/torrservers/{server_id}/hashes` | `200 {"hashes": ["<hex>", …]}`, sorted, `[]` when none |
 | `PUT /api/v1/torrservers/{server_id}/hashes/{hash}` | `204`, idempotent (`insert … on conflict do nothing`) |
-| `DELETE /api/v1/torrservers/{server_id}/hashes/{hash}` | `204`, idempotent; deleting a missing row is not an error |
+| `DELETE /api/v1/torrservers/{server_id}/hashes/{hash}` | `204`, idempotent; deletes only this session user's row; a missing row is not an error; no TorrServer request |
 | other methods | `405 method_not_allowed` with a per-route `Allow` (`GET` for the list, `PUT, DELETE` for an item), JSON body, HEAD routed to 405 as for user data |
 
 - Errors reuse the existing contract: `401`/`503 session_unavailable` from the authenticator, `400` validation codes and `503 storage_unavailable`, all through the existing `writeServiceError`. The user always comes from the session (`UserID(ctx)`), never from the request.
@@ -115,22 +138,19 @@ There is no foreign key to `lampa_user_data`: a user can own torrents without ha
 - `api.Torrents` interface plus moq mock `pkg/api/mocks/torrents.go`. `NewServer(cfg, svc, torrents, auth, authRoutes, logger)` takes it as a new required dependency. `methodNotAllowed` becomes a function of the `Allow` value.
 - `PgStore.Ping` also probes `lampa_torrserver_hashes`, so the `database` health check catches a missing migration.
 
-**Add-on `svtlv/torrserver-ownership.js`** (ES5 IIFE: protocol check, load guard `window.svtlv_torrserver_loaded`, every hook in try/catch so a failure leaves the original method in place)
-- **Install early**: poll (200 ms, as `account.js`) only until `window.Lampa && Lampa.Torserver && Lampa.Storage` exist, then replace the properties. Replacing them needs nothing from app ready. After install, if the flag is set and `Lampa.Activity.active()` is a `mytorrents` activity that may already have rendered, `Lampa.Activity.replace()` it so it reloads through the wrapper.
-- **`serverId()`**: take `Lampa.Storage.get('torrserver_url')`, or `torrserver_url_two` if that is empty. Trim, lowercase, strip a leading `http://` or `https://`, strip trailing `/`, then `Lampa.Utils.hash(...)`. The page scheme is never involved. With no URL the wrapper passes through, and Lampa shows its own "not configured" path.
-- **Signed-in state** comes from `account.js`, which keeps a plain `localStorage` flag `svtlv_account_signed_in` (`'1'` or removed) on every `applySession`, written before its "user changed" check so a stale flag is always corrected. The ownership add-on reads the flag on each call:
-  - flag absent → original Lampa behavior (anonymous);
-  - flag set → signed-in path;
-  - any ownership call answering `401` → remove the flag and send `Lampa.Listener.send('svtlv_account', {type: 'expired'})`. `account.js` follows that event and re-fetches the session, so its avatar and settings update. The current `my()` call still fails closed with a "session expired" Noty; the next call runs anonymously.
-- **`my(success, fail)` signed in**: start the hashes GET **and** the original `my()` at the same moment, so upstream's `clear()` timing is unchanged. Wait for both to settle:
-  - hashes failed (network, 5xx, 401) → Noty, then `fail()`;
+**Add-on `svtlv/torrserver-ownership.js`** (ES5 IIFE: protocol check, load guard `window.svtlv_torrserver_loaded`, guarded hooks; errors in list or remove fail closed and never fall back to an unfiltered list or the original destructive remove)
+- **Install early**: poll (200 ms, as `account.js`) only until `window.Lampa && Lampa.Torserver && Lampa.Storage` exist, then replace the properties. Replacing them needs nothing from app ready. If `Lampa.Activity.active()` is a `mytorrents` activity that may already have rendered, `Lampa.Activity.replace()` it so it reloads through the wrapper. Repeat that refresh when account status resolves or changes.
+- **`serverId()`**: take `Lampa.Storage.get('torrserver_url')`, or `torrserver_url_two` if that is empty. Trim, lowercase, strip a leading `http://` or `https://`, strip trailing `/`, then `Lampa.Utils.hash(...)`. The page scheme is never involved. With no URL, list/add/playback use Lampa's existing "not configured" path; remove fails with a notification in either mode and never calls the original remove.
+- **Account state** comes from `account.js`. It publishes a current-page state (`checking`, `signed_in`, `guest`, or `unavailable`) and a generation that changes on transitions; the ownership add-on uses that state for every call and ignores responses from an older generation. `checking` or `unavailable` blocks list exposure and add/remove mutations. A successful anonymous `/session` response or successful logout selects `guest`; a successful authenticated response selects `signed_in`. A refresh failure retains a guest state already confirmed during this page lifetime, but never turns an unknown or previously signed-in state into guest. An ownership `401` marks state `checking` immediately, sends `Lampa.Listener.send('svtlv_account', {type: 'expired'})`, and `account.js` re-fetches `/session`; the current call fails closed. Keep the existing `svtlv_account_signed_in` flag synchronized if needed by other add-ons, but do not infer guest status from its absence.
+- **`my(success, fail)`**: in signed-in mode, start the hashes GET **and** the original `my()` at the same moment, so upstream's `clear()` timing is unchanged. In guest mode, read and validate the local hash set before starting the original `my()`. Wait for the membership source and TorrServer list to settle:
+  - signed-in lookup failed (network, 5xx, 401) or guest storage failed → Noty, then `fail()`;
   - original failed or empty → `fail()`;
   - otherwise keep only items whose lowercased `hash` is in the set → `success(filtered)`, or `fail()` when nothing is left.
 
   Nothing renders before both settle.
-- **`add(object, success, fail)` / `hash(object, success, fail)` signed in**: call the original with the same arguments. In its success, if `json.hash` is present, `PUT` the row asynchronously; a failure only shows a Noty and never blocks playback. Then call the caller's `success(json)` if one was given. A failed TorrServer add creates no row, and `fail` is passed through untouched.
-- **`remove(hash, success, fail)` signed in**: call the original. On its success, `DELETE` the row, then call the caller's `success` if given. On failure the row stays, because the torrent is still there.
-- **`viewed(hash, success, fail)` signed in**: call `fail()` asynchronously. **`viewedSet(...)` signed in**: no-op.
+- **`add(object, success, fail)` / `hash(object, success, fail)`**: in either known mode, call the original with the same arguments. On success, use `json.hash` to `PUT` the signed-in row or update guest storage, then call the caller's `success(json)` if given. Membership failures show a Noty but do not block playback. A failed TorrServer add creates no membership, and `fail` passes through untouched. If account state changes before the response, do not write the hash into the new mode's store.
+- **`remove(hash, success, fail)`**: in signed-in mode, issue only the ownership `DELETE`, capturing server and account context at invocation. In guest mode, remove only the hash in that server's local list. Never call the original remove, including on failure, `401`, missing configuration or an account-state change. On success, call `success` if given. On failure, show a Noty and call `fail` if given; reconcile the list because a signed-in timeout may have committed. The upstream long-press handler immediately calls `item.disable()` without callbacks: after a failed request, reload the still-active originating My Torrents activity through the public API; do not navigate back if the user has left it. If membership lookup also fails, retain the fail-closed empty/error state. A later successful add/playback-add can claim the hash again.
+- **`viewed(hash, success, fail)` in either known mode**: call `fail()` asynchronously. **`viewedSet(...)`**: no-op. For unresolved state, also avoid shared `/viewed` operations.
 - **Requests**: same-origin `$.ajax` like `account.js` (the session cookie goes along automatically); timeout 15 s; `X-Lampa-Csrf: 1` on PUT/DELETE.
 - **`index.html`**: one more `putScript('svtlv/torrserver-ownership.js?v=' + cache_version, …)` line inside the existing `svtlv:begin/end` block. No stylesheet.
 
@@ -168,7 +188,7 @@ There is no foreign key to `lampa_user_data`: a user can own torrents without ha
 - Keys built only from variables (`file_view_<profile>`, `account_timeline_sync_<profile>`, `content_rows_<name>`) are inventoried by hand from their read/write sites, and the test guards them only through their literal fragment. A comment in the test says so.
 
 ## What Goes Where
-- **Implementation Steps**: Go migration, store, service, API, wiring, tests; the `account.js` flag and expiry event; the ES5 add-on and its `index.html` line; the classification file with its drift test; documentation and design-doc deviations.
+- **Implementation Steps**: Go migration, store, service, API, wiring and tests; `account.js` session-state publishing and expiry event; the ES5 add-on with guest storage and its `index.html` line; the classification file with its drift test; documentation and design-doc deviations.
 - **Post-Completion**: deploy through the manual workflow, then two-account and two-device smoke checks, TV-client checks and the rollback drill.
 
 ## Implementation Steps
@@ -239,16 +259,17 @@ There is no foreign key to `lampa_user_data`: a user can own torrents without ha
 - [ ] extend the wiring test to hit the new route through the composed handler (401 anonymous)
 - [ ] run `make test` - must pass before task 6
 
-### Task 6: Publish the signed-in state from account.js
+### Task 6: Publish resolved account and guest state from account.js
 
 **Files:**
 - Modify: `svtlv/account.js`
 
-- [ ] in `applySession`, before the "user changed" check, set or remove `localStorage['svtlv_account_signed_in']` (try/catch; plain `localStorage`, never `Lampa.Storage`). `logOutDone` already calls `applySession({authenticated:false})`, so logout needs no extra code
-- [ ] follow `Lampa.Listener` `svtlv_account` `{type:'expired'}` and re-fetch the session through the existing `fetchSession`/`applySession` path
-- [ ] update the header comment (the add-on now also publishes the signed-in flag)
+- [ ] publish a current-page account state and generation before the initial `/session` request (`checking`), after each authenticated/anonymous result, after successful logout, and when an ownership `401` starts session re-checking; notify the ownership add-on on transitions. A refresh failure may retain only a guest state already confirmed in this page lifetime; an initial failure and a formerly signed-in state fail closed
+- [ ] keep `localStorage['svtlv_account_signed_in']` (`'1'` or removed) synchronized in `applySession` (try/catch, plain `localStorage`), but do not use a missing flag as proof of guest status. Do not persist the readiness state across reloads
+- [ ] follow `Lampa.Listener` `svtlv_account` `{type:'expired'}` and re-fetch the session through the existing `fetchSession`/`applySession` path; prevent stale responses from restoring a previous identity after the transition
+- [ ] update the header comment to document state publication and expiry handling
 - [ ] check that `npx --yes acorn@8.14.0 --ecma5 --silent svtlv/*.js` passes
-- [ ] manual check in a browser: the flag follows sign-in and sign-out, and a cookie removed by hand plus an `expired` event clears it and the avatar
+- [ ] manually check startup, sign-in, sign-out, session expiry, and session/API outages: account state and avatar change together; an initial outage never selects guest merely because the flag is absent
 
 ### Task 7: Add the TorrServer ownership add-on
 
@@ -256,18 +277,22 @@ There is no foreign key to `lampa_user_data`: a user can own torrents without ha
 - Create: `svtlv/torrserver-ownership.js`
 - Modify: `index.html` (inside the `svtlv:begin/end` block only)
 
-- [ ] add the IIFE skeleton (protocol check, load guard, early install as soon as `Lampa.Torserver` exists, try/catch per hook, re-open an already active `mytorrents` activity) and `serverId()`
-- [ ] wrap `my` (parallel hashes GET + original, filter before `success`, fail closed with a Noty), `add` and `hash` (row after a successful add, from `json.hash`), `remove` (delete the row after success), `viewed` and `viewedSet` (kept out while signed in); callbacks are invoked only if given, with the same arguments
-- [ ] handle `401` from any ownership call (remove the flag, send `svtlv_account` `expired`, fail closed for the current list)
+- [ ] add the IIFE skeleton (protocol check, load guard, early install as soon as `Lampa.Torserver` exists, guarded hooks that fail closed for list/remove, re-open an already active `mytorrents` activity) and `serverId()`
+- [ ] implement the versioned `localStorage['svtlv_torrserver_guest_hashes']` map, canonical hash validation, per-server lookup/write, corruption/unavailable handling, and guest list filtering; keep it outside `Lampa.Storage` and Plan 4 sync
+- [ ] wrap `my` (account: parallel hashes GET + original; guest: local hashes + original; filter before `success`; fail closed with a Noty), `add` and `hash` (record canonical `json.hash` in the store for the captured mode), `remove` (database DELETE or guest local deletion only; never original remove; reconcile the optimistic card state on failure), `viewed` and `viewedSet` (kept out in both modes); callbacks are invoked only if given, with the same arguments
+- [ ] handle `401` from any ownership call (switch state to checking, send `svtlv_account` `expired`, fail closed for the current list); ignore late responses from an earlier account generation and refresh an active My Torrents list after state transitions
 - [ ] add the `putScript` line to the seam block
 - [ ] check that `npx --yes acorn@8.14.0 --ecma5 --silent svtlv/*.js` passes
 - [ ] manual matrix in a browser with devtools:
-  - anonymous: My Torrents unchanged;
+  - two browser profiles: each guest sees only its local hashes; guest removal changes only its local list and sends no `action: rem`;
   - signed in: only own rows;
   - `lampa-api` stopped: empty plus a Noty;
-  - session expired: Noty, avatar cleared, next open anonymous;
+  - session expired: current list fails closed; after a confirmed anonymous `/session` response, next open shows only the device guest list;
   - start page = My Torrents: filtered on the first render;
-  - add, play and remove still behave as before;
+  - add/play retain their TorrServer calls; account removal sends only the ownership DELETE and guest removal writes only local storage, with no `action: rem`;
+  - A and B own X: A removes X, B still sees and plays X; removing the last ownership row also keeps X on TorrServer;
+  - failed or timed-out removal, and unavailable/corrupt guest storage: notification and list reconciliation, no fallback to TorrServer deletion or unfiltered display;
+  - guest/account switches keep lists separate; clearing guest storage removes only the guest list; initial API outage fails closed, while an already confirmed guest can keep using its local list through a later outage;
   - remove from the long-press menu (no callbacks) works.
 
 ### Task 8: Classify every storage key with a drift test
@@ -288,22 +313,23 @@ There is no foreign key to `lampa_user_data`: a user can own torrents without ha
 - [ ] verify edge cases:
   - the same hash for two users, and the same user on two servers;
   - a TorrServer URL change hides rows, and changing back restores them;
-  - removal by one account (decision 4);
+  - removal by one account preserves the other account's row and the TorrServer torrent; removing the last row also preserves the torrent (decision 4);
   - ownership API down while signed in (fail closed), and an expired session;
-  - anonymous unchanged;
-  - add-on file missing (Lampa still boots);
+  - guest add/list/remove uses only local membership and never leaks signed-in hashes; two browser profiles have independent lists;
+  - guest/account transitions, guest plus account ownership of X, cleared/corrupt local storage, and API outages follow the agreed state rules;
+  - add-on file missing (Lampa still boots; upstream My Torrents and remove remain unprotected until the add-on is restored);
   - the scheme-free `serverId` matches across an http and an https origin.
 - [ ] run the full suite in WSL from `backend/`: `make test`, `make race`, `make lint`
 - [ ] run the ES5 gate: `npx --yes acorn@8.14.0 --ecma5 --silent svtlv/*.js`
 - [ ] verify coverage stays at the Plan 1/2 level for `pkg/storage` and `pkg/api`
 
 ### Task 10: [Final] Update documentation
-- [ ] `backend/README.md`: ownership routes in "API", the new table, the access-log redaction, and in "Operational caveats" the view-separation caveat, the two-slot assumption (decision 2) and the Android external-client limitation
+- [ ] `backend/README.md`: ownership routes in "API", the new table, the access-log redaction, and in "Operational caveats" the view-separation caveat, device-local guest membership, the two-slot assumption (decision 2) and the Android external-client limitation
 - [ ] `docs/settings-sync-backend-design.md`:
   - §4 (new table) and §8 (routes);
   - the §10.3 table aligned with `storage-scope.json` (torrserver keys → user connection, `torrserver_use_link` device-only, the Plan 4 rule from decision 6);
-  - §10.4 and §15 for decisions 2, 4, 5 and the Android limitation;
-  - "Deviations recorded while implementing Plan 3" under §14.
+  - §10.4 and §15 for decisions 2, 4, 5, guest device-local membership, session readiness, and the Android limitation;
+  - "Deviations recorded while implementing Plan 3" under §14; membership-only removal agrees with the original design and must not be listed as a deviation.
 - [ ] `CLAUDE.md`: mention `svtlv/torrserver-ownership.js` and `storage-scope.json` in the Svtlv add-ons section, and `TestStorageScope_matchBundle` next to `TestSensitiveSettings_matchUI` (an upstream pull that adds a storage key fails CI until it is classified)
 - [ ] move this plan to `docs/plans/completed/`
 
@@ -315,14 +341,17 @@ There is no foreign key to `lampa_user_data`: a user can own torrents without ha
 - Rollback: revert and redeploy. The extra table is harmless to the previous API version; drop it manually only if the feature is abandoned.
 
 **Manual verification (two accounts, two devices: browser and the `lampa-app/LAMPA` TV client, both WebView engines)**
-- Account A adds torrent X, account B adds X and Y: A sees X only, B sees X and Y, and anonymous sees everything.
-- A removes X: it is removed from TorrServer (as today); B's X disappears too (decision 4).
+- Account A adds torrent X, account B adds X and Y: A sees X only and B sees X and Y. A guest who has not added them sees neither; a guest who adds X sees X only on that device.
+- A removes X: only A's database row disappears; B still sees and plays X, and X remains on TorrServer. B then removes X: the torrent still remains on TorrServer (decision 4).
+- Fail or time out A's removal request: a notification appears and the list reconciles against the API; no `action: rem` request is sent.
 - Change `torrserver_url` on one device: My Torrents is empty for signed-in users there; restore it and the rows return.
 - Stop `lampa-api` while signed in: My Torrents shows empty plus a notification, never the full list; playback still works.
-- `torrserver_tracktimecode` on: signed-in playback shows no TorrServer marks and writes none; anonymous behaves as before.
+- `torrserver_tracktimecode` on: signed-in and guest playback show no shared TorrServer marks and write none; local progress still works.
 - On the Android TV client with the external torrent client: playback does not record ownership; only "Add to My Torrents" does.
 - Start page = My Torrents on the TV: the first render is already filtered.
-- Day one: existing torrents are hidden from signed-in users until they re-add them (decision 5).
+- Day one: existing torrents are hidden from signed-in users and guests until they re-add them (decision 5).
+- Use two guest browser profiles: one guest's add/remove changes only that profile's list. Guest removal leaves a signed-in owner's X playable and leaves X on TorrServer.
+- Sign in, sign out, expire a session, clear guest storage, and interrupt `/session`: no account hashes move into guest storage, stale responses do not expose another mode, a confirmed guest keeps its local list during a later API outage, and an initial outage shows the fail-closed state.
 
 **Security note**
-- This is application view separation, not access control: anyone with the TorrServer URL or credentials can still list and remove everything (§10.4).
+- This is application view separation, not access control: anyone with the TorrServer URL or credentials can still list and remove everything (§10.4). A missing or disabled add-on leaves the original shared UI behavior available, so deployment must verify the file loads on supported clients.
