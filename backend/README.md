@@ -93,6 +93,15 @@ skips when `app.min.js` is absent (a `backend/`-only checkout).
 
 ## Build, test, lint
 
+On macOS and Linux, use the default `Makefile` from the repository root:
+
+```sh
+make -C backend build
+make -C backend version
+```
+
+Revision timestamps are formatted by Git in UTC, so GNU `date` is not required on macOS.
+
 For CI-equivalent checks, use the default `Makefile` inside WSL Ubuntu (Go 1.26, `make`,
 `gcc`, `golangci-lint v2.13.0`). The Windows host has no cgo toolchain, so `-race` cannot
 run there:
