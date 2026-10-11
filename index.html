@@ -163,5 +163,14 @@
             loadCurrentLampa()
         }
     </script>
+
+    <!-- svtlv:begin -->
+    <script>
+        // Svtlv add-ons (svtlv/, design §10.2). The no-op onerror keeps a missing file from showing the .no-network overlay.
+        $('head').append('<link rel="stylesheet" href="svtlv/account.css?v=' + cache_version + '">')
+
+        putScript('svtlv/account.js?v=' + cache_version, function () {}, function () {})
+    </script>
+    <!-- svtlv:end -->
 </body>
 </html>
