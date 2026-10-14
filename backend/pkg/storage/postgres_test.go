@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -159,6 +160,25 @@ func TestPgStore_Ping(t *testing.T) {
 		t.Parallel()
 		require.Error(t, newTestStore(t, emptyDB(t)).Ping(t.Context()))
 	})
+
+	for _, table := range []string{"lampa_user_data", "lampa_torrserver_hashes"} {
+		t.Run(table+" missing", func(t *testing.T) {
+			t.Parallel()
+			p := emptyDB(t)
+			require.NoError(t, storage.Migrate(t.Context(), p))
+			_, err := p.Exec(t.Context(), "drop table "+table)
+			require.NoError(t, err)
+			err = newTestStore(t, p).Ping(t.Context())
+			var pgErr *pgconn.PgError
+			require.ErrorAs(t, err, &pgErr)
+			assert.Equal(t, "42P01", pgErr.Code, "missing table error remains wrapped")
+			if table == "lampa_torrserver_hashes" {
+				require.ErrorContains(t, err, "probe torrserver hashes schema")
+			} else {
+				require.ErrorContains(t, err, "probe schema")
+			}
+		})
+	}
 
 	t.Run("closed pool", func(t *testing.T) {
 		t.Parallel()

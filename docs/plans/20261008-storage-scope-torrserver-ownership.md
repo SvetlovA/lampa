@@ -288,11 +288,18 @@ Task 1 validation and implementation notes:
 - Modify: `backend/pkg/storage/postgres.go`
 - Modify: `backend/pkg/storage/postgres_test.go`
 
-- [ ] add the `TorrentStore` interface with its own `go:generate` line, and implement `ListHashes` (sorted), `ClaimHash` (`insert … on conflict do nothing`) and `ReleaseHash` on `PgStore`
-- [ ] extend `PgStore.Ping` to probe `lampa_torrserver_hashes`
-- [ ] write DB tests: list empty and sorted, claim idempotent, the same hash under two users and under two servers, release keeps the other user's row, release of a missing row is ok
-- [ ] write tests for store failures (closed pool → wrapped error) and the extended `Ping`
-- [ ] regenerate mocks, then run `make test` and `make race` - must pass before task 3
+- [x] add the `TorrentStore` interface with its own `go:generate` line, and implement `ListHashes` (sorted), `ClaimHash` (`insert … on conflict do nothing`) and `ReleaseHash` on `PgStore`
+- [x] extend `PgStore.Ping` to probe `lampa_torrserver_hashes`
+- [x] write DB tests: list empty and sorted, claim idempotent, the same hash under two users and under two servers, release keeps the other user's row, release of a missing row is ok
+- [x] write tests for store failures (closed pool → wrapped error) and the extended `Ping`
+- [x] regenerate mocks, then run `make test` and `make race` - must pass before task 3
+
+Task 2 validation and implementation notes:
+- Added `TorrentStore` and its generated moq mock. `PgStore` lists hashes in order with a non-nil empty slice, claims idempotently without changing `created_at`, and releases only the specified user/server/hash row.
+- Database tests cover v1/v2 hash sorting, concurrent duplicate claims, user/server/hash isolation, missing-row release, and membership independence from user documents. Closed-pool, canceled-context, and row-decoding failures preserve their underlying errors and return no partial list.
+- `Ping` probes both application tables; tests verify that either missing table fails health with the wrapped PostgreSQL error.
+- `LAMPA_API_REQUIRE_DOCKER=1 make test`, `LAMPA_API_REQUIRE_DOCKER=1 make race`, targeted store tests with race detection, `make lint`, and `git diff --check` pass. Mocks were regenerated with `go generate ./pkg/storage`. Validation ran natively on macOS with cgo and Docker because WSL is unavailable on this host.
+- The three new store methods and `Ping` have 100% statement coverage. Overall backend coverage remains 93.8%; `pkg/storage` increases to 94.4%, and `pkg/api` remains 96.7%.
 
 ### Task 3: Add the Torrents service with validation
 
