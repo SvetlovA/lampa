@@ -1,0 +1,659 @@
+// Run with: node --test docs/tests/torrserver-ownership.test.cjs
+// Execute the actual add-on with controlled public APIs, network and storage.
+const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const {test} = require('node:test');
+const source = fs.readFileSync(path.join(__dirname, '../../svtlv/torrserver-ownership.js'), 'utf8');
+const html = fs.readFileSync(path.join(__dirname, '../../index.html'), 'utf8');
+const bundle = fs.readFileSync(path.join(__dirname, '../../app.min.js'), 'utf8');
+const key = 'svtlv_torrserver_guest_hashes';
+const X = 'a'.repeat(40), Y = 'b'.repeat(40), Z = 'c'.repeat(64);
+const id = url => crypto.createHash('sha256').update(url.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/+$/, '')).digest('hex');
+const guest = {status: 'guest', generation: 1, user_id: ''};
+const account = (user = 'Alice', generation = 1) => ({status: 'signed_in', generation, user_id: user});
+const clean = value => JSON.parse(JSON.stringify(value));
+
+function page(options = {}) {
+  const calls = [], requests = [], notices = [], timers = [], events = [], replacements = [];
+  const listeners = {}, handlers = {};
+  const items = options.items || {};
+  const settings = {torrserver_url: 'https://server:8090/', language: 'en', torrserver_savedb: false, ...options.settings};
+  let activity = options.activity || null;
+  const faults = {read: false, write: false, ...options.faults};
+  const listener = {
+    follow(name, fn) { (listeners[name] ||= []).push(fn); },
+    send(name, event) {
+      events.push({name, event});
+      for (const fn of listeners[name] || []) fn(event);
+    }
+  };
+  const Lampa = {
+    Torserver: {},
+    Storage: {get: name => settings[name], field: name => settings[name] === true || settings[name] === 'true', listener},
+    Listener: listener,
+    Noty: {show: text => notices.push(text)},
+    Activity: {
+      active: () => activity,
+      replace() { replacements.push(activity); activity = {...activity, revision: replacements.length}; }
+    },
+    Utils: {hash() { throw new Error('short hashes must not be used'); }}
+  };
+  for (const name of ['my', 'add', 'hash', 'remove', 'viewed', 'viewedSet', 'drop']) {
+    Lampa.Torserver[name] = function (...args) {
+      const operation = {
+        name, args, receiver: this,
+        success(...result) { args[name === 'my' ? 0 : 1]?.apply(operation, result); },
+        fail(...result) { args[name === 'my' ? 1 : 2]?.apply(operation, result); }
+      };
+      calls.push(operation);
+      if (options.original) options.original(operation);
+      return operation;
+    };
+  }
+  const window = {
+    location: {protocol: options.protocol || 'https:'},
+    localStorage: {
+      getItem(name) { if (faults.read) throw new Error('read'); return items[name] ?? null; },
+      setItem(name, value) { if (faults.write) throw new Error('write'); if (!faults.silentWrite) items[name] = value; }
+    }
+  };
+  if (options.state !== null) window.svtlv_account_state = options.state || guest;
+  if (!options.lateLampa) window.Lampa = Lampa;
+  function $() { return {on: (name, fn) => { handlers[name] = fn; }}; }
+  $.ajax = config => {
+    if (options.ajaxThrows) throw new Error('ajax');
+    const request = {
+      config,
+      success(body, status = config.type === 'GET' ? 200 : 204) { config.success(body, 'success', {status}); },
+      fail(status = 503) { config.error({status}); }
+    };
+    requests.push(request);
+    return request;
+  };
+  const context = vm.createContext({window, $, setTimeout: fn => timers.push(fn)});
+  vm.runInContext(source, context);
+  return {
+    window, Lampa, calls, requests, notices, settings, items, faults, events, replacements, context,
+    install() { window.Lampa = Lampa; },
+    reload() { vm.runInContext(source, context); },
+    setState(state) { window.svtlv_account_state = state; listener.send('svtlv_account', {type: 'state', state}); },
+    changeURL(url) { settings.torrserver_url = url; listener.send('change', {name: 'torrserver_url'}); },
+    navigate(next) { activity = next; },
+    storageEvent(name = key) { handlers.storage({originalEvent: {key: name}}); },
+    flush() { const pending = timers.splice(0); for (const fn of pending) fn(); },
+    seed(hashes, url = settings.torrserver_url) { items[key] = JSON.stringify({version: 1, servers: {[id(url)]: hashes}}); },
+    hashes(url = settings.torrserver_url) { return JSON.parse(items[key]).servers[id(url)] || []; },
+    list() {
+      const success = [], fail = [];
+      Lampa.Torserver.my((...args) => success.push(clean(args)), (...args) => fail.push(args));
+      return {success, fail};
+    }
+  };
+}
+
+test('installs before readiness and protects synchronous first use at API publication', () => {
+  const p = page({lateLampa: true, state: null});
+  p.install();
+  const result = p.list();
+  assert.equal(result.fail.length, 1);
+  assert.equal(p.calls.length, 0);
+  assert.equal(p.requests.length, 0);
+  assert.equal(p.notices.length, 1);
+  assert.equal(Object.getOwnPropertyDescriptor(p.window, 'Lampa').value, p.Lampa);
+  p.reload();
+  p.setState(guest);
+  p.seed([X]);
+  p.list();
+  assert.equal(p.calls.length, 1, 'load guard avoids double wrapping');
+});
+
+test('the actual bundle API publication installs wrappers before its next statement', () => {
+  const p = page({lateLampa: true, state: null});
+  const init = bundle.match(/  function initClass\(\) \{[\s\S]*?\n  \}/)[0];
+  for (const match of init.matchAll(/^\s+(\w+): ([\w$]+)/gm)) {
+    p.context[match[2]] = p.Lampa[match[1]] || {};
+  }
+  p.context.Subscribe$2 = () => p.Lampa.Listener;
+  p.context.Request = function () {};
+  vm.runInContext(init + '\ninitClass(); window.Lampa.Torserver.my();', p.context);
+  assert.equal(p.calls.length, 0, 'unresolved first render never requests the shared list');
+  assert.equal(p.notices.length, 1);
+  p.setState(guest);
+  p.seed([X]);
+  p.window.Lampa.Torserver.my();
+  assert.equal(p.calls.length, 1);
+});
+
+test('polling handles an incomplete public API without assuming guest identity', () => {
+  const p = page({lateLampa: true, state: null});
+  p.window.Lampa = {};
+  p.flush();
+  p.window.Lampa = p.Lampa;
+  p.flush();
+  assert.equal(p.list().fail.length, 1);
+  assert.equal(p.calls.length, 0);
+});
+
+test('late installation replaces an already active My Torrents activity', () => {
+  const p = page({activity: {component: 'mytorrents'}});
+  p.flush();
+  assert.equal(p.replacements.length, 1);
+  p.setState(account());
+  p.flush();
+  assert.equal(p.replacements.length, 2);
+  p.changeURL('http://another:8090');
+  p.flush();
+  assert.equal(p.replacements.length, 3);
+  p.navigate({component: 'full'});
+  p.setState(guest);
+  p.flush();
+  assert.equal(p.replacements.length, 3);
+});
+
+for (const protocol of ['file:', 'app:']) test('non-HTTP origin leaves all original methods intact: ' + protocol, () => {
+  const p = page({protocol});
+  p.Lampa.Torserver.remove(X);
+  assert.equal(p.calls[0].name, 'remove');
+  assert.equal(p.window.svtlv_torrserver_loaded, undefined);
+});
+
+for (const state of [null, {status: 'checking', generation: 1}, {status: 'unavailable', generation: 2}]) {
+  test('unresolved identity blocks lists and mutations: ' + JSON.stringify(state), () => {
+    const p = page({state});
+    assert.equal(p.list().fail.length, 1);
+    for (const method of ['add', 'hash', 'remove']) {
+      let failed = 0;
+      p.Lampa.Torserver[method](method === 'remove' ? X : {}, undefined, () => failed++);
+      assert.equal(failed, 1);
+    }
+    assert.equal(p.calls.length, 0);
+    assert.equal(p.requests.length, 0);
+  });
+}
+
+for (const url of ['abc', 'https://SERVER:8090///', ' http://server:8090/ ', 'https://сервер/каталог/',
+  'https://host/' + 'a'.repeat(50), 'https://host/' + 'a'.repeat(120), 'https://host:443/path?a=b']) {
+  test('server ID matches Node SHA-256 and ignores page scheme: ' + url, () => {
+    const p = page({state: account(), settings: {torrserver_url: url}});
+    p.list();
+    assert.equal(p.requests[0].config.url, '/api/v1/torrservers/' + id(url) + '/hashes');
+    const q = page({protocol: 'http:', state: account(), settings: {torrserver_url: url.replace(/^https:/, 'http:')}});
+    q.list();
+    assert.equal(q.requests[0].config.url, p.requests[0].config.url);
+  });
+}
+
+test('distinct servers that collide under Lampa.Utils.hash remain separated', () => {
+  const short = text => Math.abs([...text].reduce((sum, char) => (sum * 31 + char.charCodeAt(0)) | 0, 0));
+  const urls = ['http://server/an', 'http://server/c0'];
+  assert.equal(short('server/an'), short('server/c0'));
+  const ids = urls.map(url => {
+    const p = page({state: account(), settings: {torrserver_url: url}});
+    p.list();
+    return p.requests[0].config.url;
+  });
+  assert.notEqual(ids[0], ids[1]);
+});
+
+for (const first of ['membership', 'torrent']) test('account list waits for both sources: ' + first, () => {
+  const p = page({state: account()});
+  const result = p.list();
+  assert.equal(p.requests.length, 1);
+  assert.equal(p.calls.length, 1, 'original starts immediately, without waiting for GET');
+  assert.equal(p.calls[0].receiver, p.Lampa.Torserver);
+  const membership = () => p.requests[0].success({hashes: [X, Z]});
+  const torrents = () => p.calls[0].success([{hash: X.toUpperCase()}, {hash: Y}, {hash: Z}, {hash: 'bad'}, {}]);
+  (first === 'membership' ? membership : torrents)();
+  assert.equal(result.success.length, 0);
+  (first === 'membership' ? torrents : membership)();
+  assert.deepEqual(result.success, [[[{hash: X.toUpperCase()}, {hash: Z}]]]);
+  assert.equal(result.fail.length, 0);
+  assert.equal(p.requests[0].config.timeout, 15000);
+  assert.equal(p.requests[0].config.cache, false);
+});
+
+for (const data of [null, {}, {hashes: 'bad'}, {hashes: [X, 'invalid']}]) test('malformed account inventory fails closed: ' + JSON.stringify(data), () => {
+  const p = page({state: account()});
+  const result = p.list();
+  p.requests[0].success(data);
+  p.calls[0].success([{hash: X}, {hash: Y}]);
+  assert.equal(result.success.length, 0);
+  assert.equal(result.fail.length, 1);
+  assert.equal(p.notices.length, 1);
+});
+
+test('account API failure never falls back to shared or guest data', () => {
+  const p = page({state: account()});
+  p.seed([X]);
+  const result = p.list();
+  p.requests[0].fail();
+  p.calls[0].success([{hash: X}]);
+  assert.equal(result.success.length, 0);
+  assert.equal(result.fail.length, 1);
+});
+
+test('expired list blocks immediately, emits expiry, then uses a confirmed guest independently', () => {
+  const p = page({state: account(), activity: {component: 'mytorrents'}});
+  p.seed([Y]);
+  const before = p.list();
+  p.requests[0].fail(401);
+  assert.equal(p.window.svtlv_account_state.status, 'checking');
+  assert.ok(p.events.some(item => item.event.type === 'expired'));
+  p.calls[0].success([{hash: X}, {hash: Y}]);
+  assert.equal(before.success.length, 0);
+  assert.equal(before.fail.length, 1);
+  assert.equal(p.list().fail.length, 1);
+  p.setState({...guest, generation: 3});
+  const after = p.list();
+  p.calls.at(-1).success([{hash: X}, {hash: Y}]);
+  assert.deepEqual(after.success, [[[{hash: Y}]]]);
+  p.flush();
+  assert.ok(p.replacements.length);
+});
+
+test('late lists and 401s from an earlier generation cannot affect a new identity', () => {
+  const p = page({state: account()});
+  const old = p.list();
+  p.setState({...guest, generation: 2});
+  p.setState(account('Bob', 3));
+  p.requests[0].fail(401);
+  p.calls[0].success([{hash: X}]);
+  assert.equal(p.window.svtlv_account_state.user_id, 'Bob');
+  assert.equal(old.success.length + old.fail.length, 0);
+  assert.equal(p.notices.length, 0);
+  const next = p.list();
+  p.requests[1].success({hashes: [Y]});
+  p.calls[1].success([{hash: X}, {hash: Y}]);
+  assert.deepEqual(next.success, [[[{hash: Y}]]]);
+});
+
+test('URL changes drop pending responses and restoring the URL restores its memberships', () => {
+  const p = page();
+  p.seed([X]);
+  const old = p.list();
+  p.changeURL('http://different/');
+  p.calls[0].success([{hash: X}]);
+  assert.equal(old.success.length, 0);
+  const other = p.list();
+  p.calls[1].success([{hash: X}]);
+  assert.equal(other.fail.length, 1);
+  p.changeURL('http://server:8090');
+  const restored = p.list();
+  p.calls[2].success([{hash: X}]);
+  assert.equal(restored.success.length, 1);
+});
+
+test('guest lists are profile-local; removal preserves other profiles and server torrents', () => {
+  const a = page(), b = page();
+  a.seed([X]); b.seed([X, Y]);
+  a.Lampa.Torserver.remove(X);
+  assert.deepEqual(a.hashes(), []);
+  assert.deepEqual(b.hashes(), [X, Y]);
+  assert.equal(a.calls.length, 0);
+  assert.equal(a.requests.length, 0);
+  const result = b.list();
+  b.calls[0].success([{hash: X}, {hash: Y}, {hash: Z}]);
+  assert.deepEqual(result.success, [[[{hash: X}, {hash: Y}]]]);
+});
+
+for (const raw of ['', 'invalid', 'null', '{}', '{"version":2,"servers":{}}',
+  '{"version":1,"servers":[]}', '{"version":1,"servers":{"bad":[]}}',
+  JSON.stringify({version: 1, servers: {[id('server:8090')]: [X.toUpperCase()]}}),
+  JSON.stringify({version: 1, servers: {[id('server:8090')]: ['bad']}})]) {
+  test('corrupt guest map fails closed without overwriting it: ' + raw, () => {
+    const p = page({items: {[key]: raw}});
+    assert.equal(p.list().fail.length, 1);
+    assert.equal(p.calls.length, 0);
+    p.Lampa.Torserver.remove(X);
+    p.Lampa.Torserver.add({});
+    p.calls[0].success({hash: X});
+    assert.equal(p.items[key], raw);
+    assert.equal(p.requests.length, 0);
+    assert.ok(p.notices.length >= 3);
+  });
+}
+
+test('empty guest storage hides existing torrents; clearing storage loses membership only', () => {
+  const p = page();
+  const before = p.list();
+  p.calls[0].success([{hash: X}]);
+  assert.equal(before.fail.length, 1);
+  p.Lampa.Torserver.add({});
+  p.calls[1].success({hash: X});
+  delete p.items[key];
+  const after = p.list();
+  p.calls[2].success([{hash: X}]);
+  assert.equal(after.fail.length, 1);
+  assert.equal(p.calls.some(call => call.name === 'remove'), false);
+});
+
+test('unavailable guest storage fails closed before the original list starts', () => {
+  const p = page({faults: {read: true}});
+  assert.equal(p.list().fail.length, 1);
+  assert.equal(p.calls.length, 0);
+  assert.equal(p.requests.length, 0);
+  assert.equal(p.notices.length, 1);
+});
+
+test('an explicit guest save never reports success if persistence fails', () => {
+  const p = page({faults: {write: true}});
+  let success = 0, fail = 0;
+  p.Lampa.Torserver.add({}, () => success++, () => fail++);
+  p.calls[0].success({hash: X});
+  assert.equal(success, 0);
+  assert.equal(fail, 1);
+  assert.equal(p.items[key], undefined);
+  assert.equal(p.notices.length, 1);
+});
+
+test('TorrServer errors/absence never prune memberships; re-add restores retained hashes only', () => {
+  const p = page();
+  p.seed([X, Y]);
+  const failed = p.list();
+  p.calls[0].fail('network', 503);
+  assert.deepEqual(failed.fail, [['network', 503]]);
+  const empty = p.list();
+  p.calls[1].success([]);
+  assert.equal(empty.fail.length, 1);
+  assert.deepEqual(p.hashes(), [X, Y]);
+  p.Lampa.Torserver.remove(X);
+  const restored = p.list();
+  p.calls[2].success([{hash: X}, {hash: Y}]);
+  assert.deepEqual(restored.success, [[[{hash: Y}]]]);
+});
+
+test('explicit account add records canonical response and waits to report success', () => {
+  const p = page({state: account()});
+  const object = {link: 'magnet:whatever', hash: Y};
+  const results = [];
+  p.Lampa.Torserver.add(object, function (...args) { results.push({args, receiver: this}); });
+  assert.equal(p.calls[0].args[0], object);
+  const response = {hash: ' ' + X.toUpperCase() + ' '};
+  p.calls[0].success(response, 'extra');
+  assert.equal(results.length, 0);
+  assert.equal(p.requests[0].config.type, 'PUT');
+  assert.ok(p.requests[0].config.url.endsWith('/' + X));
+  assert.equal(p.requests[0].config.headers['X-Lampa-Csrf'], '1');
+  p.requests[0].success('');
+  assert.deepEqual(results[0].args, [response, 'extra']);
+  assert.equal(results[0].receiver, p.calls[0]);
+});
+
+for (const response of [{}, {hash: 'not-a-hash'}, {hash: 12}, null]) test('missing canonical hash cannot claim explicit save success: ' + JSON.stringify(response), () => {
+  const p = page({state: account()});
+  let success = 0, fail = 0;
+  p.Lampa.Torserver.add({hash: X}, () => success++, () => fail++);
+  p.calls[0].success(response);
+  assert.equal(success, 0);
+  assert.equal(fail, 1);
+  assert.equal(p.requests.length, 0);
+  assert.equal(p.notices.length, 1);
+});
+
+for (const status of [0, 401, 503]) test('failed explicit account persistence reports failure, never writes guest storage: ' + status, () => {
+  const p = page({state: account()});
+  p.seed([Y]);
+  let success = 0, fail = 0;
+  p.Lampa.Torserver.add({}, () => success++, () => fail++);
+  p.calls[0].success({hash: X});
+  p.requests[0].fail(status);
+  assert.equal(success, 0);
+  assert.equal(fail, 1);
+  assert.deepEqual(p.hashes(), [Y]);
+  assert.equal(p.window.svtlv_account_state.status, status === 401 ? 'checking' : 'signed_in');
+});
+
+for (const state of [guest, account()]) for (const saved of [false, true, 'false', 'true']) {
+  test('playback remains immediate; membership requires savedb: ' + state.status + '/' + saved, () => {
+    const p = page({state, settings: {torrserver_savedb: saved}});
+    const results = [];
+    p.Lampa.Torserver.hash({}, (...args) => results.push(args));
+    const response = {hash: Z};
+    p.calls[0].success(response, 'second');
+    assert.deepEqual(results, [[response, 'second']]);
+    const record = saved === true || saved === 'true';
+    if (state.status === 'signed_in') {
+      assert.equal(p.requests.length, Number(record));
+      if (record) p.requests[0].fail();
+    } else {
+      assert.deepEqual(p.items[key] ? p.hashes() : [], record ? [Z] : []);
+    }
+    assert.equal(results.length, 1);
+  });
+}
+
+test('playback continues with a missing canonical hash or broken guest persistence', () => {
+  for (const options of [{}, {faults: {write: true}}]) {
+    const p = page({...options, settings: {torrserver_savedb: true}});
+    let success = 0;
+    p.Lampa.Torserver.hash({}, () => success++);
+    p.calls[0].success(options.faults ? {hash: X} : {});
+    assert.equal(success, 1);
+    assert.equal(p.notices.length, 1);
+  }
+});
+
+test('failed TorrServer add preserves failure arguments and creates no membership', () => {
+  const p = page({state: account()});
+  let received, receiver;
+  p.Lampa.Torserver.add({}, undefined, function (...args) { received = args; receiver = this; });
+  p.calls[0].fail('timeout', {code: 1});
+  assert.deepEqual(received, ['timeout', {code: 1}]);
+  assert.equal(receiver, p.calls[0]);
+  assert.equal(p.requests.length, 0);
+});
+
+test('guest adds merge freshly read storage across tabs and servers; hashes are idempotent', () => {
+  const items = {};
+  const a = page({items}), b = page({items});
+  a.Lampa.Torserver.add({}); b.Lampa.Torserver.add({});
+  a.calls[0].success({hash: X}); b.calls[0].success({hash: Y});
+  a.Lampa.Torserver.add({}); a.calls[1].success({hash: X});
+  assert.deepEqual(a.hashes(), [X, Y]);
+  b.changeURL('http://other');
+  b.Lampa.Torserver.add({}); b.calls[1].success({hash: Z});
+  a.Lampa.Torserver.remove(X);
+  assert.deepEqual(a.hashes(), [Y]);
+  assert.deepEqual(b.hashes(), [Z]);
+});
+
+test('guest storage changes refresh only a current guest My Torrents screen', () => {
+  const p = page({activity: {component: 'mytorrents'}});
+  p.flush();
+  p.storageEvent(); p.flush();
+  assert.equal(p.replacements.length, 2);
+  p.storageEvent('unrelated'); p.flush();
+  assert.equal(p.replacements.length, 2);
+  p.storageEvent(null); p.flush();
+  assert.equal(p.replacements.length, 3);
+  p.setState(account()); p.flush();
+  p.storageEvent(); p.flush();
+  assert.equal(p.replacements.length, 4);
+});
+
+test('account changes before add response or persistence completion suppress stale writes/callbacks', () => {
+  for (const beforeWrite of [true, false]) {
+    const p = page({state: account()});
+    let success = 0;
+    p.Lampa.Torserver.add({}, () => success++);
+    if (!beforeWrite) p.calls[0].success({hash: X});
+    p.setState({...guest, generation: 2});
+    if (beforeWrite) p.calls[0].success({hash: X});
+    else p.requests[0].success('');
+    assert.equal(success, 0);
+    assert.equal(p.items[key], undefined);
+    assert.equal(p.requests.length, beforeWrite ? 0 : 1);
+  }
+  const p = page();
+  p.Lampa.Torserver.add({});
+  p.setState(account('Bob', 2));
+  p.calls[0].success({hash: X});
+  assert.equal(p.items[key], undefined);
+  assert.equal(p.requests.length, 0);
+});
+
+test('login/logout retain guest entries without copying account memberships', () => {
+  const p = page();
+  p.seed([X]);
+  p.setState(account('Alice', 2));
+  p.Lampa.Torserver.add({}); p.calls[0].success({hash: Y}); p.requests[0].success('');
+  p.setState({...guest, generation: 3});
+  const result = p.list(); p.calls[1].success([{hash: X}, {hash: Y}]);
+  assert.deepEqual(result.success, [[[{hash: X}]]]);
+});
+
+test('account remove issues only DELETE; missing membership is successful', () => {
+  const p = page({state: account()});
+  let success = 0;
+  p.Lampa.Torserver.remove(' ' + X.toUpperCase() + ' ', () => success++);
+  assert.equal(p.calls.length, 0);
+  assert.equal(p.requests[0].config.type, 'DELETE');
+  assert.equal(p.requests[0].config.headers['X-Lampa-Csrf'], '1');
+  assert.ok(p.requests[0].config.url.endsWith('/' + X));
+  p.requests[0].success('');
+  assert.equal(success, 1);
+  p.Lampa.Torserver.remove(X);
+  p.requests[1].success('');
+  assert.equal(p.calls.length, 0, 'no-callback long-press never invokes original removal');
+});
+
+for (const faults of [{read: true}, {write: true}, {silentWrite: true}]) test('guest removal failure reconciles after optimistic disable: ' + JSON.stringify(faults), () => {
+  const p = page({activity: {component: 'mytorrents'}, faults});
+  p.seed([X]); p.flush();
+  let success = 0, fail = 0;
+  p.Lampa.Torserver.remove(X, () => success++, () => fail++);
+  assert.equal(success, 0); assert.equal(fail, 1);
+  assert.equal(p.calls.length, 0);
+  assert.equal(p.replacements.length, 1, 'refresh is deferred past disable()');
+  p.flush();
+  assert.equal(p.replacements.length, 2);
+  assert.ok(p.notices.length);
+});
+
+test('account removal timeout reloads only the originating activity, never navigates back', () => {
+  for (const left of [false, true]) {
+    const p = page({state: account(), activity: {component: 'mytorrents'}});
+    p.flush();
+    p.Lampa.Torserver.remove(X);
+    if (left) p.navigate({component: 'mytorrents', different: true});
+    p.requests[0].fail(0);
+    p.flush();
+    assert.equal(p.replacements.length, left ? 1 : 2);
+    assert.equal(p.calls.length, 0);
+  }
+});
+
+test('removal 401 rechecks identity; stale removal cannot affect the new screen', () => {
+  const p = page({state: account()});
+  let fail = 0;
+  p.Lampa.Torserver.remove(X, undefined, () => fail++);
+  p.requests[0].fail(401);
+  assert.equal(fail, 1);
+  assert.equal(p.window.svtlv_account_state.status, 'checking');
+  p.setState(account('Bob', 3));
+  p.Lampa.Torserver.remove(Y, undefined, () => fail++);
+  p.setState({...guest, generation: 4});
+  p.requests[1].fail(401);
+  assert.equal(fail, 1);
+  assert.equal(p.window.svtlv_account_state.status, 'guest');
+  assert.equal(p.items[key], undefined);
+});
+
+test('missing URL retains upstream add/playback path but never exposes list or physically removes', () => {
+  const p = page({settings: {torrserver_url: '', torrserver_url_two: 'http://legacy'}});
+  const result = p.list();
+  p.calls[0].success([{hash: X}]);
+  assert.equal(result.success.length, 0); assert.equal(result.fail.length, 1);
+  p.Lampa.Torserver.add({}); p.calls[1].success({hash: X});
+  p.Lampa.Torserver.hash({}); p.calls[2].success({hash: X});
+  p.Lampa.Torserver.remove(X);
+  assert.equal(p.requests.length, 0);
+  assert.equal(p.items[key], undefined);
+  assert.equal(p.calls.some(call => call.name === 'remove'), false);
+  assert.ok(p.notices.at(-1).includes('Configure'));
+});
+
+test('shared viewed operations are suppressed asynchronously for every identity; drop remains original', () => {
+  for (const state of [guest, account(), null]) {
+    const p = page({state});
+    let failed = 0;
+    p.Lampa.Torserver.viewed(X, () => assert.fail('shared viewed'), () => failed++);
+    p.Lampa.Torserver.viewedSet(X, 1, 10);
+    assert.equal(failed, 0); assert.equal(p.calls.length, 0);
+    p.flush(); assert.equal(failed, 1);
+    p.Lampa.Torserver.drop(X);
+    assert.equal(p.calls[0].name, 'drop');
+  }
+});
+
+test('invalid removal and missing callbacks cannot reach destructive upstream methods', () => {
+  for (const state of [guest, account()]) {
+    const p = page({state});
+    assert.doesNotThrow(() => p.Lampa.Torserver.remove('bad'));
+    assert.doesNotThrow(() => p.Lampa.Torserver.viewed(X));
+    p.flush();
+    assert.equal(p.calls.length, 0);
+    assert.equal(p.requests.length, 0);
+  }
+});
+
+test('synchronous API exceptions fail closed and unexpected mutation status never reports success', () => {
+  const p = page({state: account(), ajaxThrows: true});
+  const result = p.list();
+  assert.equal(result.fail.length, 1);
+  assert.equal(result.success.length, 0);
+  assert.doesNotThrow(() => p.Lampa.Torserver.remove(X));
+  const q = page({state: account()});
+  let success = 0;
+  q.Lampa.Torserver.remove(X, () => success++);
+  q.requests[0].success('wrong', 200);
+  assert.equal(success, 0);
+  assert.equal(q.notices.length, 1);
+});
+
+test('loader waits for ownership load or missing-file fallback and starts each bundle once', () => {
+  const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].map(match => match[1]).filter(Boolean);
+  for (const missing of [false, true]) for (const remote of [false, true]) {
+    const appended = [];
+    const window = {location: {href: remote ? 'file:///index.html' : 'https://lampa/'}};
+    const context = vm.createContext({window, location: window.location, console: {log() {}},
+      AndroidJS: remote ? {getLampaURL: () => 'https://remote/'} : undefined,
+      $: () => ({append() {}, removeClass() { assert.fail('network overlay'); }, text() {}}),
+      document: {createElement: () => ({}), getElementsByTagName: () => [{appendChild: script => appended.push(script)}]}});
+    for (const script of scripts) vm.runInContext(script, context);
+    assert.equal(appended.some(script => script.src.includes('app.min.js')), false);
+    const ownership = appended.find(script => script.src.includes('torrserver-ownership.js'));
+    ownership.readyState = 'loading';
+    ownership.onreadystatechange();
+    assert.equal(appended.some(script => script.src.includes('app.min.js')), false);
+    ownership.readyState = 'loaded';
+    if (missing) {
+      ownership.onerror(); appended.at(-1).onerror(); appended.at(-1).onerror();
+    } else {
+      ownership.onload(); ownership.onreadystatechange();
+    }
+    assert.equal(appended.filter(script => script.src.includes('app.min.js')).length, 1);
+    const main = appended.find(script => script.src.includes('app.min.js'));
+    assert.equal(main.src, remote ? 'https://remote/app.min.js?v=' + context.cache_version : 'app.min.js?v=' + context.cache_version);
+    if (remote) {
+      main.onerror(); appended.at(-1).onerror(); appended.at(-1).onerror();
+      const fallback = appended.at(-1);
+      assert.ok(fallback.src.includes('lampa-main/app.min.js'));
+      fallback.onerror(); appended.at(-1).onerror(); appended.at(-1).onerror();
+      assert.ok(appended.at(-1).src.startsWith('app.min.js'));
+    }
+  }
+});
+
+test('actual bundle publishes the public API before boot and calls wrapped methods via the object', () => {
+  const boot = bundle.slice(bundle.lastIndexOf('if (!window.fitst_load)'));
+  assert.ok(boot.indexOf('initClass();') < boot.indexOf('loadApp();'));
+  assert.ok(bundle.includes('window.Lampa = {'));
+  assert.ok(bundle.includes('Torserver.my(function (result)'));
+  assert.ok(bundle.includes('Torserver.add({'));
+  assert.ok(bundle.includes('Torserver.hash({'));
+  assert.ok(bundle.includes('Torserver.remove(data.hash);'));
+});

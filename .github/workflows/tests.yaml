@@ -74,6 +74,9 @@ jobs:
       - name: Test account state transitions
         run: node --test docs/tests/account-state.test.cjs
 
+      - name: Test TorrServer ownership
+        run: node --test docs/tests/torrserver-ownership.test.cjs
+
   compose:
     name: Compose config
     runs-on: ubuntu-latest

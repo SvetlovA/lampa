@@ -76,6 +76,9 @@
                     script.type = 'text/javascript'
 
                     script.onload = script.onreadystatechange = function(e) {
+                        // svtlv: a loading readyState must not start Lampa before the add-on executes.
+                        if (script.readyState && !/^(loaded|complete)$/.test(script.readyState)) return
+
                         console.log('Loader', 'Script loaded', e)
 
                         if (!!onload) onload()
@@ -126,50 +129,63 @@
             lampa_url = urlJoin(AndroidJS.getLampaURL(),'')
         }
 
-        if (lampa_url !== '') {
-            putScript(
-                urlJoin(lampa_url, 'lampainit.js?v=' + cache_version),
-                false,
-                function(){}
-            )
+        // svtlv: the seam starts the loader after the ownership hook is installed.
+        function startLampa() {
+            if (lampa_url !== '') {
+                putScript(
+                    urlJoin(lampa_url, 'lampainit.js?v=' + cache_version),
+                    false,
+                    function(){}
+                )
 
-            putScript(
-                urlJoin(lampa_url, 'app.min.js?v=' + cache_version),
-                function () {
-                    var css = urlJoin(lampa_url, 'css/app.css?v=' + cache_version)
+                putScript(
+                    urlJoin(lampa_url, 'app.min.js?v=' + cache_version),
+                    function () {
+                        var css = urlJoin(lampa_url, 'css/app.css?v=' + cache_version)
 
-                    $('head').append('<link rel="stylesheet" href="' + css + '">')
-                },
-                function () {
-                    putScript(
-                        urlJoin(lampa_url, 'lampa-main/app.min.js?v=' + cache_version),
-                        function () {
-                            var css = urlJoin(lampa_url, 'lampa-main/css/app.css?v=' + cache_version)
+                        $('head').append('<link rel="stylesheet" href="' + css + '">')
+                    },
+                    function () {
+                        putScript(
+                            urlJoin(lampa_url, 'lampa-main/app.min.js?v=' + cache_version),
+                            function () {
+                                var css = urlJoin(lampa_url, 'lampa-main/css/app.css?v=' + cache_version)
 
-                            $('head').append('<link rel="stylesheet" href="' + css + '">')
+                                $('head').append('<link rel="stylesheet" href="' + css + '">')
 
-                            putScript(
-                                urlJoin(lampa_url, 'lampainit.js?v=' + cache_version),
-                                false,
-                                function(){}
-                            )
-                        },
-                        loadLocalLampa
-                    )
-                }
-            )
-        }
-        else{
-            loadCurrentLampa()
+                                putScript(
+                                    urlJoin(lampa_url, 'lampainit.js?v=' + cache_version),
+                                    false,
+                                    function(){}
+                                )
+                            },
+                            loadLocalLampa
+                        )
+                    }
+                )
+            }
+            else{
+                loadCurrentLampa()
+            }
         }
     </script>
 
     <!-- svtlv:begin -->
     <script>
-        // Svtlv add-ons (svtlv/, design §10.2). The no-op onerror keeps a missing file from showing the .no-network overlay.
+        // Svtlv add-ons (svtlv/, design §10.2). Error callbacks keep missing files from showing the .no-network overlay.
         $('head').append('<link rel="stylesheet" href="svtlv/account.css?v=' + cache_version + '">')
 
         putScript('svtlv/account.js?v=' + cache_version, function () {}, function () {})
+
+        // Both callbacks resume boot, including a missing add-on. Guard old
+        // onreadystatechange engines against starting the bundle twice.
+        var svtlv_started = false
+        function svtlvStart() {
+            if (svtlv_started) return
+            svtlv_started = true
+            startLampa()
+        }
+        putScript('svtlv/torrserver-ownership.js?v=' + cache_version, svtlvStart, svtlvStart)
     </script>
     <!-- svtlv:end -->
 </body>
