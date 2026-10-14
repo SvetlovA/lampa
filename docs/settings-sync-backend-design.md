@@ -935,8 +935,11 @@ logout confirms guest mode. A previously confirmed guest remains a guest during
 a later refresh outage; a previously signed-in or unknown state cannot become
 a guest from an outage. An ownership `401` fails the current call, immediately
 marks state checking and triggers a session recheck. Calls capture identity,
-server and generation; stale responses are ignored, and account operations never
-switch into guest storage on a `401` or mode change. Session resolution refreshes
+server and generation; stale list and membership responses are ignored, and account
+operations never switch into guest storage on a `401` or mode change. Direct playback
+and its callbacks remain available during session checks and API outages; membership
+recording is skipped when identity was unresolved at invocation or changed before
+TorrServer answered. Session resolution refreshes
 an active My Torrents screen.
 
 Signed-in list lookup and the original TorrServer request start together, keeping

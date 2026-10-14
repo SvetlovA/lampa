@@ -403,7 +403,9 @@ and torrent membership need the database. The critical database check probes bot
   and a notification. An initial session outage never guesses guest identity; a guest already
   confirmed in this page lifetime remains a guest during a later refresh outage. A `401`
   fails the current call and rechecks the session. Add/playback failures cannot silently
-  switch account operations into guest writes. Both modes suppress shared `/viewed`
+  switch account operations into guest writes. Direct playback remains available while
+  identity is unresolved or the API is down; membership recording is skipped if identity
+  was unresolved at invocation or changed before TorrServer answered. Both modes suppress shared `/viewed`
   reads and writes; Lampa's local progress continues to work.
 - The marked one-link bundle patch migrates the previously effective primary/secondary URL
   once into `torrserver_url`, backing up both URLs and the selector in device-local

@@ -287,15 +287,20 @@
           ctx = capture();
           saved = name == 'add' || api.Storage.field('torrserver_savedb');
         } catch (err) { notify('save'); call(fail); return; }
-        if (!known(ctx)) { notify('save'); call(fail); return; }
+        if (name == 'add' && !known(ctx)) { notify('save'); call(fail); return; }
         function failed(args, receiver) {
-          if (current(ctx)) call(fail, args, receiver);
+          if (name == 'hash' || current(ctx)) call(fail, args, receiver);
         }
         try {
           return original[name].call(api.Torserver, object, function (json) {
             var args = arguments;
             var receiver = this;
-            if (!current(ctx)) return;
+            // Playback is direct and must survive session checks/outages. Only
+            // membership requires a resolved identity that is still current.
+            if (!known(ctx) || !current(ctx)) {
+              if (name == 'hash') call(success, args, receiver);
+              return;
+            }
             if (!ctx.server || !saved) { call(success, args, receiver); return; }
             var hash = json && canonical(json.hash);
             function recorded(ok, error) {
@@ -314,7 +319,7 @@
               try { guestWrite(ctx, hash, false); recorded(true); }
               catch (err) { recorded(false); }
             }
-            if (name == 'hash' && current(ctx)) call(success, args, receiver);
+            if (name == 'hash') call(success, args, receiver);
           }, function () { failed(arguments, this); });
         } catch (err) { notify('save'); failed([]); }
       };

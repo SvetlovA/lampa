@@ -165,13 +165,52 @@ for (const state of [null, {status: 'checking', generation: 1}, {status: 'unavai
   test('unresolved identity blocks lists and mutations: ' + JSON.stringify(state), () => {
     const p = page({state});
     assert.equal(p.list().fail.length, 1);
-    for (const method of ['add', 'hash', 'remove']) {
+    for (const method of ['add', 'remove']) {
       let failed = 0;
       p.Lampa.Torserver[method](method === 'remove' ? X : {}, undefined, () => failed++);
       assert.equal(failed, 1);
     }
     assert.equal(p.calls.length, 0);
     assert.equal(p.requests.length, 0);
+  });
+}
+
+for (const state of [null, {status: 'checking', generation: 1}, {status: 'unavailable', generation: 2}]) {
+  for (const saved of [false, true]) test('unresolved identity permits playback without membership: ' + JSON.stringify(state) + '/' + saved, () => {
+    const p = page({state, settings: {torrserver_savedb: saved}});
+    const object = {link: 'magnet:test'};
+    let response, receiver;
+    p.Lampa.Torserver.hash(object, function (...args) { response = args; receiver = this; });
+    assert.equal(p.calls.length, 1, 'playback reaches TorrServer directly');
+    assert.equal(p.calls[0].args[0], object);
+    assert.equal(p.calls[0].receiver, p.Lampa.Torserver);
+    // A resolved session must not assign an earlier unresolved playback to it.
+    p.setState(account('Bob', 3));
+    p.calls[0].success({hash: X}, 'success');
+    assert.deepEqual(response, [{hash: X}, 'success']);
+    assert.equal(receiver, p.calls[0]);
+    assert.equal(p.requests.length, 0);
+    assert.equal(p.items[key], undefined);
+    assert.equal(p.notices.length, 0);
+  });
+}
+
+for (const next of [{status: 'checking', generation: 2}, {status: 'unavailable', generation: 2}, guest, account('Bob', 2)]) {
+  test('session changes during playback preserve callbacks without recording membership: ' + next.status, () => {
+    for (const failed of [false, true]) {
+      const p = page({state: account(), settings: {torrserver_savedb: true}});
+      let success, fail, receiver;
+      p.Lampa.Torserver.hash({}, function (...args) { success = args; receiver = this; },
+        function (...args) { fail = args; receiver = this; });
+      p.setState(next);
+      if (failed) p.calls[0].fail('timeout', {code: 1});
+      else p.calls[0].success({hash: X});
+      assert.deepEqual(success, failed ? undefined : [{hash: X}]);
+      assert.deepEqual(fail, failed ? ['timeout', {code: 1}] : undefined);
+      assert.equal(receiver, p.calls[0]);
+      assert.equal(p.requests.length, 0);
+      assert.equal(p.items[key], undefined);
+    }
   });
 }
 

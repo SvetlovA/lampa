@@ -6,12 +6,14 @@ const path = require('node:path');
 const vm = require('node:vm');
 const {test} = require('node:test');
 const source = fs.readFileSync(path.join(__dirname, '../../svtlv/account.js'), 'utf8');
+const ownershipSource = fs.readFileSync(path.join(__dirname, '../../svtlv/torrserver-ownership.js'), 'utf8');
 const flag = 'svtlv_account_signed_in';
 const signedIn = id => ({authenticated: true, user: {id, name: id, email: id + '@example.test'}});
 const guest = {authenticated: false};
 
 function page(options = {}) {
   const requests = [];
+  const playback = [];
   const intervals = [];
   const timeouts = [];
   const events = [];
@@ -22,6 +24,10 @@ function page(options = {}) {
   const components = [];
   let headIcon;
   const storage = {
+    getItem(key) {
+      if (options.storageError) throw new Error('storage unavailable');
+      return items[key] ?? null;
+    },
     setItem(key, value) {
       if (options.storageError) throw new Error('storage unavailable');
       items[key] = value;
@@ -79,7 +85,10 @@ function page(options = {}) {
   };
   const Lampa = {
     Listener: listener,
-    Storage: {get: () => 'en', listener},
+    Storage: {get: name => name === 'torrserver_url' ? 'https://server:8090' : 'en',
+      field: () => true, listener},
+    Torserver: {hash(object, success, fail) { playback.push({object, success, fail}); }},
+    Activity: {active: () => null, all: () => []},
     SettingsApi: {addComponent: component => components.push(component)},
     Settings: {listener, update() {}},
     Template: {add() {}, string: () => '<svg></svg>'},
@@ -105,8 +114,10 @@ function page(options = {}) {
     setInterval: fn => { intervals.push(fn); return intervals.length; },
     clearTimeout() {}, clearInterval() {}});
   vm.runInContext(source, context);
+  if (options.ownership) vm.runInContext(ownershipSource, context);
   return {
-    window, requests, events, items, components, notices, selections, intervals, timeouts,
+    window, requests, events, items, components, notices, selections, intervals, timeouts, playback,
+    play(success, fail) { Lampa.Torserver.hash({link: 'magnet:test'}, success, fail); },
     state: () => ({...window.svtlv_account_state}),
     ready() { window.appready = true; listener.send('app', {type: 'ready'}); },
     installLampa() { window.Lampa = Lampa; timeouts.shift()(); },
@@ -167,6 +178,27 @@ for (const storage of [{}, {[flag]: '1'}]) {
     assert.equal(p.components.length, 1, 'successful retry activates the account UI');
   });
 }
+
+test('failed signed-in session refresh keeps direct playback available without recording membership', () => {
+  const p = page({ownership: true});
+  p.requests[0].respond(signedIn('Alice'));
+  p.heartbeat();
+  assert.equal(p.state().status, 'checking');
+  let duringRefresh = 0, duringOutage = 0;
+  p.play(() => duringRefresh++);
+  assert.equal(p.playback.length, 1);
+  p.requests[1].fail();
+  assert.equal(p.state().status, 'unavailable');
+  p.play(() => duringOutage++);
+  assert.equal(p.playback.length, 2);
+  p.playback[0].success({hash: 'a'.repeat(40)});
+  p.playback[1].success({hash: 'b'.repeat(40)});
+  assert.equal(duringRefresh, 1);
+  assert.equal(duringOutage, 1);
+  assert.equal(p.requests.length, 2, 'only session requests; no ownership writes');
+  assert.equal(p.items.svtlv_torrserver_guest_hashes, undefined);
+  assert.equal(p.notices.length, 0);
+});
 
 test('authenticated response publishes identity and flag; expiry immediately blocks it', () => {
   const p = page();
