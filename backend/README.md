@@ -1,14 +1,17 @@
 # lampa-api
 
-Go service for Lampa accounts and user data (Plans 1 and 2 of
+Go service for Lampa accounts, user data and TorrServer membership (Plans 1–3 of
 [`docs/settings-sync-backend-design.md`](../docs/settings-sync-backend-design.md)). It signs
 users in with the Svtlv Keycloak realm, keeps their session in a sealed cookie, stores one
 JSONB document per user in PostgreSQL, seals TorrServer, Jackett and Prowlarr credentials with
-AES-256-GCM, and exposes the Svtlv two-tier health contract.
+AES-256-GCM, records per-user torrent membership, and exposes the Svtlv two-tier health contract.
 
 The API is reached only through `lampa-web`'s same-origin `/api/v1/` proxy; its port is not
 published. No client calls the user-data routes yet (Plan 4); the `svtlv/account.js` add-on
 uses only the session and auth routes.
+The `svtlv/torrserver-ownership.js` add-on uses the membership routes while continuing to
+call TorrServer directly for adding, listing and playback. The API never contacts TorrServer
+and receives neither its URL nor its credentials through the membership routes.
 
 ## Layout
 
@@ -18,7 +21,7 @@ pkg/api/           routes, Authenticator seam, middleware (CSRF included), JSON 
 pkg/auth/          cookie sealing, session cookie, Keycloak client, auth handlers, Authenticator
 pkg/config/        layered appsettings files (embedded) with {ENV_VAR} placeholders
 pkg/health/        tiered checks, /health and /health/critical
-pkg/storage/       document validation, credential sealing, service, postgres store, migrate
+pkg/storage/       documents, credential sealing, torrent membership, postgres store, migrate
 pkg/storage/pgtest testcontainers postgres:18.6 helper for DB-backed tests
 migrations/        embedded goose SQL migrations (applied on startup)
 ```
@@ -91,6 +94,11 @@ sealed one. An upstream pull that adds a settings input therefore fails CI until
 classified as sealed or plain. The test
 skips when `app.min.js` is absent (a `backend/`-only checkout).
 
+`TestStorageScope_matchBundle` shares the bundle reader and checks every extracted storage
+key against [`svtlv/storage-scope.json`](../svtlv/storage-scope.json). An upstream pull that
+adds an unclassified key fails CI; missing or invalid scope data and stale rules also fail.
+Plan 4 exports only `user` and `user_connection` keys; unknown keys remain local.
+
 ## Build, test, lint
 
 On macOS and Linux, use the default `Makefile` from the repository root:
@@ -133,6 +141,13 @@ DB-backed tests start `postgres:18.6` through testcontainers and need a running 
 Without Docker they skip; with `LAMPA_API_REQUIRE_DOCKER=1` (set in CI) they fail instead, so
 they can never silently skip there. Dependencies are vendored: after changing them run
 `go mod tidy && go mod vendor`.
+
+Run the frontend runtime and documentation checks from the repository root:
+
+```sh
+node --test docs/tests/*.test.cjs backend/pkg/storage/testdata/torrserver-one-link.test.cjs
+npx --yes acorn@8.14.0 --ecma5 --silent svtlv/*.js
+```
 
 WSL `git` cannot resolve this worktree's Windows `.git` path, so `make build` in WSL reports
 `REV=latest`; CI and the Docker build are unaffected.
@@ -278,6 +293,9 @@ phones and browsers.
 | `GET /api/v1/user-data` | `200` `{schema_version, data, updated_at}` | `401`, `404 user_data_not_found`, `500 connections_unreadable`, `503 storage_unavailable` / `session_unavailable` |
 | `PUT /api/v1/user-data` `{schema_version, data}` | `200` stored document | `400 invalid_document` / `unsupported_schema_version` / `invalid_json`, `401`, `413 request_too_large`, `415 unsupported_media_type`, `503` |
 | `DELETE /api/v1/user-data` | `204`, idempotent | `401`, `503` |
+| `GET /api/v1/torrservers/{server_id}/hashes` | `200` `{"hashes":[...]}`; sorted, empty array when no claims exist | `400 invalid_server_id`, `401`, `503 storage_unavailable` / `session_unavailable` |
+| `PUT /api/v1/torrservers/{server_id}/hashes/{hash}` | `204`, idempotent claim, no body required | `400 invalid_server_id` / `invalid_hash`, `401`, `503` |
+| `DELETE /api/v1/torrservers/{server_id}/hashes/{hash}` | `204`, idempotent removal of only this user's claim | `400 invalid_server_id` / `invalid_hash`, `401`, `503` |
 
 Every POST, PUT and DELETE can also answer `403 csrf_rejected` (see [CSRF](#csrf)). `HEAD`
 never starts a login or slides a session.
@@ -298,6 +316,39 @@ runs under a 10 s deadline, so a stalled database answers `503 storage_unavailab
 The user ID comes only from the `Authenticator` (the session's Keycloak `sub`); no header,
 query or body can set it.
 
+Membership routes accept an opaque `server_id` of 1–64 ASCII letters, digits, underscores
+or hyphens. The add-on derives a 64-character lowercase SHA-256 ID from the sole
+`torrserver_url`, trimmed, lowercased, stripped of its HTTP(S) scheme and trailing slashes.
+The page's scheme does not affect the ID. Different URL aliases produce different IDs;
+changing the URL hides existing memberships and restoring it reveals them. The backend
+trims and lowercases a `hash`, then requires 40 or 64 hexadecimal characters.
+
+### Torrent membership storage and logging
+
+Migration `00002_create_lampa_torrserver_hashes.sql` creates:
+
+```sql
+create table lampa_torrserver_hashes (
+    user_id uuid not null,
+    server_id text not null check (server_id ~ '^[A-Za-z0-9_-]{1,64}$'),
+    hash text not null check (hash ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'),
+    created_at timestamptz not null default now(),
+    primary key (user_id, server_id, hash)
+);
+```
+
+This table is independent of `lampa_user_data`: deleting a user-data document does not
+delete memberships. Claims preserve the original row on conflict; releases match the
+authenticated user, server and hash. There is no row cap or automatic pruning. Removing
+even the last membership never deletes the torrent from TorrServer. Operator deletion hides
+retained memberships while the torrent is absent; re-adding the same hash makes them visible
+again. A membership explicitly removed through Lampa stays hidden until claimed again.
+
+Access and panic logs replace every path beginning `/api/v1/torrservers/` with
+`/api/v1/torrservers/…`, including malformed and failed requests. Neither server IDs nor
+torrent hashes appear in those request paths. Bodies, headers, cookies and query strings
+are never included in access logs.
+
 ## Health
 
 Served on `:8081`, container-internal (never published, Svtlv convention) and never proxied
@@ -312,7 +363,8 @@ Any critical failure → `Unhealthy` (503); an advisory failure → `Degraded` (
 only on a `200` discovery document whose `issuer` equals `Auth.Issuer` (redirects not followed,
 64 KiB cap), so a wrong issuer shows as `Degraded` before any login fails. Sessions, `/session`
 and local logout work with either dependency down; browser SSO logout needs Keycloak. User data
-needs the database.
+and torrent membership need the database. The critical database check probes both
+`lampa_user_data` and `lampa_torrserver_hashes`, so a missing membership table fails health.
 
 ## Operational caveats
 
@@ -324,13 +376,45 @@ needs the database.
   first, then update the secret and redeploy.
 - Postgres 18+ images keep data under `/var/lib/postgresql/<major>/...`, so the volume mounts
   `/var/lib/postgresql`, not `.../data`.
+- **My Torrents provides application view separation, not TorrServer access control.**
+  Anyone with its URL or credentials can still list or delete all torrents directly. A
+  missing or disabled ownership add-on leaves the original shared list and deletion UI
+  available; verify that the file loads on supported clients after deployment.
+- Guests use a versioned, device-local hash map in
+  `localStorage['svtlv_torrserver_guest_hashes']`, partitioned by server ID. Browser profiles
+  have independent lists; people sharing a profile share its list. Clearing browser data
+  loses memberships without deleting torrents. Login and logout never transfer hashes
+  between account and guest storage. Guest removal changes only that map; account removal
+  changes only the authenticated user's database row. Neither sends `action: rem`.
+- Lists intersect membership with the live TorrServer list before rendering. An unresolved
+  session, failed account lookup or corrupt/unavailable guest storage shows an empty state
+  and a notification. An initial session outage never guesses guest identity; a guest already
+  confirmed in this page lifetime remains a guest during a later refresh outage. A `401`
+  fails the current call and rechecks the session. Add/playback failures cannot silently
+  switch account operations into guest writes. Both modes suppress shared `/viewed`
+  reads and writes; Lampa's local progress continues to work.
+- The marked one-link bundle patch migrates the previously effective primary/secondary URL
+  once into `torrserver_url`, backing up both URLs and the selector in device-local
+  `svtlv_torrserver_legacy_links`. The selected field wins, with the other used only if the
+  selected field was empty. Both empty means unconfigured. Persistence failures notify the
+  user. The second input and selector are removed, their old keys are inert, and later edits
+  or clearing the sole URL never restore a legacy link. Reapply the marked patch and its
+  version/build stamp after upstream bundle updates. Plan 4 will sync the sole URL,
+  authentication toggle and credentials: upload device values only if the server has none;
+  otherwise server values win until explicitly edited. Until then, different URLs select
+  different membership sets.
+- On Android with the external torrent client (`internal_torrclient` disabled), playback
+  bypasses `Lampa.Torserver.hash` and cannot record membership. Only explicit Add to My
+  Torrents records it. With the internal client, playback records membership only when
+  `torrserver_savedb` was enabled; transient playback does not claim a saved entry.
 
 ## CI and deployment
 
 `.github/workflows/tests.yaml` runs lint, `make test` and `make race` (with
 `LAMPA_API_REQUIRE_DOCKER=1`), a compose `config` check against `devops/.env.example` and an
 ES5 syntax parse of the `svtlv/*.js` add-ons (pinned `acorn@8.14.0 --ecma5`) on every PR and on
-pushes to `svtlvtv`.
+pushes to `svtlvtv`. The frontend job also runs account-state and ownership runtime tests,
+including documentation checks against the routes, migration SQL and scope inventory.
 
 `.github/workflows/deploy-docker.yaml` (`workflow_dispatch` only, default branch only) has one
 input, `environment` (Development / Test / Production, default Production), written into the

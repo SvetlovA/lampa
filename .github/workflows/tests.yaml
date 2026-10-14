@@ -75,7 +75,7 @@ jobs:
         run: node --test docs/tests/account-state.test.cjs
 
       - name: Test TorrServer ownership
-        run: node --test docs/tests/torrserver-ownership.test.cjs
+        run: node --test docs/tests/torrserver-ownership.test.cjs docs/tests/ownership-docs.test.cjs
 
   compose:
     name: Compose config

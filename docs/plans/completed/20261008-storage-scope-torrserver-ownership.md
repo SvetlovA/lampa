@@ -472,14 +472,22 @@ Task 9 validation and acceptance audit notes:
 - All 135 frontend runtime checks pass (`node --test docs/tests/account-state.test.cjs docs/tests/torrserver-ownership.test.cjs backend/pkg/storage/testdata/torrserver-one-link.test.cjs`). `LAMPA_API_REQUIRE_DOCKER=1 make test`, `LAMPA_API_REQUIRE_DOCKER=1 make race`, `make lint`, the pinned ES5 gate, Compose configuration validation and `git diff --check` pass. Backend checks ran on macOS with Go 1.27.2, cgo and Docker; WSL/CI's Go 1.26 execution and live browser/TV checks remain external verification.
 
 ### Task 10: [Final] Update documentation
-- [ ] `backend/README.md`: ownership routes in "API", the new table, the access-log redaction, and in "Operational caveats" the view-separation caveat, device-local guest membership, the one-link migration and the Android external-client limitation
-- [ ] `docs/settings-sync-backend-design.md`:
+- [x] `backend/README.md`: ownership routes in "API", the new table, the access-log redaction, and in "Operational caveats" the view-separation caveat, device-local guest membership, the one-link migration and the Android external-client limitation
+- [x] `docs/settings-sync-backend-design.md`:
   - §4 (new table) and §8 (routes);
   - the §10.3 table aligned with `storage-scope.json` (sole `torrserver_url` and credentials → user connection; legacy link keys and backup → device-only; the Plan 4 rule from decision 6);
   - §10.4 and §15 for decisions 2, 4, 5 and 9, guest device-local membership, session readiness, and the Android limitation;
   - "Deviations recorded while implementing Plan 3" under §14; record the one-link core change and the revised guest policy, while membership-only removal agrees with the original design.
-- [ ] `CLAUDE.md`: mention the targeted one-link core patch, `svtlv/torrserver-ownership.js` and `storage-scope.json` in the Svtlv add-ons section, and `TestStorageScope_matchBundle` next to `TestSensitiveSettings_matchUI` (an upstream pull that adds a storage key fails CI until it is classified)
-- [ ] move this plan to `docs/plans/completed/`
+- [x] `CLAUDE.md`: mention the targeted one-link core patch, `svtlv/torrserver-ownership.js` and `storage-scope.json` in the Svtlv add-ons section, and `TestStorageScope_matchBundle` next to `TestSensitiveSettings_matchUI` (an upstream pull that adds a storage key fails CI until it is classified)
+- [x] move this plan to `docs/plans/completed/`
+
+Task 10 documentation and validation notes:
+- Updated backend API responses/errors, exact membership table DDL, independent document/membership lifecycle, database health probing and request-path redaction. Operational caveats cover view separation, missing-file behavior, guest storage, session readiness, one-link migration, connection sync precedence and Android external-client playback.
+- Aligned design sections 4, 8, 10.3, 10.4, 14 and 15 with the implementation and six-scope JSON inventory. Removed contradictory original guest/connection/core-file assumptions elsewhere, recorded Plan 3 deviations, and kept Plan 4 document logout policy separate from the already settled guest torrent policy.
+- Updated CLAUDE.md with the one-link core exception, loader ordering, ownership add-on, scope allowlist and both bundle drift guards. No application or backend runtime code changed.
+- Added six Node documentation checks comparing both API tables with registered routes, both SQL examples with migration 00002, and scope examples/complete portable allowlists with storage-scope.json. Negative cases detect stale routes, weakened ownership keys, legacy connection export and missing portable fields. The frontend CI ownership command includes these checks.
+- All 141 frontend runtime/documentation checks pass. LAMPA_API_REQUIRE_DOCKER=1 make test, LAMPA_API_REQUIRE_DOCKER=1 make race, make lint, the pinned ES5 gate, Compose configuration validation and git diff --check pass. Backend validation ran natively on macOS with Go 1.27.2, cgo and Docker; WSL execution is unavailable on this host. Coverage is unchanged: storage 95.2%, API 97.5%, overall 94.2% excluding mocks.
+- Archived this completed plan under docs/plans/completed/. Deployment and live browser/TV/real-TorrServer verification remain informational Post-Completion work, outside this task iteration.
 
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*
