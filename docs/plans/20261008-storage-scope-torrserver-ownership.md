@@ -353,9 +353,14 @@ Task 4 validation and implementation notes:
 - Modify: `backend/cmd/lampa-api/main.go`
 - Modify: `backend/cmd/lampa-api/main_test.go`
 
-- [ ] construct `storage.NewTorrents(store, logger)` and pass it through `newAPI` to `api.NewServer`
-- [ ] extend the wiring test to hit the new route through the composed handler (401 anonymous)
-- [ ] run `make test` - must pass before task 6
+- [x] construct `storage.NewTorrents(store, logger)` and pass it through `newAPI` to `api.NewServer`
+- [x] extend the wiring test to hit the new route through the composed handler (401 anonymous)
+- [x] run `make test` - must pass before task 6
+
+Task 5 validation and implementation notes:
+- Verified the production wiring added in Task 4: `start` constructs `storage.NewTorrents` from the PostgreSQL store and logger, and `newAPI` forwards it to `api.NewServer`. Updated the constructor comment to cover both services.
+- Extended the database-backed startup test to require a JSON 401 from the ownership list route. Added composed-handler tests for anonymous rejection without service/Keycloak calls, authenticated forwarding of the session user and server id to the supplied Torrents service, and a store outage returning JSON 503 without partial hashes.
+- Targeted wiring tests with race detection, `LAMPA_API_REQUIRE_DOCKER=1 make test`, `LAMPA_API_REQUIRE_DOCKER=1 make race`, `make lint`, and `git diff --check` pass. Validation ran natively on macOS with cgo and Docker because WSL is unavailable on this host. Overall coverage remains 94.1%; `pkg/storage` remains 95.2%, and `pkg/api` remains 97.1%.
 
 ### Task 6: Publish resolved account and guest state from account.js
 

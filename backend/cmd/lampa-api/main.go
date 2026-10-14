@@ -127,7 +127,7 @@ func start(ctx context.Context, cfg config.Config, logger *log.Logger, listen li
 	})
 }
 
-// newAPI builds the api server with keycloak sign-in and session authentication on top of svc.
+// newAPI builds the api server with keycloak sign-in and session authentication for user data and torrents.
 // nothing here contacts keycloak: discovery runs on first use, so the api starts while keycloak
 // is down, and sessions never touch the database.
 func newAPI(cfg config.Config, svc api.UserData, torrents api.Torrents, logger *log.Logger) (*api.Server, error) {
