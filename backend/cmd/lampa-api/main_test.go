@@ -552,7 +552,7 @@ func TestNewAPI_sessionRevalidation(t *testing.T) {
 		},
 	}
 	var out bytes.Buffer
-	srv, err := newAPI(cfg, svc, log.New(&out, "", 0))
+	srv, err := newAPI(cfg, svc, &apimocks.TorrentsMock{}, log.New(&out, "", 0))
 	require.NoError(t, err)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -610,7 +610,7 @@ func TestNewAPI_databaseDown(t *testing.T) {
 		},
 	}
 	var out bytes.Buffer
-	srv, err := newAPI(cfg, svc, log.New(&out, "", 0))
+	srv, err := newAPI(cfg, svc, &apimocks.TorrentsMock{}, log.New(&out, "", 0))
 	require.NoError(t, err)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -635,7 +635,7 @@ func TestNewAPI_loginWiring(t *testing.T) {
 			kc := newFakeKeycloak(t)
 			cfg := testConfig("")
 			cfg.Auth.Issuer = kc.issuer()
-			srv, err := newAPI(cfg, &apimocks.UserDataMock{}, log.New(io.Discard, "", 0))
+			srv, err := newAPI(cfg, &apimocks.UserDataMock{}, &apimocks.TorrentsMock{}, log.New(io.Discard, "", 0))
 			require.NoError(t, err)
 			ts := httptest.NewServer(srv.Handler())
 			defer ts.Close()
@@ -667,7 +667,7 @@ func TestNewAPI_loginWiring(t *testing.T) {
 func TestNewAPI_invalidConfig(t *testing.T) {
 	cfg := testConfig("")
 	cfg.MaxBodyBytes = 0
-	_, err := newAPI(cfg, &apimocks.UserDataMock{}, log.New(io.Discard, "", 0))
+	_, err := newAPI(cfg, &apimocks.UserDataMock{}, &apimocks.TorrentsMock{}, log.New(io.Discard, "", 0))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "create api server")
 }

@@ -107,7 +107,11 @@ func start(ctx context.Context, cfg config.Config, logger *log.Logger, listen li
 	if err != nil {
 		return fmt.Errorf("create service: %w", err)
 	}
-	apiSrv, err := newAPI(cfg, svc, logger)
+	torrents, err := storage.NewTorrents(store, logger)
+	if err != nil {
+		return fmt.Errorf("create torrents service: %w", err)
+	}
+	apiSrv, err := newAPI(cfg, svc, torrents, logger)
 	if err != nil {
 		return err
 	}
@@ -126,7 +130,7 @@ func start(ctx context.Context, cfg config.Config, logger *log.Logger, listen li
 // newAPI builds the api server with keycloak sign-in and session authentication on top of svc.
 // nothing here contacts keycloak: discovery runs on first use, so the api starts while keycloak
 // is down, and sessions never touch the database.
-func newAPI(cfg config.Config, svc api.UserData, logger *log.Logger) (*api.Server, error) {
+func newAPI(cfg config.Config, svc api.UserData, torrents api.Torrents, logger *log.Logger) (*api.Server, error) {
 	sealer, err := auth.NewCookieSealer(cfg.DataKey)
 	if err != nil {
 		return nil, fmt.Errorf("create cookie sealer: %w", err)
@@ -138,7 +142,7 @@ func newAPI(cfg config.Config, svc api.UserData, logger *log.Logger) (*api.Serve
 		ClientSecret: cfg.Auth.ClientSecret,
 	})
 	apiCfg := api.ServerConfig{Addr: cfg.Listen, MaxBodyBytes: cfg.MaxBodyBytes}
-	srv, err := api.NewServer(apiCfg, svc, auth.NewSessionAuthenticator(cookies, keycloak, logger),
+	srv, err := api.NewServer(apiCfg, svc, torrents, auth.NewSessionAuthenticator(cookies, keycloak, logger),
 		auth.NewHandlers(cookies, keycloak, logger), logger)
 	if err != nil {
 		return nil, fmt.Errorf("create api server: %w", err)

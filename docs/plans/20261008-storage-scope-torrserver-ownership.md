@@ -329,13 +329,23 @@ Task 3 validation and implementation notes:
 - Modify: `backend/pkg/api/server.go`
 - Modify: `backend/pkg/api/server_test.go`
 - Modify: `backend/pkg/api/identity_test.go`
+- Modify: `backend/pkg/api/identity.go` and `backend/pkg/api/userdata.go` (error-log path redaction)
+- Modify: `backend/cmd/lampa-api/main.go` and `backend/cmd/lampa-api/main_test.go` (required constructor compatibility)
 - Modify: `backend/pkg/api/flow_test.go`
 
-- [ ] add the `Torrents` interface with a `go:generate` moq line, the new required `NewServer` dependency (nil → error), and the GET/PUT/DELETE routes with `{server_id}` / `{hash}` path values and JSON 405/HEAD fallbacks with a per-route `Allow`
-- [ ] answer through the existing `writeServiceError` (validation → 400 with its code, `ErrUnavailable` → 503, unexpected → logged 500), and redact `/api/v1/torrservers/` paths in `accessLog`
-- [ ] write handler tests: the 200 list shape (`{"hashes":[]}` when empty), 204 PUT/DELETE, the user id taken only from the session, error mappings
-- [ ] write middleware tests: 401 anonymous, CSRF required on PUT/DELETE, 405 + the right `Allow`, HEAD → 405, an access log line without the hash; update `newTestServer*` helpers, the `NewServer` nil-dependency tests and the flow test
-- [ ] run `make test`, `make race`, `make lint` - must pass before task 5
+- [x] add the `Torrents` interface with a `go:generate` moq line, the new required `NewServer` dependency (nil → error), and the GET/PUT/DELETE routes with `{server_id}` / `{hash}` path values and JSON 405/HEAD fallbacks with a per-route `Allow`
+- [x] answer through the existing `writeServiceError` (validation → 400 with its code, `ErrUnavailable` → 503, unexpected → logged 500), and redact `/api/v1/torrservers/` paths in `accessLog`
+- [x] write handler tests: the 200 list shape (`{"hashes":[]}` when empty), 204 PUT/DELETE, the user id taken only from the session, error mappings
+- [x] write middleware tests: 401 anonymous, CSRF required on PUT/DELETE, 405 + the right `Allow`, HEAD → 405, an access log line without the hash; update `newTestServer*` helpers, the `NewServer` nil-dependency tests and the flow test
+- [x] run `make test`, `make race`, `make lint` - must pass before task 5
+
+Task 4 validation and implementation notes:
+- The required `NewServer` dependency breaks its production caller unless it is adapted in the same commit. Task 4 therefore includes the minimal `NewTorrents` construction, `newAPI` argument forwarding and existing caller-test updates. Task 5 retains verification of this wiring and its new composed-handler route test.
+- Request-path redaction also applies to authentication, unexpected-service-error and panic logs, preventing those paths from exposing server ids or hashes.
+
+- Generated the `api.Torrents` moq mock and added handler/middleware tests for empty and populated lists, session-only user ids, path arguments, 204 mutations, wrapped error mappings, deadlines, authentication failures, CSRF, per-route `Allow`, HEAD and log privacy. A real-service flow test covers v1/v2 canonicalization, sorted results, idempotent claims/releases, user/server isolation, independence from user-data deletion and fail-closed store outages.
+- `LAMPA_API_REQUIRE_DOCKER=1 make test`, `LAMPA_API_REQUIRE_DOCKER=1 make race`, `make lint` and `git diff --check` pass. Validation ran natively on macOS with cgo and Docker because WSL is unavailable on this host. Lint found two test-only issues (cookie attributes and assertion style), both corrected before the final race/lint checks.
+- All three new handlers and the path-redaction helper have 100% statement coverage. Overall backend coverage is 94.1%; `pkg/api` increases to 97.1%, and `pkg/storage` remains 95.2%.
 
 ### Task 5: Wire the Torrents service in main
 
