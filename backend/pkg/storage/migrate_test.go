@@ -4,14 +4,20 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/pressly/goose/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/SvetlovA/lampa/backend/migrations"
 	"github.com/SvetlovA/lampa/backend/pkg/storage"
 	"github.com/SvetlovA/lampa/backend/pkg/storage/pgtest"
 )
@@ -40,10 +46,10 @@ func emptyDB(t *testing.T) *pgxpool.Pool {
 	return p
 }
 
-func tableExists(t *testing.T, p *pgxpool.Pool) bool {
+func tableExists(t *testing.T, p *pgxpool.Pool, name string) bool {
 	t.Helper()
 	var exists bool
-	err := p.QueryRow(t.Context(), `select exists (select 1 from pg_tables where tablename = 'lampa_user_data')`).Scan(&exists)
+	err := p.QueryRow(t.Context(), `select exists (select 1 from pg_tables where schemaname = 'public' and tablename = $1)`, name).Scan(&exists)
 	require.NoError(t, err)
 	return exists
 }
@@ -55,13 +61,97 @@ func TestMigrate_nilPool(t *testing.T) {
 func TestMigrate(t *testing.T) {
 	t.Parallel()
 	p := emptyDB(t)
-	require.False(t, tableExists(t, p))
+	require.False(t, tableExists(t, p, "lampa_user_data"))
+	require.False(t, tableExists(t, p, "lampa_torrserver_hashes"))
 
 	require.NoError(t, storage.Migrate(t.Context(), p))
-	assert.True(t, tableExists(t, p))
+	assert.True(t, tableExists(t, p, "lampa_user_data"))
+	require.True(t, tableExists(t, p, "lampa_torrserver_hashes"))
+
+	userID, hash := newUserID(t), strings.Repeat("a", 40)
+	var createdAt time.Time
+	err := p.QueryRow(t.Context(), `insert into lampa_torrserver_hashes (user_id, server_id, hash)
+		values ($1, 'server', $2) returning created_at`, userID, hash).Scan(&createdAt)
+	require.NoError(t, err, "ownership does not require a user-data document")
+	assert.False(t, createdAt.IsZero(), "created_at defaults to now")
 
 	require.NoError(t, storage.Migrate(t.Context(), p), "migrate is idempotent")
-	assert.True(t, tableExists(t, p))
+	assert.True(t, tableExists(t, p, "lampa_user_data"))
+	assert.True(t, tableExists(t, p, "lampa_torrserver_hashes"))
+	var retainedCreatedAt time.Time
+	err = p.QueryRow(t.Context(), `select created_at from lampa_torrserver_hashes
+		where user_id = $1 and server_id = 'server' and hash = $2`, userID, hash).Scan(&retainedCreatedAt)
+	require.NoError(t, err)
+	assert.True(t, createdAt.Equal(retainedCreatedAt), "a second migration preserves ownership rows")
+}
+
+func TestMigrate_torrserverConstraints(t *testing.T) {
+	t.Parallel()
+	p := emptyDB(t)
+	require.NoError(t, storage.Migrate(t.Context(), p))
+
+	tests := []struct {
+		name     string
+		serverID string
+		hash     string
+		valid    bool
+	}{
+		{name: "v1 hash", serverID: "123", hash: strings.Repeat("a", 40), valid: true},
+		{name: "v2 hash", serverID: "Az09_-", hash: strings.Repeat("0123456789abcdef", 4), valid: true},
+		{name: "one character server", serverID: "a", hash: strings.Repeat("b", 40), valid: true},
+		{name: "maximum server length", serverID: strings.Repeat("a", 64), hash: strings.Repeat("c", 40), valid: true},
+		{name: "empty server", hash: strings.Repeat("a", 40)},
+		{name: "server too long", serverID: strings.Repeat("a", 65), hash: strings.Repeat("a", 40)},
+		{name: "server URL", serverID: "http://server", hash: strings.Repeat("a", 40)},
+		{name: "server whitespace", serverID: " server ", hash: strings.Repeat("a", 40)},
+		{name: "server newline", serverID: "server\n", hash: strings.Repeat("a", 40)},
+		{name: "empty hash", serverID: "server"},
+		{name: "short v1 hash", serverID: "server", hash: strings.Repeat("a", 39)},
+		{name: "long v1 hash", serverID: "server", hash: strings.Repeat("a", 41)},
+		{name: "short v2 hash", serverID: "server", hash: strings.Repeat("a", 63)},
+		{name: "long v2 hash", serverID: "server", hash: strings.Repeat("a", 65)},
+		{name: "uppercase hash", serverID: "server", hash: strings.Repeat("A", 40)},
+		{name: "nonhex hash", serverID: "server", hash: strings.Repeat("g", 40)},
+		{name: "hash newline", serverID: "server", hash: strings.Repeat("a", 40) + "\n"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			userID := newUserID(t)
+			_, err := p.Exec(t.Context(), `insert into lampa_torrserver_hashes (user_id, server_id, hash)
+				values ($1, $2, $3)`, userID, tc.serverID, tc.hash)
+			if !tc.valid {
+				var pgErr *pgconn.PgError
+				require.ErrorAs(t, err, &pgErr)
+				assert.Equal(t, "23514", pgErr.Code, "check constraint violation")
+				return
+			}
+			require.NoError(t, err)
+			_, err = p.Exec(t.Context(), `insert into lampa_torrserver_hashes (user_id, server_id, hash)
+				values ($1, $2, $3)`, userID, tc.serverID, tc.hash)
+			var pgErr *pgconn.PgError
+			require.ErrorAs(t, err, &pgErr)
+			assert.Equal(t, "23505", pgErr.Code, "duplicate membership violates the primary key")
+		})
+	}
+}
+
+func TestMigrate_torrserverDown(t *testing.T) {
+	t.Parallel()
+	p := emptyDB(t)
+	require.NoError(t, storage.Migrate(t.Context(), p))
+
+	db := stdlib.OpenDBFromPool(p)
+	defer db.Close()
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, migrations.FS)
+	require.NoError(t, err)
+	_, err = provider.Down(t.Context())
+	require.NoError(t, err)
+	assert.False(t, tableExists(t, p, "lampa_torrserver_hashes"))
+	assert.True(t, tableExists(t, p, "lampa_user_data"), "rollback preserves the existing document table")
+
+	require.NoError(t, storage.Migrate(t.Context(), p), "ownership migration can be reapplied after rollback")
+	assert.True(t, tableExists(t, p, "lampa_torrserver_hashes"))
 }
 
 func TestMigrate_concurrent(t *testing.T) {
@@ -79,7 +169,8 @@ func TestMigrate_concurrent(t *testing.T) {
 	for i, err := range errs {
 		require.NoError(t, err, "caller %d", i)
 	}
-	assert.True(t, tableExists(t, p))
+	assert.True(t, tableExists(t, p, "lampa_user_data"))
+	assert.True(t, tableExists(t, p, "lampa_torrserver_hashes"))
 }
 
 func TestMigrate_canceledContext(t *testing.T) {
@@ -88,5 +179,6 @@ func TestMigrate_canceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	require.Error(t, storage.Migrate(ctx, p))
-	assert.False(t, tableExists(t, p))
+	assert.False(t, tableExists(t, p, "lampa_user_data"))
+	assert.False(t, tableExists(t, p, "lampa_torrserver_hashes"))
 }

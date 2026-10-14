@@ -269,10 +269,15 @@ Task 0 validation and implementation notes:
 - Modify: `backend/migrations/migrations_test.go`
 - Modify: `backend/pkg/storage/migrate_test.go`
 
-- [ ] add the goose Up/Down migration with the table, primary key and check constraints from Technical Details
-- [ ] update `TestFS`'s expected file list in `migrations_test.go`
-- [ ] in `migrate_test.go` (pgtest): `Migrate` creates `lampa_torrserver_hashes`, a second run is a no-op, and the check constraints reject a bad `hash` and a bad `server_id`
-- [ ] run `make test` - must pass before task 2
+- [x] add the goose Up/Down migration with the table, primary key and check constraints from Technical Details
+- [x] update `TestFS`'s expected file list in `migrations_test.go`
+- [x] in `migrate_test.go` (pgtest): `Migrate` creates `lampa_torrserver_hashes`, a second run is a no-op, and the check constraints reject a bad `hash` and a bad `server_id`
+- [x] run `make test` - must pass before task 2
+
+Task 1 validation and implementation notes:
+- Added the schema exactly as specified, with no foreign key to the user-data table. Tests verify ownership without a user-data document, the default creation timestamp, and preservation of existing rows on a second migration run.
+- PostgreSQL tests cover 17 valid/invalid server-id and v1/v2 hash cases, duplicate membership rejection, concurrent/canceled migrations, and goose rollback/reapplication while preserving the existing user-data table.
+- `LAMPA_API_REQUIRE_DOCKER=1 go test ./migrations ./pkg/storage -run 'TestFS|TestMigrate' -v`, `LAMPA_API_REQUIRE_DOCKER=1 make test` (including race detection), `make lint`, and `git diff --check` pass. Validation ran natively on macOS with cgo and Docker because WSL is unavailable on this host. Coverage remains 93.8% overall (`pkg/storage`: 94.1%, `pkg/api`: 96.7%).
 
 ### Task 2: Add the ownership store to PgStore
 
