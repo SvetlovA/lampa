@@ -429,12 +429,20 @@ Task 7 validation and implementation notes:
 - Modify: `backend/pkg/storage/crypto_test.go`
 - Create: `svtlv/storage-scope.json`
 
-- [ ] factor the bundle read into `readBundle(t)`, shared with `TestSensitiveSettings_matchUI`
-- [ ] write the extraction and precedence helpers with table-driven tests (each pattern: single and double quotes, `localStorage`, Params `select`/`trigger`, `data-name`, a concatenated fragment; exact beats prefix, longest prefix wins, a duplicate is rejected)
-- [ ] add `TestStorageScope_matchBundle` with the rules from Technical Details, and run it against an empty scope file: its failure output is the inventory
-- [ ] classify every key by meaning at its read/write sites (§10.3) until the test passes; record non-obvious choices in `notes` (`language`/`tmdb_lang`, `plugins*`, `menu_sort`/`menu_hide`/`start_page`, `torrserver_savedb`, `file_view_*` CUB profile suffix, keys built from variables)
-- [ ] audit `Storage.sync` and the CUB account write paths, and note in `notes` which `user` keys CUB also syncs (for example `online_last_balanser`) so Plan 4 can avoid overwriting them
-- [ ] run `make test` and `make lint` - must pass before task 9
+- [x] factor the bundle read into `readBundle(t)`, shared with `TestSensitiveSettings_matchUI`
+- [x] write the extraction and precedence helpers with table-driven tests (each pattern: single and double quotes, `localStorage`, Params `select`/`trigger`, `data-name`, a concatenated fragment; exact beats prefix, longest prefix wins, a duplicate is rejected)
+- [x] add `TestStorageScope_matchBundle` with the rules from Technical Details, and run it against an empty scope file: its failure output is the inventory
+- [x] classify every key by meaning at its read/write sites (§10.3) until the test passes; record non-obvious choices in `notes` (`language`/`tmdb_lang`, `plugins*`, `menu_sort`/`menu_hide`/`start_page`, `torrserver_savedb`, `file_view_*` CUB profile suffix, keys built from variables)
+- [x] audit `Storage.sync` and the CUB account write paths, and note in `notes` which `user` keys CUB also syncs (for example `online_last_balanser`) so Plan 4 can avoid overwriting them
+- [x] run `make test` and `make lint` - must pass before task 9
+
+Task 8 validation and implementation notes:
+- Shared `readBundle(t)` across all three bundle guards. The storage guard skips only a backend-only checkout without `app.min.js`; a missing/invalid classification file fails. Version, scope arrays, unknown fields, entry syntax, duplicate rules and trailing JSON are validated.
+- Ran the new guard against an empty six-scope file first: it reported 215 unclassified keys/fragments. The completed inventory has 215 exact/prefix entries: 13 user rules, four user connection fields, 106 device rules, 32 local connection rules, 16 external-service rules and 44 cache rules. Conservative settings-button and non-storage concatenation matches remain excluded from export and are explained in `notes`.
+- Extraction tests cover each Storage method, local/session storage, bare and qualified Params registrations, bare CUB sync registrations, both quote forms, escaped/unescaped templates, whitespace, punctuated names, concatenated fragments and deduplication. Matching tests cover exact/longest-prefix precedence, real duplicate rejection, stale entries/prefixes and sensitive-key restrictions. Policy checks keep plugins, player/menu/startup settings, legacy links, CUB state/cursors and unknown add-on keys outside the export allowlist.
+- Audited variable-built progress, CUB trackers, content rows, worker update timestamps and the migration journal. Explicit literal guards cover bases not reached through the automatic patterns. `file_view_*` requires active-CUB-profile mapping in Plan 4; arbitrary plugin, console and remote-configuration keys stay local unless explicitly classified.
+- Audited CUB's six Storage.sync registrations, bookmark and timeline writers, person subscriptions, reactions and account/plugin state. Notes identify overlapping user-data writers and CUB's manual whole-localStorage backup/restore, which can replace values independently of automatic sync. This classification prepares Plan 4; it does not change those upstream writers.
+- Targeted helper/bundle tests, `LAMPA_API_REQUIRE_DOCKER=1 make test`, `LAMPA_API_REQUIRE_DOCKER=1 make race`, `make lint` and `git diff --check` pass. Checks ran natively on macOS with cgo and Docker because WSL is unavailable here. Lint's test-table allocation finding was corrected. Coverage remains 94.1% overall (`pkg/storage`: 95.2%, `pkg/api`: 97.1%).
 
 ### Task 9: Verify acceptance criteria
 - [ ] verify that the Overview and all nine Solution Overview decisions are implemented
