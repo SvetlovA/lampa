@@ -24,6 +24,62 @@ const (
 	testHashURL       = testHashesURL + "/" + testTorrentHash
 )
 
+func TestServer_TorrentIdentityPrecondition(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
+		t.Run(method, func(t *testing.T) {
+			var users []string
+			record := func(_ context.Context, user, _, _ string) error {
+				users = append(users, user)
+				return nil
+			}
+			svc := &mocks.TorrentsMock{
+				ListFunc: func(_ context.Context, user, _ string) ([]string, error) {
+					users = append(users, user)
+					return []string{}, nil
+				},
+				ClaimFunc: record, ReleaseFunc: record,
+			}
+			auth := authFunc(func(_ http.ResponseWriter, r *http.Request) (string, error) {
+				cookie, err := r.Cookie("session")
+				if err != nil {
+					return "", ErrUnauthenticated
+				}
+				return cookie.Value, nil
+			})
+			srv, logs := newTestServerWithTorrents(t, &mocks.UserDataMock{}, svc, auth, notFoundRoutes())
+			path := testHashURL
+			want := http.StatusNoContent
+			if method == http.MethodGet {
+				path, want = testHashesURL, http.StatusOK
+			}
+			send := func(cookie, expected string) *httptest.ResponseRecorder {
+				t.Helper()
+				req := newRequest(method, path, http.NoBody)
+				if cookie != "" {
+					req.AddCookie(&http.Cookie{Name: "session", Value: cookie,
+						Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode})
+				}
+				req.Header.Set("X-Lampa-Expected-User", expected)
+				w := httptest.NewRecorder()
+				srv.Handler().ServeHTTP(w, req)
+				return w
+			}
+			// two tabs share a cookie, but keep independent resolved identities
+			require.Equal(t, want, send(flowUserA, flowUserA).Code)
+			w := send(flowUserB, flowUserA)
+			require.Equal(t, http.StatusConflict, w.Code)
+			assert.Contains(t, w.Body.String(), `"code":"account_changed"`)
+			assert.Equal(t, []string{flowUserA}, users, "stale tab must not read or mutate Bob's rows")
+			require.Equal(t, want, send(flowUserB, flowUserB).Code)
+			require.Equal(t, want, send(flowUserB, "").Code, "existing API callers remain compatible")
+			require.Equal(t, http.StatusUnauthorized, send("", flowUserA).Code, "header cannot authenticate")
+			assert.Equal(t, []string{flowUserA, flowUserB, flowUserB}, users)
+			assert.NotContains(t, logs.String(), flowUserA)
+			assert.NotContains(t, logs.String(), flowUserB)
+		})
+	}
+}
+
 func TestServer_GetTorrentHashes(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

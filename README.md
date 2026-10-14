@@ -32,18 +32,20 @@ regular web server for use in a compatible browser.
 | `lang/` | Runtime translation files |
 | `msx/start.json` | MSX application descriptor |
 | `vender/` | Browser libraries loaded by `index.html` |
-| `svtlv/` | Fork-only ES5 add-ons loaded from the marked block at the end of `index.html`; today the Account sign-in (Svtlv Keycloak) |
+| `svtlv/` | Fork-only ES5 Account sign-in and TorrServer membership add-ons, plus the storage-scope allowlist |
 | `Dockerfile` | Apache-based production image |
 | `devops/docker-compose.yaml` | Local and server Compose configuration (`lampa-web`, `lampa-db`, `lampa-api`); builds both images locally |
 | `devops/.env.example` | Template for the local `devops/.env` (gitignored) |
-| `.github/workflows/tests.yaml` | Backend lint, tests and race, an ES5 parse of `svtlv/*.js` and a Compose config check on PRs and pushes to `svtlvtv` |
+| `.github/workflows/tests.yaml` | Backend lint, tests and race, frontend Node checks and ES5 parsing, and a Compose config check on PRs and pushes to `svtlvtv` |
 | `.github/workflows/deploy-docker.yaml` | Manual Svtlv deployment workflow |
 | `backend/` | `lampa-api`, a fork-only Go service that stores user data in PostgreSQL; see [`backend/README.md`](backend/README.md) |
 | `docs/` | Design documents and implementation plans for the backend |
 
 Despite its name, `app.min.js` is readable compiled output. The web application
-has no package manager, build command, test suite, or linter. Changes to the
-application bundle or compiled CSS are made directly and verified in a browser.
+has no package manager or build command. Fork-only add-ons and the one-link
+TorrServer patch have Node runtime checks and an ES5 syntax gate. Changes to the
+application bundle or compiled CSS are made directly; browser and TV verification
+remains manual. The test command is in [`backend/README.md`](backend/README.md).
 The Go module under `backend/` is the exception: it has its own `Makefile`, tests
 and linter, documented in [`backend/README.md`](backend/README.md).
 

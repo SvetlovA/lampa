@@ -624,6 +624,14 @@ operation, limits request size and never accepts a `user_id` from the request
 body or URL. Membership operations must be idempotent. State-changing routes
 require `X-Lampa-Csrf: 1` (§5.5).
 
+The ownership add-on sends `X-Lampa-Expected-User` with its captured user ID
+on every membership request. This optional precondition never establishes
+identity: a mismatch with the cookie-authenticated user returns
+`409 account_changed` before accessing storage. The add-on fails closed,
+rechecks the session, and never retries the operation under a new identity.
+Inactive My Torrents components are discarded on account, URL or guest-storage
+changes so returning from a detail screen rebuilds the filtered list.
+
 Membership routes accept a `server_id` of 1–64 ASCII letters, digits,
 underscores or hyphens. The add-on sends the SHA-256 ID described in §10.4;
 the backend receives no TorrServer URL. Hashes are trimmed and lowercased,

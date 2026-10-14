@@ -134,6 +134,17 @@
   }
 
   function refresh(origin) {
+    // Back reuses retained components without fetching their list again. Discard
+    // inactive lists now so their old cards cannot render under a new scope.
+    if (!origin && lampa.Activity.all) {
+      var here = active();
+      lampa.Activity.all().forEach(function (item) {
+        if (item !== here && item.component == 'mytorrents' && item.activity) {
+          item.activity.destroy();
+          item.activity = null;
+        }
+      });
+    }
     // Always defer: the upstream long-press handler disables its card after remove().
     setTimeout(function () {
       var here = active();
@@ -152,13 +163,15 @@
 
   function request(ctx, method, hash, done) {
     try {
+      var headers = {'X-Lampa-Expected-User': ctx.user_id};
+      if (method != 'GET') headers['X-Lampa-Csrf'] = '1';
       return $.ajax({
         url: '/api/v1/torrservers/' + ctx.server + '/hashes' + (hash ? '/' + hash : ''),
         type: method,
         dataType: method == 'GET' ? 'json' : 'text',
         cache: false,
         timeout: 15000,
-        headers: method == 'GET' ? {} : {'X-Lampa-Csrf': '1'},
+        headers: headers,
         success: function (data, status, xhr) {
           if (!current(ctx)) return;
           if (xhr && xhr.status != (method == 'GET' ? 200 : 204)) { done(false); return; }
@@ -166,7 +179,9 @@
         },
         error: function (xhr) {
           if (!current(ctx)) return;
-          var expired = xhr && xhr.status == 401;
+          // A different tab can replace the shared cookie without updating this
+          // page's snapshot. A mismatch must recheck identity, never retry a write.
+          var expired = xhr && (xhr.status == 401 || xhr.status == 409);
           if (expired) expire(ctx);
           done(false, {expired: expired});
         }

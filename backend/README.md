@@ -253,8 +253,11 @@ break. Accepted costs:
 
 On protected routes, no session, an expired or tampered cookie, or a session Keycloak revoked
 → `401 unauthenticated`. Any other `Authenticator` failure → `503 session_unavailable`, so a
-client is never told it is signed out because a dependency failed. The add-on treats `503` and
-network errors as "service unavailable" and keeps its state.
+client is never told it is signed out because a dependency failed. Session lookup failures
+publish unavailable for signed-in or unresolved identity and fail closed for My Torrents.
+A previously confirmed guest retains guest mode during a later lookup outage; an outage
+never confirms logout or transfers account memberships. Membership lookup failures fail
+closed without changing the resolved session identity.
 
 ### CSRF
 
@@ -315,6 +318,15 @@ runs under a 10 s deadline, so a stalled database answers `503 storage_unavailab
 
 The user ID comes only from the `Authenticator` (the session's Keycloak `sub`); no header,
 query or body can set it.
+
+Membership requests may send `X-Lampa-Expected-User` as an identity precondition. The
+add-on always sends its captured user ID. If it differs from the cookie-authenticated
+identity (for example, another tab signed in as someone else), the API returns
+`409 account_changed` before accessing storage. The add-on fails closed and rechecks
+`/api/v1/session` without retrying the operation. Omitting the header preserves the
+existing API behavior; the header never authenticates a caller or selects another user.
+Identity, URL and guest-storage changes also discard inactive My Torrents screens so
+returning from a detail screen fetches a newly filtered list.
 
 Membership routes accept an opaque `server_id` of 1–64 ASCII letters, digits, underscores
 or hyphens. The add-on derives a 64-character lowercase SHA-256 ID from the sole

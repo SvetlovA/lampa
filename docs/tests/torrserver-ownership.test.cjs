@@ -37,6 +37,7 @@ function page(options = {}) {
     Noty: {show: text => notices.push(text)},
     Activity: {
       active: () => activity,
+      all: () => options.stack || [],
       replace() { replacements.push(activity); activity = {...activity, revision: replacements.length}; }
     },
     Utils: {hash() { throw new Error('short hashes must not be used'); }}
@@ -233,6 +234,75 @@ test('account API failure never falls back to shared or guest data', () => {
   p.calls[0].success([{hash: X}]);
   assert.equal(result.success.length, 0);
   assert.equal(result.fail.length, 1);
+});
+
+for (const operation of ['my', 'add', 'remove']) test('shared cookie switch rejects stale tab without retry: ' + operation, () => {
+  const p = page({state: account('Alice')});
+  const result = {success: 0, fail: 0};
+  const success = () => result.success++;
+  const fail = () => result.fail++;
+  if (operation === 'my') p.Lampa.Torserver.my(success, fail);
+  else p.Lampa.Torserver[operation](operation === 'add' ? {} : X, success, fail);
+  if (operation === 'add') p.calls[0].success({hash: X});
+  assert.equal(p.requests[0].config.headers['X-Lampa-Expected-User'], 'Alice');
+  // the API detects Bob's shared cookie against Alice's captured precondition
+  p.requests[0].fail(409);
+  if (operation === 'my') p.calls[0].success([{hash: Y}]);
+  assert.deepEqual(result, {success: 0, fail: 1});
+  assert.equal(p.window.svtlv_account_state.status, 'checking');
+  assert.ok(p.events.some(item => item.event.type === 'expired'));
+  assert.equal(p.items[key], undefined);
+  assert.equal(p.requests.length, 1, 'never replay a mutation under the new identity');
+  p.setState(account('Bob', 3));
+  p.list();
+  assert.equal(p.requests[1].config.headers['X-Lampa-Expected-User'], 'Bob');
+});
+
+for (const change of ['logout', 'account', 'URL', 'guest storage']) test('scope changes discard retained My Torrents before Back: ' + change, () => {
+  const stack = [];
+  const detail = {component: 'full'};
+  const p = page({state: change === 'guest storage' ? guest : account(), activity: detail, stack});
+  p.flush();
+  let destroyed = 0;
+  const retained = {component: 'mytorrents', activity: {destroy() { destroyed++; this.cards = []; }, cards: [X]}};
+  const oldSlide = retained.activity;
+  stack.push(retained, detail);
+  if (change === 'logout') p.setState({...guest, generation: 2});
+  if (change === 'account') p.setState(account('Bob', 2));
+  if (change === 'URL') p.changeURL('http://another-server');
+  if (change === 'guest storage') p.storageEvent();
+  assert.equal(destroyed, 1);
+  assert.equal(retained.activity, null, 'Activity.backward must recreate the component');
+  assert.deepEqual(oldSlide.cards, [], 'old cards disappear before any next start');
+  p.flush();
+  assert.equal(p.replacements.length, 0, 'current details remain open');
+  // Exercise the actual bundle Back path: null retained activities are recreated
+  // before start/render, rather than resuming the previous account's component.
+  let list;
+  detail.activity = {destroy() {}};
+  Object.assign(p.context, {
+    activites: stack, listener$3: {send() {}}, slides: {children: []}, maxsave: 5,
+    Lampa: p.Lampa, pushState() {},
+    create$4(object) {
+      assert.equal(object, retained);
+      assert.equal(object.activity, null);
+      object.activity = {cards: []};
+      p.navigate(object);
+      list = p.list();
+    },
+    start$4(object) {
+      assert.deepEqual(object.activity.cards, [], 'old cards cannot resume while lookup is pending');
+      p.navigate(object);
+    }
+  });
+  const backward = bundle.match(/  function backward\(\) \{[\s\S]*?\n  \}/)[0];
+  vm.runInContext(backward + '\nbackward();', p.context);
+  assert.ok(list, 'Back fetches the new scope');
+  if (change === 'account' || change === 'URL') p.requests[0].success({hashes: [Y]});
+  else p.seed([]);
+  p.calls[0].success([{hash: X}, {hash: Y}]);
+  if (change === 'account' || change === 'URL') assert.deepEqual(list.success, [[[{hash: Y}]]]);
+  else assert.equal(list.fail.length, 1);
 });
 
 test('expired list blocks immediately, emits expiry, then uses a confirmed guest independently', () => {
@@ -494,7 +564,7 @@ for (const response of [{}, {hash: 'not-a-hash'}, {hash: 12}, null]) test('missi
   assert.equal(p.notices.length, 1);
 });
 
-for (const status of [0, 401, 503]) test('failed explicit account persistence reports failure, never writes guest storage: ' + status, () => {
+for (const status of [0, 401, 409, 503]) test('failed explicit account persistence reports failure, never writes guest storage: ' + status, () => {
   const p = page({state: account()});
   p.seed([Y]);
   let success = 0, fail = 0;
@@ -504,7 +574,7 @@ for (const status of [0, 401, 503]) test('failed explicit account persistence re
   assert.equal(success, 0);
   assert.equal(fail, 1);
   assert.deepEqual(p.hashes(), [Y]);
-  assert.equal(p.window.svtlv_account_state.status, status === 401 ? 'checking' : 'signed_in');
+  assert.equal(p.window.svtlv_account_state.status, status === 401 || status === 409 ? 'checking' : 'signed_in');
 });
 
 for (const state of [guest, account()]) for (const saved of [false, true, 'false', 'true']) {
