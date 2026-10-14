@@ -91,6 +91,27 @@ func TestServer_Fallbacks(t *testing.T) {
 	}
 }
 
+func TestServer_AccessLogResponseController(t *testing.T) {
+	srv, logs := newTestServer(t, &mocks.UserDataMock{}, allowAll(testUserID))
+	w := httptest.NewRecorder()
+	path := torrserversPrefix + testTorrentServer + "/hashes/" + testTorrentHash
+	var flushErr, writeErr error
+	handler := srv.accessLog(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// response control must reach the underlying writer through the logging wrapper
+		flushErr = http.NewResponseController(w).Flush()
+		_, writeErr = w.Write([]byte("streamed response"))
+	}))
+	handler.ServeHTTP(w, newRequest(http.MethodGet, path, http.NoBody))
+	require.NoError(t, flushErr)
+	require.NoError(t, writeErr)
+	assert.True(t, w.Flushed)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "streamed response", w.Body.String())
+	assert.Contains(t, logs.String(), torrserversPrefix+"…")
+	assert.NotContains(t, logs.String(), testTorrentServer)
+	assert.NotContains(t, logs.String(), testTorrentHash)
+}
+
 func TestServer_Panic(t *testing.T) {
 	svc := &mocks.UserDataMock{
 		GetFunc: func(context.Context, string) (storage.Document, error) { panic("boom") },

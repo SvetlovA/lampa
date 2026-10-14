@@ -299,6 +299,107 @@ test('guest lists are profile-local; removal preserves other profiles and server
   assert.deepEqual(result.success, [[[{hash: X}, {hash: Y}]]]);
 });
 
+test('shared-server acceptance flow isolates accounts, guests and retained memberships', () => {
+  // Controlled external services; every client runs the actual ownership add-on.
+  const memberships = new Map(), servers = new Map();
+  const clients = [page({state: account('Alice')}), page({state: account('Bob')}), page(), page()];
+  const [a, b, g, otherGuest] = clients;
+  const cursors = new Map(clients.map(client => [client, {calls: 0, requests: 0}]));
+  const server = client => {
+    const name = id(client.settings.torrserver_url);
+    if (!servers.has(name)) servers.set(name, new Set());
+    return servers.get(name);
+  };
+  function settle(client) {
+    const cursor = cursors.get(client);
+    while (cursor.calls < client.calls.length) {
+      const op = client.calls[cursor.calls++];
+      if (op.name === 'my') {
+        const hashes = [...server(client)];
+        if (hashes.length) op.success(hashes.map(hash => ({hash})));
+        else op.fail(); // Upstream cannot distinguish empty from unavailable.
+      } else {
+        assert.equal(op.name, 'add', 'no physical removal request may reach TorrServer');
+        const hash = op.args[0].hash;
+        server(client).add(hash);
+        op.success({hash});
+      }
+    }
+    while (cursor.requests < client.requests.length) {
+      const request = client.requests[cursor.requests++];
+      const match = /^\/api\/v1\/torrservers\/([a-f0-9]{64})\/hashes(?:\/([a-f0-9]{40}|[a-f0-9]{64}))?$/.exec(request.config.url);
+      assert.ok(match);
+      const owner = client.window.svtlv_account_state.user_id + '/' + match[1];
+      if (!memberships.has(owner)) memberships.set(owner, new Set());
+      const hashes = memberships.get(owner);
+      if (request.config.type === 'GET') request.success({hashes: [...hashes].sort()});
+      else {
+        assert.equal(request.config.headers['X-Lampa-Csrf'], '1');
+        if (request.config.type === 'PUT') hashes.add(match[2]);
+        else {
+          assert.equal(request.config.type, 'DELETE');
+          hashes.delete(match[2]);
+        }
+        request.success('');
+      }
+    }
+  }
+  function add(client, hash) {
+    let saved = false;
+    client.Lampa.Torserver.add({hash}, () => { saved = true; });
+    settle(client);
+    assert.equal(saved, true);
+  }
+  function visible(client, hashes) {
+    const result = client.list();
+    settle(client);
+    assert.deepEqual(result.success, hashes.length ? [[hashes.map(hash => ({hash}))]] : []);
+    assert.equal(result.fail.length, hashes.length ? 0 : 1);
+  }
+  function remove(client, hash) {
+    let removed = false;
+    client.Lampa.Torserver.remove(hash, () => { removed = true; });
+    settle(client);
+    assert.equal(removed, true);
+    assert.equal(server(client).has(hash), true, 'membership removal preserves the shared torrent');
+  }
+
+  add(a, X); add(b, X); add(b, Y);
+  visible(a, [X]); visible(b, [X, Y]); visible(g, []); visible(otherGuest, []);
+  add(g, X);
+  visible(g, [X]); visible(otherGuest, []);
+  remove(g, X);
+  visible(g, []); visible(a, [X]); visible(b, [X, Y]);
+
+  a.changeURL('http://other-server:8090');
+  visible(a, []);
+  add(a, Z);
+  visible(a, [Z]);
+  a.changeURL('http://server:8090');
+  visible(a, [X]);
+  remove(a, X);
+  visible(a, []); visible(b, [X, Y]);
+  remove(b, X); // Last account row also leaves X on TorrServer.
+  visible(b, [Y]);
+
+  add(a, X); add(b, X); add(g, X);
+  remove(a, X);
+  server(b).delete(X); // Operator deletion changes only the external list.
+  visible(a, []); visible(b, [Y]); visible(g, []);
+  add(b, X);
+  visible(a, []); visible(b, [Y, X]); visible(g, [X]); visible(otherGuest, []);
+  assert.deepEqual(g.hashes(), [X]);
+  assert.equal(g.requests.length + otherGuest.requests.length, 0, 'guest membership stays entirely local');
+});
+
+test('the same configured endpoint has one account server ID across HTTP and HTTPS page origins', () => {
+  const http = page({protocol: 'http:', state: account(), settings: {torrserver_url: ' SERVER:8090/ '}});
+  const https = page({protocol: 'https:', state: account(), settings: {torrserver_url: 'https://server:8090///'}});
+  for (const client of [http, https]) client.list();
+  assert.equal(http.requests[0].config.url, https.requests[0].config.url);
+  assert.equal(http.requests[0].config.url, '/api/v1/torrservers/' + id('server:8090') + '/hashes');
+});
+
 for (const raw of ['', 'invalid', 'null', '{}', '{"version":2,"servers":{}}',
   '{"version":1,"servers":[]}', '{"version":1,"servers":{"bad":[]}}',
   JSON.stringify({version: 1, servers: {[id('server:8090')]: [X.toUpperCase()]}}),

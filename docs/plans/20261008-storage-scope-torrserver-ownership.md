@@ -445,8 +445,8 @@ Task 8 validation and implementation notes:
 - Targeted helper/bundle tests, `LAMPA_API_REQUIRE_DOCKER=1 make test`, `LAMPA_API_REQUIRE_DOCKER=1 make race`, `make lint` and `git diff --check` pass. Checks ran natively on macOS with cgo and Docker because WSL is unavailable here. Lint's test-table allocation finding was corrected. Coverage remains 94.1% overall (`pkg/storage`: 95.2%, `pkg/api`: 97.1%).
 
 ### Task 9: Verify acceptance criteria
-- [ ] verify that the Overview and all nine Solution Overview decisions are implemented
-- [ ] verify edge cases:
+- [x] verify that the Overview and all nine Solution Overview decisions are implemented
+- [x] verify edge cases (automated checks pass; live browser/TV and real TorrServer checks skipped - require external clients and a configured server, not automatable in this workspace):
   - only one TorrServer URL input is shown; no link selector remains; URL checks, search/parser, authentication and speed test use the sole URL;
   - all four legacy migration combinations preserve the previously active endpoint; the backup remains device-local, and an empty sole URL has no legacy fallback;
   - the same hash for two users, and the same user on two servers;
@@ -458,9 +458,18 @@ Task 8 validation and implementation notes:
   - direct TorrServer deletion hides a retained hash, and re-adding that hash restores visibility only for memberships that still exist;
   - add-on file missing (Lampa still boots; upstream My Torrents and remove remain unprotected until the add-on is restored);
   - the scheme-free `serverId` matches across an http and an https origin.
-- [ ] run the full suite in WSL from `backend/`: `make test`, `make race`, `make lint`
-- [ ] run the ES5 gate: `npx --yes acorn@8.14.0 --ecma5 --silent svtlv/*.js`
-- [ ] verify coverage stays at the Plan 1/2 level for `pkg/storage` and `pkg/api`
+- [x] run the full suite from `backend/`: `make test`, `make race`, `make lint` (WSL-specific execution skipped - unavailable on this macOS host; all commands pass natively with cgo and Docker required)
+- [x] run the ES5 gate: `npx --yes acorn@8.14.0 --ecma5 --silent svtlv/*.js`
+- [x] verify coverage stays at the Plan 1/2 level for `pkg/storage` and `pkg/api`
+
+Task 9 validation and acceptance audit notes:
+- Audited the Overview and all nine decisions against the implementation and tests. The scope inventory/drift guard supplies Plan 4's allowlist; the four sole-URL connection fields and first-login precedence are recorded in `storage-scope.json`. Actual connection synchronization remains Plan 4 work, as decision 6 requires.
+- Decisions 1–5: original add/playback/list calls still go directly to TorrServer; SHA-256 ids partition membership by normalized sole URL; canonical returned hashes drive claims; account removal issues only an authenticated membership DELETE, including the last row; pre-existing unowned torrents stay hidden. Go service/API/PostgreSQL tests verify authenticated identity, user/server isolation, idempotency, validation, outages, CSRF and path redaction.
+- Decisions 7–9: wrappers suppress shared viewed reads/writes for every account state; lists fail closed until identity and membership resolve; the marked one-link patch removes the second input/selector and all normal legacy reads. The actual-bundle tests cover migration combinations, later edits/clearing, persistence failures, authentication, parser/search, status and speed-test paths. Legacy keys and the rollback journal stay device-local.
+- Added a shared-server acceptance scenario running the actual add-on for two accounts and two independent guest profiles against controlled external services. It verifies account/guest isolation, guest removal preserving account membership, same-account server changes/restoration, removal of the last account row without physical deletion, and operator deletion/re-add restoring only retained account/guest memberships. Added an explicit HTTP/HTTPS page-origin equivalence test for scheme-free server ids.
+- Existing runtime tests cover initial/refresh API outages, expiry and stale generations, guest/account transitions without copying hashes, cleared/corrupt/unavailable guest storage, saved versus transient playback, pending removal reconciliation, suppressed timecodes, first-render publication ordering and missing-file boot fallback. Missing/disabled add-ons intentionally leave upstream shared list/removal behavior available; browser/TV engine compatibility and actual TorrServer response formats remain in Post-Completion.
+- Added a Go regression test showing that response control reaches the underlying writer through access logging while ownership paths stay redacted. Assertions run outside the handler, as required by the lint gate. API coverage increases from 97.1% to 97.5%, exceeding the earlier plans' 97.3–97.4%; storage remains 95.2%, exceeding the earlier 94.1–94.4%. Overall coverage is 94.2% excluding mocks.
+- All 135 frontend runtime checks pass (`node --test docs/tests/account-state.test.cjs docs/tests/torrserver-ownership.test.cjs backend/pkg/storage/testdata/torrserver-one-link.test.cjs`). `LAMPA_API_REQUIRE_DOCKER=1 make test`, `LAMPA_API_REQUIRE_DOCKER=1 make race`, `make lint`, the pinned ES5 gate, Compose configuration validation and `git diff --check` pass. Backend checks ran on macOS with Go 1.27.2, cgo and Docker; WSL/CI's Go 1.26 execution and live browser/TV checks remain external verification.
 
 ### Task 10: [Final] Update documentation
 - [ ] `backend/README.md`: ownership routes in "API", the new table, the access-log redaction, and in "Operational caveats" the view-separation caveat, device-local guest membership, the one-link migration and the Android external-client limitation
