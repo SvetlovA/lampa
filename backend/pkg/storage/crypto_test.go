@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -293,7 +294,7 @@ const (
 var plainUIInputs = []string{
 	"jackett_url", "jackett_url_two",
 	"prowlarr_url", "prowlarr_url_two",
-	"torrserver_url", "torrserver_url_two",
+	"torrserver_url",
 	"player_nw_path", "device_name",
 	"tmdb_proxy_api", "tmdb_proxy_image",
 }
@@ -351,4 +352,69 @@ func TestParseUUID(t *testing.T) {
 			assert.Equal(t, byte(0x6f), id[15])
 		})
 	}
+}
+
+// TestTorrserverSingleURL_matchBundle guards the fork patch when upstream rebuilds the bundle.
+// Runtime migration/request tests live in testdata/torrserver-one-link.test.cjs.
+func TestTorrserverSingleURL_matchBundle(t *testing.T) {
+	bundle, err := os.ReadFile(filepath.Join("..", "..", "..", "app.min.js"))
+	if errors.Is(err, fs.ErrNotExist) {
+		t.Skip("app.min.js is not checked out next to backend/")
+	}
+	require.NoError(t, err)
+	text := string(bundle)
+	start := strings.Index(text, "// svtlv:begin one-link migration")
+	end := strings.Index(text, "// svtlv:end one-link migration")
+	require.GreaterOrEqual(t, start, 0, "one-link migration was lost")
+	require.Greater(t, end, start, "one-link migration end marker was lost")
+	runtime := text[:start] + text[end:]
+	for _, key := range []string{"torrserver_url_two", "torrserver_use_link"} {
+		assert.NotContains(t, runtime, key, "legacy key %q must only be read by migration", key)
+	}
+	assert.Contains(t, text, "migrateSvtlvTorrserverUrl();\n        next();", "migration must precede boot consumers")
+
+	var serverTemplate string
+	for line := range strings.SplitSeq(text, "\n") {
+		if strings.HasPrefix(line, "  var ") && strings.Contains(line, `data-name=\"torrserver_url\"`) {
+			_, literal, found := strings.Cut(line, " = ")
+			require.True(t, found)
+			require.NoError(t, json.Unmarshal([]byte(strings.TrimSuffix(literal, ";")), &serverTemplate))
+			break
+		}
+	}
+	require.NotEmpty(t, serverTemplate, "TorrServer settings template was lost")
+	assert.Equal(t, 1, strings.Count(serverTemplate, `data-name="torrserver_url"`))
+	assert.Equal(t, strings.Count(serverTemplate, "<div"), strings.Count(serverTemplate, "</div>"), "template divs must balance")
+	assert.Contains(t, serverTemplate, "#{settings_main_torrserver}")
+	for _, key := range []string{"jackett_url_two", "prowlarr_url_two", "parser_use_link"} {
+		assert.Contains(t, text, `data-name=\"`+key+`\"`, "unrelated parser controls must remain")
+	}
+
+	assembly, err := os.ReadFile(filepath.Join("..", "..", "..", "assembly.json"))
+	require.NoError(t, err)
+	var stamp struct {
+		AppVersion string `json:"app_version"`
+		CSSVersion string `json:"css_version"`
+		AppDigital int    `json:"app_digital"`
+		CSSDigital int    `json:"css_digital"`
+		Time       int64  `json:"time"`
+		Hash       string `json:"hash"`
+	}
+	require.NoError(t, json.Unmarshal(assembly, &stamp))
+	for _, version := range []struct {
+		field   string
+		version string
+		digital int
+	}{
+		{field: "app_version", version: stamp.AppVersion, digital: stamp.AppDigital},
+		{field: "css_version", version: stamp.CSSVersion, digital: stamp.CSSDigital},
+	} {
+		assert.Contains(t, text, version.field+": '"+version.version+"'")
+		digital, parseErr := strconv.Atoi(strings.ReplaceAll(version.version, ".", ""))
+		require.NoError(t, parseErr)
+		assert.Equal(t, digital, version.digital)
+	}
+	assert.Positive(t, stamp.Time)
+	assert.Regexp(t, `^[a-f0-9]{32}$`, stamp.Hash)
+	assert.Contains(t, text, "console.log('App', 'hash', '"+stamp.Hash+"')")
 }

@@ -247,12 +247,20 @@ There is no foreign key to `lampa_user_data`: a user can own torrents without ha
 - Modify: `app.min.js` (only the marked fork changes for the settings template, migration and TorrServer-related readers)
 - Modify: `assembly.json`
 - Modify: `backend/pkg/storage/crypto_test.go`
+- Create: `backend/pkg/storage/testdata/torrserver-one-link.test.cjs`
 
-- [ ] add the one-time effective-URL migration and local rollback record from the transition section; ensure an edited sole URL wins on every later load and a failed persistence is visible
-- [ ] remove the second TorrServer URL input and selector; use `torrserver_url` in `Torserver.ip`/`url`, request authentication, TorrServer parser/search, URL-change listeners and checks; move the speed-test insertion anchor to the remaining input
-- [ ] keep Jackett/Prowlarr second links and unrelated parser selectors unchanged; check that an empty primary never falls back to a legacy second URL
-- [ ] bump `Manifest.app_version` and its `assembly.json` copies/stamp; adjust `plainUIInputs` to the remaining TorrServer input
-- [ ] run the relevant backend bundle-guard test and `make test`; manually check the four migration rows above, changing the URL after migration, authenticated requests, parser/search, speed test, and the single settings row on browser and TV before task 1
+- [x] add the one-time effective-URL migration and local rollback record from the transition section; ensure an edited sole URL wins on every later load and a failed persistence is visible
+- [x] remove the second TorrServer URL input and selector; use `torrserver_url` in `Torserver.ip`/`url`, request authentication, TorrServer parser/search, URL-change listeners and checks; move the speed-test insertion anchor to the remaining input
+- [x] keep Jackett/Prowlarr second links and unrelated parser selectors unchanged; check that an empty primary never falls back to a legacy second URL
+- [x] bump `Manifest.app_version` and its `assembly.json` copies/stamp; adjust `plainUIInputs` to the remaining TorrServer input
+- [x] run the relevant backend bundle-guard test and `make test`; manually check the four migration rows above, changing the URL after migration, authenticated requests, parser/search, speed test, and the single settings row on browser and TV before task 1 (manual browser/TV checks skipped - require external clients and a configured TorrServer; not automatable in this workspace)
+
+Task 0 validation and implementation notes:
+- `node --test backend/pkg/storage/testdata/torrserver-one-link.test.cjs`: 37 checks pass against the actual bundle functions, including all legacy URL combinations, later edits/clearing, IndexedDB reserve/cache handling, write failures, corrupt backups, startup sequencing, authenticated requests, parser/search, speed test and status hooks.
+- The backup is a plain localStorage journal with a completion marker. An incomplete journal never reapplies a legacy URL on a later load; an unresolved save stays visible until the sole URL is checked, so even an edit back to the original primary or an empty URL wins.
+- `TestSensitiveSettings_matchUI` and the new `TestTorrserverSingleURL_matchBundle` pass. The latter guards legacy-key isolation, the single settings input, unrelated parser controls, template balance and matching assembly versions/stamps.
+- `LAMPA_API_REQUIRE_DOCKER=1 make test`, `LAMPA_API_REQUIRE_DOCKER=1 make race`, and `make lint` pass natively on macOS with cgo and Docker; WSL is unavailable on this host. Backend coverage is 93.8% overall (`pkg/storage`: 94.1%, `pkg/api`: 96.7%).
+- `npx --yes acorn@8.14.0 --ecma5 --silent app.min.js svtlv/*.js` and `git diff --check` pass. App version is now 3.3.5; CSS version remains 3.3.4.
 
 ### Task 1: Add the TorrServer ownership migration
 
