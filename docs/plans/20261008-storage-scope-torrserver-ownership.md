@@ -307,11 +307,18 @@ Task 2 validation and implementation notes:
 - Modify: `backend/pkg/storage/torrents.go`
 - Modify: `backend/pkg/storage/torrents_test.go`
 
-- [ ] add the `Torrents` service (`NewTorrents`, `List`, `Claim`, `Release`) and `ValidationError` codes `invalid_server_id` / `invalid_hash`; map store failures to `ErrUnavailable`
-- [ ] canonicalize the user id, validate `server_id`, trim, lowercase and validate `hash`
-- [ ] write table-driven tests for valid inputs (uppercase hash lowered, v1 and v2 lengths, nil-dependency constructor errors)
-- [ ] write tests for an invalid user id, server id and hash, and for store unavailability (with the mock)
-- [ ] run `make test` - must pass before task 4
+- [x] add the `Torrents` service (`NewTorrents`, `List`, `Claim`, `Release`) and `ValidationError` codes `invalid_server_id` / `invalid_hash`; map store failures to `ErrUnavailable`
+- [x] canonicalize the user id, validate `server_id`, trim, lowercase and validate `hash`
+- [x] write table-driven tests for valid inputs (uppercase hash lowered, v1 and v2 lengths, nil-dependency constructor errors)
+- [x] write tests for an invalid user id, server id and hash, and for store unavailability (with the mock)
+- [x] run `make test` - must pass before task 4
+
+Task 3 validation and implementation notes:
+- Added the `Torrents` service with required store/logger dependencies. All operations canonicalize UUIDs and validate opaque server IDs without changing their case or trimming them; claim/release trim and lowercase 40- or 64-character hexadecimal hashes before calling the store.
+- Validation failures reach neither the store nor the logger. Store failures are logged with an operation name and wrapped as `ErrUnavailable`, preserving their underlying cause. Failed lists discard partial results; successful empty lists always return a non-nil slice.
+- Mock-based table-driven tests cover constructor dependencies, valid server boundaries, UUID/hash canonicalization, invalid UUID/server/hash inputs, repeated claim/release calls, context forwarding, database failures, cancellation/deadlines, and wrapped store errors.
+- Targeted service tests with race detection, `LAMPA_API_REQUIRE_DOCKER=1 make test`, `LAMPA_API_REQUIRE_DOCKER=1 make race`, `make lint`, and `git diff --check` pass. Validation ran natively on macOS with cgo and Docker because WSL is unavailable on this host.
+- All new service methods and validation helpers have 100% statement coverage. Overall backend coverage is 94.0%; `pkg/storage` increases to 95.2%, and `pkg/api` remains 96.7%.
 
 ### Task 4: Add the ownership API routes
 
