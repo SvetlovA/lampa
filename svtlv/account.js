@@ -1,10 +1,15 @@
 /*
- * Svtlv Account add-on (Plan 2, design §10.5).
+ * Svtlv Account add-on (Plans 2/3, design §10.5).
  *
  * Identity only: reads GET /api/v1/session, runs sign-in and sign-out, and never
  * calls the user-data API.
  * ES5 only (old TV browsers), public window.Lampa APIs only, never app.min.js
- * internals. Any failure leaves anonymous Lampa and CUB working as before.
+ * internals. Any failure leaves Lampa and CUB working as before.
+ * Publishes window.svtlv_account_state {status, generation, user_id}, scoped to
+ * this page only, and Listener 'svtlv_account' {type: 'state', state: snapshot}.
+ * Status is checking, signed_in, guest or unavailable; only a confirmed guest
+ * survives a refresh outage. Listener {type: 'expired'} starts a session recheck
+ * and invalidates older responses. The storage flag is never proof of readiness.
  */
 (function () {
   'use strict';
@@ -120,6 +125,13 @@
   var sessionIdle = [];
   // true from the logout confirmation until POST /auth/logout answers
   var loggingOut = false;
+  // only the latest session request may apply; login/logout also invalidate older requests
+  var sessionRevision = 0;
+  // cleared on authenticated results, so a former guest cannot become guest after account failure
+  var confirmedGuest = false;
+  var started = false;
+  var activated = false;
+  var accountState = {status: 'checking', generation: 0, user_id: ''};
 
   function t(key) {
     var dict = strings[Lampa.Storage.get('language', 'ru')] || strings.en;
@@ -128,6 +140,8 @@
   }
 
   function fetchSession(onSuccess, onFail) {
+    var revision = checking();
+
     sessionPending++;
 
     $.ajax({
@@ -137,10 +151,14 @@
       cache: false,
       timeout: REQUEST_TIMEOUT,
       success: function (data) {
+        if (revision != sessionRevision) return;
+
         if (data && typeof data.authenticated === 'boolean') onSuccess(data);
         else onFail();
       },
       error: function () {
+        if (revision != sessionRevision) return;
+
         onFail();
       },
       complete: function () {
@@ -195,15 +213,61 @@
     return $('<i>').text(v || '').html();
   }
 
-  function applySession(data) {
+  function publishState(status) {
+    accountState = {
+      status: status,
+      generation: accountState.generation + 1,
+      user_id: status == 'signed_in' ? user.id : ''
+    };
+    window.svtlv_account_state = accountState;
+
+    if (window.Lampa && Lampa.Listener) {
+      Lampa.Listener.send('svtlv_account', {type: 'state', state: accountState});
+    }
+  }
+
+  function setUser(next) {
     var before = user ? user.id : '';
 
-    user = data.authenticated && data.user ? data.user : null;
+    user = next;
+
+    try {
+      if (user) window.localStorage.setItem('svtlv_account_signed_in', '1');
+      else window.localStorage.removeItem('svtlv_account_signed_in');
+    } catch (err) {
+      // storage can be disabled; readiness always comes from the current page state
+    }
 
     if ((user ? user.id : '') != before) {
       updateHeadIcon();
       refreshSettings();
     }
+  }
+
+  function checking() {
+    sessionRevision++;
+    setUser(null);
+    publishState('checking');
+
+    return sessionRevision;
+  }
+
+  function sessionUnavailable() {
+    setUser(null);
+    publishState(confirmedGuest ? 'guest' : 'unavailable');
+  }
+
+  function applySession(data) {
+    // malformed authenticated responses cannot prove either an identity or guest status
+    if (data.authenticated && (!data.user || !data.user.id)) {
+      sessionUnavailable();
+      return;
+    }
+
+    sessionRevision++;
+    confirmedGuest = !data.authenticated;
+    setUser(data.authenticated ? data.user : null);
+    publishState(user ? 'signed_in' : 'guest');
   }
 
   function signedInNoty() {
@@ -490,7 +554,11 @@
       });
       if (status == 200 && body && body.logout_url) window.location.href = body.logout_url;
       else Lampa.Noty.show(t(status == 200 && (!body || !body.sso_logged_out) ? 'logout_sso_failed' : 'logged_out'));
-    } else Lampa.Noty.show(t('logout_failed'));
+    } else {
+      Lampa.Noty.show(t('logout_failed'));
+
+      if (accountState.status == 'checking') heartbeat();
+    }
   }
 
   // screen 5
@@ -733,20 +801,37 @@
     // an answer landing after a logout in flight would show the user signed in again (see doLogOut)
     if (loggingOut) return;
 
-    // 503 or a network error keeps the last known state: unavailable is not signed out
-    fetchSession(applySession, function () {});
+    fetchSession(receiveSession, sessionUnavailable);
+  }
+
+  function receiveSession(data) {
+    applySession(data);
+
+    if (accountState.status == 'unavailable') return;
+    if (!activated) {
+      activate();
+      activated = true;
+    }
+
+    showLoginResult();
+  }
+
+  function expired() {
+    // publish immediately, including before app ready or while logout is waiting for GETs
+    if (started && !loggingOut) heartbeat();
+    else checking();
   }
 
   function init() {
-    fetchSession(function (data) {
-      applySession(data);
-      activate();
-      showLoginResult();
-      setInterval(heartbeat, HEARTBEAT_INTERVAL);
-    }, function () {
+    if (started) return;
+    started = true;
+    setInterval(heartbeat, HEARTBEAT_INTERVAL);
+
+    fetchSession(receiveSession, function () {
+      sessionUnavailable();
       if (loginResult) Lampa.Noty.show(t('signin_failed'));
 
-      console.log('Account', 'session unavailable, add-on disabled');
+      console.log('Account', 'session unavailable');
     });
   }
 
@@ -754,6 +839,7 @@
     try {
       init();
     } catch (err) {
+      sessionUnavailable();
       console.log('Account', 'init failed', err && err.message);
     }
   }
@@ -777,6 +863,10 @@
       return;
     }
 
+    Lampa.Listener.follow('svtlv_account', function (e) {
+      if (e.type == 'expired') expired();
+    });
+
     if (window.appready) safeInit();
     else {
       Lampa.Listener.follow('app', function (e) {
@@ -790,6 +880,7 @@
 
   if (window.svtlv_account_loaded) return;
   window.svtlv_account_loaded = true;
+  window.svtlv_account_state = accountState;
 
   // read at load, before Lampa's first pushState rewrites the address and drops the fragment
   loginResult = takeLoginResult();

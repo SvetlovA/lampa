@@ -71,6 +71,9 @@ jobs:
       - name: Parse svtlv/*.js as ECMAScript 5
         run: npx --yes acorn@8.14.0 --ecma5 --silent svtlv/*.js
 
+      - name: Test account state transitions
+        run: node --test docs/tests/account-state.test.cjs
+
   compose:
     name: Compose config
     runs-on: ubuntu-latest

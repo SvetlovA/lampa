@@ -366,13 +366,22 @@ Task 5 validation and implementation notes:
 
 **Files:**
 - Modify: `svtlv/account.js`
+- Create: `docs/tests/account-state.test.cjs`
+- Modify: `.github/workflows/tests.yaml`
 
-- [ ] publish a current-page account state and generation before the initial `/session` request (`checking`), after each authenticated/anonymous result, after successful logout, and when an ownership `401` starts session re-checking; notify the ownership add-on on transitions. A refresh failure may retain only a guest state already confirmed in this page lifetime; an initial failure and a formerly signed-in state fail closed
-- [ ] keep `localStorage['svtlv_account_signed_in']` (`'1'` or removed) synchronized in `applySession` (try/catch, plain `localStorage`), but do not use a missing flag as proof of guest status. Do not persist the readiness state across reloads
-- [ ] follow `Lampa.Listener` `svtlv_account` `{type:'expired'}` and re-fetch the session through the existing `fetchSession`/`applySession` path; prevent stale responses from restoring a previous identity after the transition
-- [ ] update the header comment to document state publication and expiry handling
-- [ ] check that `npx --yes acorn@8.14.0 --ecma5 --silent svtlv/*.js` passes
-- [ ] manually check startup, sign-in, sign-out, session expiry, and session/API outages: account state and avatar change together; an initial outage never selects guest merely because the flag is absent
+- [x] publish a current-page account state and generation before the initial `/session` request (`checking`), after each authenticated/anonymous result, after successful logout, and when an ownership `401` starts session re-checking; notify the ownership add-on on transitions. A refresh failure may retain only a guest state already confirmed in this page lifetime; an initial failure and a formerly signed-in state fail closed
+- [x] keep `localStorage['svtlv_account_signed_in']` (`'1'` or removed) synchronized in `applySession` (try/catch, plain `localStorage`), but do not use a missing flag as proof of guest status. Do not persist the readiness state across reloads
+- [x] follow `Lampa.Listener` `svtlv_account` `{type:'expired'}` and re-fetch the session through the existing `fetchSession`/`applySession` path; prevent stale responses from restoring a previous identity after the transition
+- [x] update the header comment to document state publication and expiry handling
+- [x] check that `npx --yes acorn@8.14.0 --ecma5 --silent svtlv/*.js` passes
+- [x] manually check startup, sign-in, sign-out, session expiry, and session/API outages: account state and avatar change together; an initial outage never selects guest merely because the flag is absent (manual browser/TV checks skipped - require live sign-in sessions and external clients; not automatable in this workspace)
+
+Task 6 validation and implementation notes:
+- `window.svtlv_account_state` exposes `{status, generation, user_id}` before app readiness and the initial request. Each checking/resolution publishes a new snapshot through `Lampa.Listener` `svtlv_account` `{type: 'state', state: snapshot}`. The ownership add-on can read the snapshot immediately and follow these events without using persisted readiness.
+- Every session recheck invalidates earlier GET callbacks; device sign-in and successful logout also invalidate earlier responses. Avatar and the guarded plain-localStorage flag update before state listeners run. An outage retains only a currently confirmed guest, never an initial unknown state or a guest identity from before an intervening sign-in.
+- Initial outages keep the heartbeat and expiry listener available; a later successful check activates the account UI once. Expiry during logout immediately blocks ownership without starting a session renewal; the existing pending-GET drain is preserved, and failed logout resumes checking when needed.
+- Added 21 Node built-in tests executing the full actual add-on with controlled public Lampa APIs, HTTP callbacks and timers. They cover early/delayed startup, absent/stale flags, malformed responses, outages, expiry races, concurrent refreshes, avatar/flag publication ordering, storage errors, logout/SSO ordering, TV device sign-in, reload isolation and non-HTTP origins. The frontend CI job runs this test without new dependencies; `docs/` is already excluded from the web image.
+- `node --test docs/tests/account-state.test.cjs`, the pinned ES5 gate, `LAMPA_API_REQUIRE_DOCKER=1 make test`, `LAMPA_API_REQUIRE_DOCKER=1 make race`, `make lint`, and `git diff --check` pass. Backend checks ran natively on macOS with cgo and Docker because WSL is unavailable here. Coverage remains 94.1% overall (`pkg/storage`: 95.2%, `pkg/api`: 97.1%). Live browser/TV verification remains in Post-Completion.
 
 ### Task 7: Add the TorrServer ownership add-on
 
