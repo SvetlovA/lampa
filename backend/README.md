@@ -405,14 +405,11 @@ and torrent membership need the database. The critical database check probes bot
   fails the current call and rechecks the session. Add/playback failures cannot silently
   switch account operations into guest writes. Direct playback remains available while
   identity is unresolved or the API is down; membership recording is skipped if identity
-  was unresolved at invocation or changed before TorrServer answered. Both modes suppress shared `/viewed`
-  reads and writes; Lampa's local progress continues to work.
-- The marked one-link bundle patch migrates the previously effective primary/secondary URL
-  once into `torrserver_url`, backing up both URLs and the selector in device-local
-  `svtlv_torrserver_legacy_links`. The selected field wins, with the other used only if the
-  selected field was empty. Both empty means unconfigured. Persistence failures notify the
-  user. The second input and selector are removed, their old keys are inert, and later edits
-  or clearing the sole URL never restore a legacy link. Reapply the marked patch and its
+  was unresolved at invocation or changed before TorrServer answered.
+- The marked bundle patch drops the second TorrServer input and selector without migrating
+  them: every runtime path uses only `torrserver_url`, so a device that used the second link
+  must re-enter it. The same patch removes TrackTimecode (the toggle and all shared `/viewed`
+  reads/writes); playback progress stays in Lampa's local `file_view*`. Reapply the patch and its
   version/build stamp after upstream bundle updates. Plan 4 will sync the sole URL,
   authentication toggle and credentials: upload device values only if the server has none;
   otherwise server values win until explicitly edited. Until then, different URLs select

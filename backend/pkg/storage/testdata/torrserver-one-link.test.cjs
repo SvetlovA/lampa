@@ -1,12 +1,12 @@
 // Run with: node --test backend/pkg/storage/testdata/torrserver-one-link.test.cjs
 // Executes the actual bundle functions without booting Lampa or contacting a server.
+// Legacy second-link values in fixtures prove the dropped URL is never read.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const {test} = require('node:test');
 const bundle = fs.readFileSync(path.join(__dirname, '../../../../app.min.js'), 'utf8');
-const marker = 'svtlv_torrserver_legacy_links';
 
 function source(name, indent = '  ') {
   const declaration = indent === '  ' ? '\n' + indent + 'function ' + name + '(' : '\n' + indent + name + ': function ' + name + '(';
@@ -48,93 +48,9 @@ function device(values = {}, options = {}) {
     value: key => localStorage.getItem(key) || ''
   };
   context.Utils$1 = {checkEmptyUrl: context.checkEmptyUrl};
-  vm.runInContext(source('migrateSvtlvTorrserverUrl') + source('ip') + source('url$5'), context);
-  return {items, writes, notices, context, options, migrate: context.migrateSvtlvTorrserverUrl};
+  vm.runInContext(source('ip') + source('url$5'), context);
+  return {items, writes, notices, context, options};
 }
-
-for (const selection of ['one', 'two']) {
-  for (const [primary, secondary] of [['http://first:8090', 'https://second:8091'], ['', 'second:8091'], ['first:8090', ''], ['', '']]) {
-    test('migration ' + JSON.stringify({selection, primary, secondary}), () => {
-      const d = device({torrserver_url: primary, torrserver_url_two: secondary, torrserver_use_link: selection});
-      const effective = selection === 'two' ? secondary || primary : primary || secondary;
-      assert.equal(d.migrate(), true);
-      assert.equal(d.items.torrserver_url, effective);
-      assert.equal(d.context.ip(), effective);
-      assert.deepEqual(JSON.parse(d.items[marker]), {version: 1, primary, secondary, selection, complete: true});
-      assert.equal(d.writes[0][0], marker, 'backup precedes URL mutation');
-      assert.equal(d.items.torrserver_url_two, secondary);
-      assert.equal(d.items.torrserver_use_link, selection);
-      assert.deepEqual(d.notices, []);
-      for (const edited of ['https://edited:9000', '']) {
-        d.items.torrserver_url = edited;
-        delete d.context.readed.torrserver_url;
-        const writeCount = d.writes.length;
-        assert.equal(d.migrate(), true);
-        assert.equal(d.context.ip(), edited, 'later edits and clearing never restore the second URL');
-        assert.equal(d.writes.length, writeCount);
-      }
-    });
-  }
-}
-
-test('migration includes IndexedDB reserve and invalidates the cached primary', () => {
-  const d = device({}, {reserve: {torrserver_url: 'first', torrserver_url_two: 'second', torrserver_use_link: 'two'}});
-  assert.equal(d.context.Storage.get('torrserver_url'), 'first');
-  assert.equal(d.migrate(), true);
-  assert.equal(d.context.ip(), 'second');
-});
-
-for (const failedWrite of [1, 2, 3]) {
-  for (const failure of ['throw', 'silent']) {
-    test('write ' + failedWrite + ' ' + failure + ' fails visibly and recovers without replaying legacy links', () => {
-      const d = device({torrserver_url: 'first', torrserver_url_two: 'second', torrserver_use_link: 'two'},
-        {fail: (key, count) => count === failedWrite ? failure : false});
-      assert.equal(d.migrate(), false);
-      assert.equal(d.notices.length, 1);
-      assert.equal(d.items.torrserver_url, failedWrite === 3 ? 'second' : 'first');
-      if (d.items[marker]) assert.equal(JSON.parse(d.items[marker]).complete, false);
-      d.options.fail = null;
-      // A reload discards Storage's in-memory cache.
-      d.context.readed = {};
-      if (failedWrite === 2) {
-        assert.equal(d.migrate(), false, 'partial backup requires checking the URL rather than replaying old links');
-        assert.equal(d.context.ip(), 'first');
-        d.items.torrserver_url = 'second';
-        d.context.readed = {};
-      }
-      assert.equal(d.migrate(), true);
-      assert.equal(d.context.ip(), 'second');
-      assert.equal(JSON.parse(d.items[marker]).complete, true);
-    });
-  }
-}
-
-test('editing after an interrupted completion wins', () => {
-  const d = device({torrserver_url: 'first', torrserver_url_two: 'second', torrserver_use_link: 'two'},
-    {fail: (key, count) => count === 3 ? 'throw' : false});
-  assert.equal(d.migrate(), false);
-  d.options.fail = null;
-  d.items.torrserver_url = '';
-  d.context.readed = {};
-  assert.equal(d.migrate(), true);
-  assert.equal(d.context.ip(), '');
-});
-
-for (const backup of ['{broken', '{}', 'null', '{"version":2}']) {
-  test('invalid migration journal ' + backup + ' fails visibly without modifying URLs', () => {
-    const d = device({[marker]: backup, torrserver_url: 'first', torrserver_url_two: 'second', torrserver_use_link: 'two'});
-    assert.equal(d.migrate(), false);
-    assert.equal(d.items.torrserver_url, 'first');
-    assert.equal(d.writes.length, 0);
-    assert.equal(d.notices.length, 1);
-  });
-}
-
-test('unavailable storage does not throw out of migration', () => {
-  const d = device({}, {readError: true});
-  assert.equal(d.migrate(), false);
-  assert.equal(d.notices.length, 1);
-});
 
 for (const protocol of ['http:', 'https:']) {
   for (const url of ['host:8090', 'http://host:8090', 'https://host:8090', '']) {
@@ -232,27 +148,6 @@ test('speed test and server status hooks use the remaining input and URL', () =>
   assert.equal(statusCalls.at(-1)[0], 'http://edited');
 });
 
-test('migration finishes after reserve loading and before boot consumers', () => {
-  const d = device();
-  const queue = [];
-  let restored;
-  d.context.Task = {queue: fn => queue.push(fn), secondary: () => {}, start: () => {}};
-  d.context.LoadingProgress = {status: () => {}, step: () => {}};
-  d.context.Storage.task = next => {
-    d.context.reserve = {torrserver_url: 'first', torrserver_url_two: 'second', torrserver_use_link: 'two'};
-    restored = next;
-  };
-  vm.runInContext(source('loadTask'), d.context);
-  d.context.loadTask();
-  let advanced = false;
-  queue[1](() => {advanced = true; assert.equal(d.context.ip(), 'second');});
-  assert.equal(advanced, false);
-  assert.equal(d.items[marker], undefined);
-  restored();
-  assert.equal(advanced, true);
-  assert.equal(JSON.parse(d.items[marker]).complete, true);
-});
-
 test('search source reacts only to the sole URL and parser toggle', () => {
   const d = device({torrserver_url: 'http://first', torrserver_url_two: 'http://second', torrserver_use_link: 'two', parse_in_search: 'true'});
   const hooks = [];
@@ -277,16 +172,3 @@ test('search source reacts only to the sole URL and parser toggle', () => {
   assert.equal(removed.length, 1);
   assert.equal(added.length, 1, 'clearing the sole URL disables search without legacy fallback');
 });
-
-for (const original of ['first', '']) {
-  test('a URL edited back to the original primary after a partial save never restores link two: ' + original, () => {
-    const d = device({torrserver_url: original, torrserver_url_two: 'second', torrserver_use_link: 'two'},
-      {fail: (key, count) => count === 3 ? 'throw' : false});
-    assert.equal(d.migrate(), false);
-    d.options.fail = null;
-    d.items.torrserver_url = original;
-    d.context.readed = {};
-    assert.equal(d.migrate(), false, 'incomplete migration remains visible');
-    assert.equal(d.context.ip(), original, 'edited or cleared URL wins');
-  });
-}

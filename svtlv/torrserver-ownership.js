@@ -1,7 +1,7 @@
 /*
  * Svtlv TorrServer membership (Plan 3). ES5, public Lampa APIs only.
  * Lists intersect TorrServer with account rows or a device-local guest map.
- * Removal never deletes from TorrServer; shared viewed marks are disabled.
+ * Removal never deletes from TorrServer.
  * Load before the bundle: the Lampa publication hook protects the first render.
  * Guest writes re-read storage, but simultaneous cross-tab writes are best-effort.
  */
@@ -350,11 +350,6 @@
         }
       } catch (err) { done(false); }
     };
-
-    api.Torserver.viewed = function (hash, success, fail) {
-      setTimeout(function () { call(fail); }, 0);
-    };
-    api.Torserver.viewedSet = function () {};
 
     api.Listener.follow('svtlv_account', function (event) {
       if (event.type == 'state') refresh();

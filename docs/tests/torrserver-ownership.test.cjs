@@ -42,7 +42,7 @@ function page(options = {}) {
     },
     Utils: {hash() { throw new Error('short hashes must not be used'); }}
   };
-  for (const name of ['my', 'add', 'hash', 'remove', 'viewed', 'viewedSet', 'drop']) {
+  for (const name of ['my', 'add', 'hash', 'remove', 'drop']) {
     Lampa.Torserver[name] = function (...args) {
       const operation = {
         name, args, receiver: this,
@@ -773,7 +773,7 @@ test('removal 401 rechecks identity; stale removal cannot affect the new screen'
 });
 
 test('missing URL retains upstream add/playback path but never exposes list or physically removes', () => {
-  const p = page({settings: {torrserver_url: '', torrserver_url_two: 'http://legacy'}});
+  const p = page({settings: {torrserver_url: ''}});
   const result = p.list();
   p.calls[0].success([{hash: X}]);
   assert.equal(result.success.length, 0); assert.equal(result.fail.length, 1);
@@ -786,14 +786,9 @@ test('missing URL retains upstream add/playback path but never exposes list or p
   assert.ok(p.notices.at(-1).includes('Configure'));
 });
 
-test('shared viewed operations are suppressed asynchronously for every identity; drop remains original', () => {
+test('drop remains original for every identity', () => {
   for (const state of [guest, account(), null]) {
     const p = page({state});
-    let failed = 0;
-    p.Lampa.Torserver.viewed(X, () => assert.fail('shared viewed'), () => failed++);
-    p.Lampa.Torserver.viewedSet(X, 1, 10);
-    assert.equal(failed, 0); assert.equal(p.calls.length, 0);
-    p.flush(); assert.equal(failed, 1);
     p.Lampa.Torserver.drop(X);
     assert.equal(p.calls[0].name, 'drop');
   }
@@ -803,7 +798,6 @@ test('invalid removal and missing callbacks cannot reach destructive upstream me
   for (const state of [guest, account()]) {
     const p = page({state});
     assert.doesNotThrow(() => p.Lampa.Torserver.remove('bad'));
-    assert.doesNotThrow(() => p.Lampa.Torserver.viewed(X));
     p.flush();
     assert.equal(p.calls.length, 0);
     assert.equal(p.requests.length, 0);

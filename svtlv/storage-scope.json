@@ -53,8 +53,7 @@
       "torrserver_gts",
       "torrserver_preload",
       "torrserver_savedb",
-      "torrserver_search_type",
-      "torrserver_tracktimecode"
+      "torrserver_search_type"
     ],
     "external": [
       "account",
@@ -219,12 +218,9 @@
       "subtitles_size",
       "subtitles_start",
       "subtitles_stroke",
-      "svtlv_torrserver_legacy_links",
       "time_offset",
       "torrents_filter",
       "torrents_sort",
-      "torrserver_url_two",
-      "torrserver_use_link",
       "video_quality_default",
       "webos_subs_params"
     ]
@@ -272,11 +268,7 @@
     "torrserver_auth": "Account connection authentication toggle; sync together with the sole URL and credentials.",
     "torrserver_login": "Account connection credential, sealed by SensitiveSettings. Sync only as user_connection.",
     "torrserver_password": "Account connection credential, sealed by SensitiveSettings. Sync only as user_connection.",
-    "torrserver_url_two": "Inert migration/rollback-only device value. Never include in the Plan 4 allowlist.",
-    "torrserver_use_link": "Inert legacy link selector used only by migration. Never include in the Plan 4 allowlist.",
-    "svtlv_torrserver_legacy_links": "Device-local one-time migration journal containing original URLs/selection and completion marker. Keep for rollback, never sync even though it contains connection values.",
     "torrserver_savedb": "Controls whether playback writes a saved torrent into this TorrServer and records ownership. Connection-local behavior, not an account connection field.",
-    "torrserver_tracktimecode": "Upstream shared TorrServer /viewed behavior switch; ownership add-on suppresses shared reads/writes in both account and guest modes. Keep connection-local.",
     "torrserver_preload": "Stream preload behavior for the current TorrServer/device path; remain connection-local.",
     "torrserver_gts": "Use TorrServer-provided streaming path when supported; depends on the configured server/client.",
     "parse_lang": "Torrent-title search language used by the selected parser, separate from TMDB metadata/interface language; keep with the local parser connection.",

@@ -25,7 +25,7 @@ The server is the source of truth for signed-in users:
 
 Anonymous user data stays in browser storage and no user-data request is sent
 to the backend. Plan 3 separates guest My Torrents through device-local
-membership and suppresses shared TorrServer timecodes (§10.4); other optional
+membership (§10.4) and the fork removes TrackTimecode's shared TorrServer timecodes; other optional
 external services keep their current behavior.
 
 ## 2. Scope
@@ -44,7 +44,7 @@ Keep playback engines, hardware and device-specific network configuration,
 temporary caches, current navigation state, device-detection values, temporary request data and
 authentication tokens owned by another service out of the user document. The
 scope of each concrete storage key is defined in §10.3 before synchronization.
-TorrServer's own saved torrents and timecodes are separate from browser storage
+TorrServer's own saved torrents are separate from browser storage
 and require the handling in §10.4.
 
 TorrServer and Jackett remain unchanged and the browser calls them directly;
@@ -838,8 +838,8 @@ below summarizes their actual rules. The JSON file is the complete authority.
 | --- | --- |
 | `user` | `favorite`, `file_view`, `file_view_*`, `language`, `mine_reactions`, `online_last_balanser`, `online_view`, `online_watched_last`, `person_subscribes_id`, `search_history`, `tmdb_lang`, `torrents_view`, `user_clarifys`. Portable preferences and durable user data; bounded cache access does not change ownership. |
 | `user_connection` | `torrserver_url`, `torrserver_auth`, `torrserver_login`, `torrserver_password`. Only the sole TorrServer endpoint, authentication toggle and credentials are portable connection fields. Login/password are sealed by the API. |
-| `device` | `player`, `player_iptv`, `player_torrent`, `player_volume`, `interface_size`, `navigation_type`, `plugins`, `plugins_blacklist`, `menu_sort`, `menu_hide`, `start_page`, `content_rows*`, `parental_control_pin`, `torrserver_url_two`, `torrserver_use_link`, `svtlv_torrserver_legacy_links`. Hardware, controls, executable plugins, feature-dependent menus and legacy migration/rollback state never sync. |
-| `connection` | `jackett_url`, `jackett_key`, `prowlarr_url`, `prowlarr_key`, `parser_use`, `parser_use_link`, `parse_lang`, `tmdb_proxy`, `proxy_other`, `cub_domain`, `torrserver_savedb`, `torrserver_tracktimecode`. Other endpoints, credentials and server/device-dependent behavior stay local. |
+| `device` | `player`, `player_iptv`, `player_torrent`, `player_volume`, `interface_size`, `navigation_type`, `plugins`, `plugins_blacklist`, `menu_sort`, `menu_hide`, `start_page`, `content_rows*`, `parental_control_pin`. Hardware, controls, executable plugins and feature-dependent menus never sync. |
+| `connection` | `jackett_url`, `jackett_key`, `prowlarr_url`, `prowlarr_key`, `parser_use`, `parser_use_link`, `parse_lang`, `tmdb_proxy`, `proxy_other`, `cub_domain`, `torrserver_savedb`. Other endpoints, credentials and server/device-dependent behavior stay local. |
 | `external` | `account`, `account_bookmarks_*`, `account_timeline_sync*`, `account_plugins`, `cloud_token`, `cloud_use`, `terminal_access`. CUB and third-party identity, tokens, cursors and service-owned data never become Keycloak user data. |
 | `cache` | `activity`, `torrents_filter_data`, `recomends_list`, `recomends_scan`, `timetable`, `cub_alive`, `lampa_uid`, `region`, `storage_*`. Generated navigation, cached responses, device identity and sync bookkeeping stay local. |
 
@@ -850,8 +850,7 @@ remain device-local; they are never implicitly allowed for export.
 
 For the four `user_connection` fields, Plan 4 uploads device connection values on
 first login only when the server has none. Once the server has connection values,
-those win until the user explicitly edits them. Legacy secondary URL, selector
-and rollback journal are never uploaded. Until Plan 4 implements synchronization,
+those win until the user explicitly edits them. Until Plan 4 implements synchronization,
 devices with different sole URLs see different torrent membership sets.
 
 `language` and `tmdb_lang` were verified as portable interface/content
@@ -886,13 +885,9 @@ through membership requests. `svtlv/torrserver-ownership.js` wraps the public
 returned hashes, and replace removal with membership release.
 
 **One URL and server identity.** The built-in settings now expose only
-`torrserver_url`; there is no secondary input or link selector. Before normal
-startup reads settings, a one-time migration preserves the previously effective
-URL: selected primary or secondary, falling back to the other only if the
-selected field was empty. It first stores original URLs and selection in
-`svtlv_torrserver_legacy_links`, a device-local rollback journal and completion
-marker. Both empty stays unconfigured. Persistence failure is reported; later
-edits or clearing the sole URL never restore a legacy link. Normal torrent,
+`torrserver_url`; there is no secondary input or link selector. The second link
+is dropped without migration: a device that used it falls back to `torrserver_url`
+(or stays unconfigured) until the URL is re-entered. Normal torrent,
 parser/search, authentication, status and speed-test paths use only that field.
 Explicit request schemes retain the existing `Utils.checkEmptyUrl` behavior.
 
@@ -914,9 +909,13 @@ Plan 4 converges devices on the account's sole URL and credentials (§10.3).
 Account membership is `(user_id, server_id, hash)`. The backend obtains the user
 only from the authenticated session. A hash can belong to several users; release
 by A preserves B's row and the TorrServer record, including when A was the last
-owner. There is no automatic cleanup or row pruning. Shared `/viewed` reads and
-writes are suppressed in both modes, including unresolved identity; Lampa's own
-local `file_view*` progress continues working.
+owner. There is no automatic cleanup or row pruning.
+
+**No shared timecodes.** TorrServer's `/viewed` store keeps one position per
+torrent file for everyone on the server, so the fork removes TrackTimecode from
+the bundle: the settings toggle, `Torserver.viewed`/`viewedSet` and every
+`/viewed` read or write. Playback progress lives only in Lampa's local
+`file_view*`, which Plan 4 syncs per account.
 
 Guests keep a versioned map in plain
 `localStorage['svtlv_torrserver_guest_hashes']`, partitioned by server ID, outside
@@ -1197,9 +1196,8 @@ After Plan 2 provides authenticated identity, classify every bundle storage
 key in `svtlv/storage-scope.json` with a Go drift guard (§10.3). Add the
 membership table/API and the ES5 public-API wrapper for account and device-local
 guest My Torrents (§10.4). Reduce built-in TorrServer settings to one URL and
-migrate the active legacy endpoint before startup. Verify user/server/guest
-isolation, membership-only removal, first-render filtering and shared timecode
-suppression. Include race/coverage/lint and frontend runtime checks; deployment,
+remove TrackTimecode. Verify user/server/guest isolation, membership-only removal,
+first-render filtering and the absence of shared timecodes. Include race/coverage/lint and frontend runtime checks; deployment,
 real TorrServer and browser/TV smoke checks remain in the completed plan's
 Post-Completion checklist.
 
@@ -1211,13 +1209,12 @@ Deviations recorded while implementing Plan 3
 (`docs/plans/completed/20261008-storage-scope-torrserver-ownership.md`):
 
 - A narrowly marked `app.min.js` one-link patch and matching `assembly.json`
-  stamp were explicitly agreed after the original additive-only design. Legacy
-  endpoint migration preserves the active URL and device-local rollback journal;
-  the ownership and sync integrations remain in `svtlv/`.
+  stamp were explicitly agreed after the original additive-only design. It drops
+  the second link without migration and removes TrackTimecode; the ownership and
+  sync integrations remain in `svtlv/`.
 - Guests use device-local membership instead of the originally proposed shared,
   unfiltered list. Guest removal changes only local membership, login/logout
-  transfers no hashes, and shared `/viewed` timecodes are suppressed for guests
-  as well as accounts. Unknown identity fails closed until session readiness.
+  transfers no hashes. Unknown identity fails closed until session readiness.
 - `server_id` is derived from the normalized sole URL using synchronous ES5
   SHA-256, rather than a separately configured server name or short Lampa hash.
   Aliases remain separate; Plan 4 synchronizes the four TorrServer connection
@@ -1275,12 +1272,11 @@ The design is complete when:
   guest removal changes only local storage, and login/logout transfers no hashes;
 - existing unowned torrents stay hidden until re-added individually; operator
   deletion hides retained memberships and re-add of the same hash restores them;
-- only one TorrServer URL input remains, legacy migration preserves the active
-  endpoint with a local backup, all runtime paths use the sole URL, and later
-  edits/clearing never fall back to legacy keys;
+- only one TorrServer URL input remains, the second link is dropped without
+  migration, and all runtime paths use the sole URL;
 - changing the sole URL hides memberships and restoring it reveals them;
   HTTP/HTTPS page origins produce the same scheme-free SHA-256 server ID;
-- TorrServer `/viewed` reads and writes are suppressed for accounts and guests;
+- TrackTimecode is gone: no toggle and no TorrServer `/viewed` reads or writes;
   Lampa's local progress continues to work;
 - unresolved initial identity, failed ownership lookup or corrupt/unavailable
   guest storage never exposes an unfiltered list; a confirmed guest survives a

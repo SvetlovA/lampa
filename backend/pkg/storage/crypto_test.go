@@ -353,19 +353,16 @@ func TestParseUUID(t *testing.T) {
 }
 
 // TestTorrserverSingleURL_matchBundle guards the fork patch when upstream rebuilds the bundle.
-// Runtime migration/request tests live in testdata/torrserver-one-link.test.cjs.
+// Runtime request tests live in testdata/torrserver-one-link.test.cjs.
 func TestTorrserverSingleURL_matchBundle(t *testing.T) {
 	bundle := readBundle(t)
 	text := string(bundle)
-	start := strings.Index(text, "// svtlv:begin one-link migration")
-	end := strings.Index(text, "// svtlv:end one-link migration")
-	require.GreaterOrEqual(t, start, 0, "one-link migration was lost")
-	require.Greater(t, end, start, "one-link migration end marker was lost")
-	runtime := text[:start] + text[end:]
 	for _, key := range []string{"torrserver_url_two", "torrserver_use_link"} {
-		assert.NotContains(t, runtime, key, "legacy key %q must only be read by migration", key)
+		assert.NotContains(t, text, key, "dropped second TorrServer link %q is back", key)
 	}
-	assert.Contains(t, text, "migrateSvtlvTorrserverUrl();\n        next();", "migration must precede boot consumers")
+	for _, fragment := range []string{"torrserver_tracktimecode", "'/viewed'", "Torserver.viewed"} {
+		assert.NotContains(t, text, fragment, "removed TrackTimecode code %q is back", fragment)
+	}
 
 	var serverTemplate string
 	for line := range strings.SplitSeq(text, "\n") {
@@ -438,11 +435,10 @@ var storageKeyPatterns = []*regexp.Regexp{
 // their known bases, not arbitrary values flowing through Storage(name). Plugin
 // and remote-configuration keys remain local unless explicitly classified.
 var auditedStorageLiterals = []string{
-	"account_timeline_sync",         // Tracker appends the active CUB profile id.
-	"account_bookmarks_sync",        // CUB's IndexedDB bookmark version tracker.
-	"content_rows",                  // SettingsApi and Storage append each installed row's name.
-	"svtlv_torrserver_legacy_links", // The migration uses a variable for its journal key.
-	"ser_clarifys",                  // Legacy key still visited by clear-cache.
+	"account_timeline_sync",  // Tracker appends the active CUB profile id.
+	"account_bookmarks_sync", // CUB's IndexedDB bookmark version tracker.
+	"content_rows",           // SettingsApi and Storage append each installed row's name.
+	"ser_clarifys",           // Legacy key still visited by clear-cache.
 }
 
 func bundleHasLiteral(bundle []byte, literal string) bool {
@@ -595,8 +591,7 @@ func TestStorageScope_matchBundle(t *testing.T) {
 		{"language", "user"}, {"tmdb_lang", "user"}, {"file_view_42", "user"},
 		{"online_watched_last", "user"}, {"torrents_view", "user"},
 		{"torrserver_url", "user_connection"}, {"torrserver_auth", "user_connection"},
-		{"torrserver_url_two", "device"}, {"torrserver_use_link", "device"},
-		{"svtlv_torrserver_legacy_links", "device"}, {"torrserver_savedb", "connection"},
+		{"torrserver_url_two", ""}, {"torrserver_use_link", ""}, {"torrserver_savedb", "connection"},
 		{"plugins", "device"}, {"plugins_blacklist", "device"}, {"player", "device"},
 		{"menu_sort", "device"}, {"menu_hide", "device"}, {"start_page", "device"},
 		{"content_rows_online", "device"}, {"parental_control_pin", "device"},
