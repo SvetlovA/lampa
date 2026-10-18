@@ -95,7 +95,7 @@ test('TorrServer parser uses the sole URL and errors when it is cleared', () => 
 test('My Torrents requests the sole URL', () => {
   const d = device({torrserver_url: 'http://first', torrserver_url_two: 'http://second', torrserver_use_link: 'two'});
   const calls = [];
-  d.context.clear$d = () => {};
+  d.context.clear$e = () => {};
   d.context.network$b = {silent: (url, done, fail, body) => {calls.push([url, JSON.parse(body)]); done([{hash: 'hash'}]);}};
   vm.runInContext(source('my'), d.context);
   let response;
