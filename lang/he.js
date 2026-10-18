@@ -189,7 +189,7 @@ export default {
     settings_server_client: 'לקוח משובץ',
     settings_server_client_descr: 'השתמש בלקוח המובנה בTorrServe JS, אחרת המערכת אחת מתחילה.',
     settings_server_base: 'שמור לבסיס הנתונים',
-    settings_server_base_descr: 'הזרם יווסף למסד הנתונים של TorrServer',
+    settings_server_base_descr: 'הזרם יווסף למסד הנתונים',
     settings_server_preload: 'השתמש בחיץ Prefetch',
     settings_server_preload_descr: 'חכה לTorrServer\'s preload buffer to fill before playing',
     settings_server_auth: 'הרשאה',

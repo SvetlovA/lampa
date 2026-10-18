@@ -363,6 +363,9 @@ func TestTorrserverSingleURL_matchBundle(t *testing.T) {
 	for _, fragment := range []string{"torrserver_tracktimecode", "'/viewed'", "Torserver.viewed"} {
 		assert.NotContains(t, text, fragment, "removed TrackTimecode code %q is back", fragment)
 	}
+	for _, descr := range []string{"'Торрент будет добавлен в базу'", "'The torrent will be added to the database'"} {
+		assert.Contains(t, text, "settings_server_base_descr: "+descr, "save-to-database description must not name TorrServer")
+	}
 
 	var serverTemplate string
 	for line := range strings.SplitSeq(text, "\n") {

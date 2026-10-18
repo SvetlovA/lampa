@@ -245,7 +245,7 @@ export default {
     settings_server_client: 'Встроенный клиент',
     settings_server_client_descr: 'Использовать встроенный JS-клиент TorrServer, иначе запускается системный.',
     settings_server_base: 'Сохранять в базу',
-    settings_server_base_descr: 'Торрент будет добавлен в базу TorrServer',
+    settings_server_base_descr: 'Торрент будет добавлен в базу',
     settings_server_preload: 'Использовать буфер пред.загрузки',
     settings_server_preload_descr: 'Дожидаться заполнения буфера предварительной загрузки TorrServer перед проигрыванием',
     settings_server_auth: 'Авторизация',
