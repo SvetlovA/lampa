@@ -11,7 +11,7 @@ import (
 func TestFS(t *testing.T) {
 	names, err := fs.Glob(FS, "*.sql")
 	require.NoError(t, err)
-	assert.Equal(t, []string{"00001_create_lampa_user_data.sql"}, names)
+	assert.Equal(t, []string{"00001_create_lampa_user_data.sql", "00002_create_lampa_torrserver_hashes.sql"}, names)
 
 	for _, name := range names {
 		content, err := fs.ReadFile(FS, name)

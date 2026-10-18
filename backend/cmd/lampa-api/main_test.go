@@ -298,6 +298,10 @@ func TestStart_servesUntilCanceled(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, code)
 	assert.Contains(t, string(body), `"unauthenticated"`)
 
+	code, body = get(t, "http://"+apiLn.Addr().String()+"/api/v1/torrservers/server-1/hashes")
+	assert.Equal(t, http.StatusUnauthorized, code, "torrent ownership routes are wired")
+	assert.JSONEq(t, `{"error":{"code":"unauthenticated","message":"authentication required"}}`, string(body))
+
 	code, _ = get(t, "http://"+apiLn.Addr().String()+"/api/v1/session")
 	assert.Equal(t, http.StatusOK, code, "auth routes are wired")
 
@@ -552,7 +556,7 @@ func TestNewAPI_sessionRevalidation(t *testing.T) {
 		},
 	}
 	var out bytes.Buffer
-	srv, err := newAPI(cfg, svc, log.New(&out, "", 0))
+	srv, err := newAPI(cfg, svc, &apimocks.TorrentsMock{}, log.New(&out, "", 0))
 	require.NoError(t, err)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -600,6 +604,57 @@ func TestNewAPI_sessionRevalidation(t *testing.T) {
 	assert.NotContains(t, out.String(), testRefresh)
 }
 
+func TestNewAPI_torrentsWiring(t *testing.T) {
+	hash := strings.Repeat("a", 40)
+	tests := []struct {
+		name          string
+		authenticated bool
+		storeErr      error
+		wantCode      int
+		wantBody      string
+	}{
+		{name: "anonymous", wantCode: http.StatusUnauthorized,
+			wantBody: `{"error":{"code":"unauthenticated","message":"authentication required"}}`},
+		{name: "authenticated", authenticated: true, wantCode: http.StatusOK,
+			wantBody: `{"hashes":["` + hash + `"]}`},
+		{name: "store unavailable", authenticated: true, storeErr: storage.ErrUnavailable,
+			wantCode: http.StatusServiceUnavailable,
+			wantBody: `{"error":{"code":"storage_unavailable","message":"storage unavailable"}}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			kc := newFakeKeycloak(t)
+			cfg := testConfig("")
+			cfg.Auth.Issuer = kc.issuer()
+			torrents := &apimocks.TorrentsMock{
+				ListFunc: func(_ context.Context, userID, serverID string) ([]string, error) {
+					assert.Equal(t, testUserID, userID)
+					assert.Equal(t, "server-1", serverID)
+					return []string{hash}, tc.storeErr
+				},
+			}
+			srv, err := newAPI(cfg, &apimocks.UserDataMock{}, torrents, log.New(io.Discard, "", 0))
+			require.NoError(t, err)
+			ts := httptest.NewServer(srv.Handler())
+			defer ts.Close()
+			var cookie *http.Cookie
+			if tc.authenticated {
+				cookie = sessionCookie(t, cfg)
+			}
+			r := send(t, http.MethodGet, ts.URL+"/api/v1/torrservers/server-1/hashes", cookie, "")
+			assert.Equal(t, tc.wantCode, r.code)
+			assert.JSONEq(t, tc.wantBody, r.body)
+			if tc.authenticated {
+				assert.Len(t, torrents.ListCalls(), 1)
+				assert.Equal(t, int32(1), kc.introspects.Load())
+			} else {
+				assert.Empty(t, torrents.ListCalls(), "anonymous requests never reach the service")
+				assert.Zero(t, kc.introspects.Load(), "anonymous requests never contact keycloak")
+			}
+		})
+	}
+}
+
 func TestNewAPI_databaseDown(t *testing.T) {
 	kc := newFakeKeycloak(t)
 	cfg := testConfig("")
@@ -610,7 +665,7 @@ func TestNewAPI_databaseDown(t *testing.T) {
 		},
 	}
 	var out bytes.Buffer
-	srv, err := newAPI(cfg, svc, log.New(&out, "", 0))
+	srv, err := newAPI(cfg, svc, &apimocks.TorrentsMock{}, log.New(&out, "", 0))
 	require.NoError(t, err)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -635,7 +690,7 @@ func TestNewAPI_loginWiring(t *testing.T) {
 			kc := newFakeKeycloak(t)
 			cfg := testConfig("")
 			cfg.Auth.Issuer = kc.issuer()
-			srv, err := newAPI(cfg, &apimocks.UserDataMock{}, log.New(io.Discard, "", 0))
+			srv, err := newAPI(cfg, &apimocks.UserDataMock{}, &apimocks.TorrentsMock{}, log.New(io.Discard, "", 0))
 			require.NoError(t, err)
 			ts := httptest.NewServer(srv.Handler())
 			defer ts.Close()
@@ -667,7 +722,7 @@ func TestNewAPI_loginWiring(t *testing.T) {
 func TestNewAPI_invalidConfig(t *testing.T) {
 	cfg := testConfig("")
 	cfg.MaxBodyBytes = 0
-	_, err := newAPI(cfg, &apimocks.UserDataMock{}, log.New(io.Discard, "", 0))
+	_, err := newAPI(cfg, &apimocks.UserDataMock{}, &apimocks.TorrentsMock{}, log.New(io.Discard, "", 0))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "create api server")
 }

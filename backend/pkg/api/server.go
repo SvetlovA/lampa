@@ -1,4 +1,4 @@
-// Package api serves the user-data HTTP API behind an Authenticator seam.
+// Package api serves the user-data and torrent membership HTTP APIs behind an Authenticator seam.
 package api
 
 import (
@@ -60,10 +60,11 @@ type ServerConfig struct {
 	MaxBodyBytes int64  // request body limit, bytes
 }
 
-// Server serves the user-data API and mounts the auth routes.
+// Server serves the user-data and torrent membership APIs and mounts the auth routes.
 type Server struct {
 	cfg        ServerConfig
 	svc        UserData
+	torrents   Torrents
 	auth       Authenticator
 	authRoutes http.Handler
 	logger     Logger
@@ -72,10 +73,12 @@ type Server struct {
 
 // NewServer creates a Server. authRoutes serves /api/v1/auth/* and /api/v1/session behind the same
 // middleware chain as user data. every dependency is required and the body limit must be positive.
-func NewServer(cfg ServerConfig, svc UserData, auth Authenticator, authRoutes http.Handler, logger Logger) (*Server, error) {
+func NewServer(cfg ServerConfig, svc UserData, torrents Torrents, auth Authenticator, authRoutes http.Handler, logger Logger) (*Server, error) {
 	switch {
 	case svc == nil:
 		return nil, errors.New("nil user data service")
+	case torrents == nil:
+		return nil, errors.New("nil torrents service")
 	case auth == nil:
 		return nil, errors.New("nil authenticator")
 	case authRoutes == nil:
@@ -85,7 +88,7 @@ func NewServer(cfg ServerConfig, svc UserData, auth Authenticator, authRoutes ht
 	case cfg.MaxBodyBytes <= 0:
 		return nil, errors.New("max body bytes must be positive")
 	}
-	s := &Server{cfg: cfg, svc: svc, auth: auth, authRoutes: authRoutes, logger: logger}
+	s := &Server{cfg: cfg, svc: svc, torrents: torrents, auth: auth, authRoutes: authRoutes, logger: logger}
 	s.handler = s.routes()
 	return s, nil
 }
@@ -115,9 +118,11 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 // authenticator (per route).
 // csrf runs before routing, so a rejected request never reaches a handler or the authenticator.
 func (s *Server) routes() http.Handler {
-	methodNotAllowed := func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Allow", "GET, PUT, DELETE")
-		WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+	methodNotAllowed := func(allow string) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Allow", allow)
+			WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		}
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+userDataPath, s.authenticate(s.getUserData))
@@ -125,8 +130,14 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE "+userDataPath, s.authenticate(s.deleteUserData))
 	// a "GET" pattern also matches HEAD, so HEAD needs its own route to reach the 405 fallback
 	// instead of running the authenticated get handler.
-	mux.HandleFunc("HEAD "+userDataPath, methodNotAllowed)
-	mux.HandleFunc(userDataPath, methodNotAllowed)
+	mux.HandleFunc("HEAD "+userDataPath, methodNotAllowed("GET, PUT, DELETE"))
+	mux.HandleFunc(userDataPath, methodNotAllowed("GET, PUT, DELETE"))
+	mux.HandleFunc("GET "+torrentHashesPath, s.authenticate(s.getTorrentHashes))
+	mux.HandleFunc("HEAD "+torrentHashesPath, methodNotAllowed("GET"))
+	mux.HandleFunc(torrentHashesPath, methodNotAllowed("GET"))
+	mux.HandleFunc("PUT "+torrentHashPath, s.authenticate(s.putTorrentHash))
+	mux.HandleFunc("DELETE "+torrentHashPath, s.authenticate(s.deleteTorrentHash))
+	mux.HandleFunc(torrentHashPath, methodNotAllowed("PUT, DELETE"))
 	notFound := func(w http.ResponseWriter, _ *http.Request) {
 		WriteError(w, http.StatusNotFound, "not_found", "not found")
 	}
@@ -247,6 +258,14 @@ func (r *statusRecorder) Unwrap() http.ResponseWriter {
 	return r.ResponseWriter
 }
 
+// logPath hides server ids and torrent hashes from request logging, including error paths.
+func logPath(path string) string {
+	if strings.HasPrefix(path, torrserversPrefix) {
+		return torrserversPrefix + "…"
+	}
+	return path
+}
+
 // accessLog logs method, path, status and duration of every request. bodies, headers,
 // cookies and query strings are never logged.
 func (s *Server) accessLog(next http.Handler) http.Handler {
@@ -257,7 +276,7 @@ func (s *Server) accessLog(next http.Handler) http.Handler {
 		if rec.status == 0 {
 			rec.status = http.StatusOK
 		}
-		s.logger.Printf("[INFO] %q %q %d %s", r.Method, r.URL.Path, rec.status, time.Since(start).Round(time.Microsecond))
+		s.logger.Printf("[INFO] %q %q %d %s", r.Method, logPath(r.URL.Path), rec.status, time.Since(start).Round(time.Microsecond))
 	})
 }
 
@@ -273,7 +292,7 @@ func (s *Server) recoverPanic(next http.Handler) http.Handler {
 			if err, ok := p.(error); ok && errors.Is(err, http.ErrAbortHandler) {
 				panic(p)
 			}
-			s.logger.Printf("[ERROR] panic serving %q %q: %v\n%s", r.Method, r.URL.Path, p, debug.Stack())
+			s.logger.Printf("[ERROR] panic serving %q %q: %v\n%s", r.Method, logPath(r.URL.Path), p, debug.Stack())
 			WriteError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		}()
 		next.ServeHTTP(w, r)

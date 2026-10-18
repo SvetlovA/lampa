@@ -40,7 +40,7 @@ func (s *Server) authenticate(next http.HandlerFunc) http.HandlerFunc {
 		id, err := s.auth.Authenticate(w, r)
 		switch {
 		case err != nil && !errors.Is(err, ErrUnauthenticated):
-			s.logger.Printf("[WARN] authenticate %q %q: %v", r.Method, r.URL.Path, err)
+			s.logger.Printf("[WARN] authenticate %q %q: %v", r.Method, logPath(r.URL.Path), err)
 			WriteError(w, http.StatusServiceUnavailable, "session_unavailable", "session cannot be checked")
 			return
 		case err != nil || id == "":

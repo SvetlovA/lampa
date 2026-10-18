@@ -61,7 +61,7 @@ func (s *Server) putUserData(w http.ResponseWriter, r *http.Request) {
 			WriteError(w, http.StatusRequestEntityTooLarge, storage.CodeTooLarge, "body exceeds size limit")
 			return
 		}
-		s.logger.Printf("[WARN] read body of %q %q: %v", r.Method, r.URL.Path, err)
+		s.logger.Printf("[WARN] read body of %q %q: %v", r.Method, logPath(r.URL.Path), err)
 		WriteError(w, http.StatusBadRequest, storage.CodeInvalidJSON, "body could not be read")
 		return
 	}
@@ -101,7 +101,7 @@ func (s *Server) writeServiceError(w http.ResponseWriter, r *http.Request, err e
 	case errors.Is(err, storage.ErrConnectionsUnreadable):
 		WriteError(w, http.StatusInternalServerError, "connections_unreadable", "stored connections cannot be read")
 	default:
-		s.logger.Printf("[ERROR] %q %q: %v", r.Method, r.URL.Path, err)
+		s.logger.Printf("[ERROR] %q %q: %v", r.Method, logPath(r.URL.Path), err)
 		WriteError(w, http.StatusInternalServerError, "internal_error", "internal error")
 	}
 }

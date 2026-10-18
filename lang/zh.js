@@ -196,7 +196,7 @@ export default {
     settings_server_client: '内置客户端',
     settings_server_client_descr: '使用内置的TorrServer JS客户端，否则系统启动。',
     settings_server_base: '保存到数据库',
-    settings_server_base_descr: 'torrent 将被添加到 TorrServer 数据库',
+    settings_server_base_descr: 'torrent 将被添加到数据库',
     settings_server_preload: '使用预取缓冲区',
     settings_server_preload_descr: '播放前等待TorrServer的预加载缓冲区填满',
     settings_server_auth: '授权',

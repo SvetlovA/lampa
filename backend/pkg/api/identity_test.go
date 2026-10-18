@@ -51,9 +51,15 @@ func newTestServer(t *testing.T, svc UserData, auth Authenticator) (*Server, *by
 // newTestServerWithRoutes is newTestServer with the given auth routes.
 func newTestServerWithRoutes(t *testing.T, svc UserData, auth Authenticator, authRoutes http.Handler) (*Server, *bytes.Buffer) {
 	t.Helper()
+	return newTestServerWithTorrents(t, svc, &mocks.TorrentsMock{}, auth, authRoutes)
+}
+
+// newTestServerWithTorrents accepts the membership service and auth routes.
+func newTestServerWithTorrents(t *testing.T, svc UserData, torrents Torrents, auth Authenticator, authRoutes http.Handler) (*Server, *bytes.Buffer) {
+	t.Helper()
 	var buf bytes.Buffer
 	cfg := ServerConfig{Addr: "127.0.0.1:0", MaxBodyBytes: 1 << 10}
-	srv, err := NewServer(cfg, svc, auth, authRoutes, log.New(&buf, "", 0))
+	srv, err := NewServer(cfg, svc, torrents, auth, authRoutes, log.New(&buf, "", 0))
 	require.NoError(t, err)
 	return srv, &buf
 }

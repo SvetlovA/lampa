@@ -34,7 +34,7 @@ type Record struct {
 	UpdatedAt            time.Time       // set on every upsert
 }
 
-// PgStore keeps user documents in postgres.
+// PgStore keeps user documents and torrent membership in postgres.
 type PgStore struct {
 	pool *pgxpool.Pool
 }
@@ -97,13 +97,16 @@ func (s *PgStore) Delete(ctx context.Context, userID string) error {
 	return nil
 }
 
-// Ping checks that the database is reachable and the lampa_user_data table exists.
+// Ping checks that the database is reachable and both application tables exist.
 func (s *PgStore) Ping(ctx context.Context) error {
 	if err := s.pool.Ping(ctx); err != nil {
 		return fmt.Errorf("ping database: %w", err)
 	}
 	if _, err := s.pool.Exec(ctx, `select 1 from lampa_user_data limit 0`); err != nil {
 		return fmt.Errorf("probe schema: %w", err)
+	}
+	if _, err := s.pool.Exec(ctx, `select 1 from lampa_torrserver_hashes limit 0`); err != nil {
+		return fmt.Errorf("probe torrserver hashes schema: %w", err)
 	}
 	return nil
 }
