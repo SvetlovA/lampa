@@ -11,8 +11,8 @@
   never leave the device. Logout clears the synced keys (resolves design §16).
 - A running device picks up changes from other devices by **polling with an ETag**
   (document hash): on screen return, every 60s while visible, and before each save.
-  Changes are applied live, without a reload. While the player is open, remote changes
-  wait and are applied when it closes, so the current video is never touched.
+  Changes are applied live, without a reload, also while a video is playing (the stream
+  URL is built at playback start, so the current video keeps playing).
 - The UI keeps using `localStorage` exactly like upstream Lampa; only the add-on talks to
   the API. The synced keys stay an explicit allowlist (`storage-scope.json` + the add-on
   table). The backend knows no Lampa keys except the sealed credentials, so adding a key
@@ -47,8 +47,7 @@
   `[`/`{`) behaves exactly like a fresh read. `Lampa.Favorite.read()` re-reads `favorite`
   and sends `state:changed`, so bookmark screens update.
 - `torrserver_url` is read when playback starts (`Storage.get`/`field` at call time); the
-  stream URL is built once. `Lampa.Player.opened()` and `Lampa.Player.listener` (`destroy`)
-  are public.
+  stream URL is built once, so changing it does not interrupt the current video.
 - Every authenticated request is revalidated against Keycloak with no cache (design §5.3.1),
   so each poll costs one Keycloak call. 60s × a few devices is acceptable; seconds is not.
 - `index.html` seam: account.js (no wait) → torrserver-ownership.js → `startLampa()`.
@@ -111,7 +110,7 @@ Four rules keep it simple and safe:
 4. **Poll with an ETag and apply live.** The server's ETag is the SHA-256 of the stored
    document. A `304` means nothing changed. On `200`, each table key that differs and is
    not dirty here is written with `Lampa.Storage.set`, so screens react as if the user
-   changed it. While the player is open, these writes wait until it closes.
+   changed it. This also happens during playback; there is no waiting.
 
 Boot (only on a device that has synced before):
 
@@ -204,8 +203,7 @@ Poll / live apply (one request at a time; skipped while the page is hidden):
 GET user-data  If-None-Match: lastEtag
    304 → nothing to do
    200 → lastDoc, lastEtag = response
-         player open? → remember "pending", apply on Player 'destroy'
-         else for each table key: server ≠ local and key not dirty →
+         for each table key: server ≠ local and key not dirty →
               applying = true
               Lampa.Storage.set(key, raw starts with [ or { ? JSON.parse(raw) : raw)
               applying = false
@@ -234,12 +232,13 @@ What happens when the TorrServer URL is changed on another device during playbac
 ```
 TV: playing (stream URL built from old torrserver_url)
 phone: changes torrserver_url → PUT
-TV poll: 200, player open → pending
-TV: player closes → apply → Storage 'change' torrserver_url
-      → settings screen, My Torrents and the ownership add-on switch to the new server
+TV poll: 200 → apply now → Storage 'change' torrserver_url
+      → settings, My Torrents and the ownership add-on switch to the new server
+TV: current video keeps streaming from the old URL
 ```
-**Note:** the current video keeps playing from the old server and is never interrupted.
-Anything opened after the player closes uses the new URL.
+**Note:** the update is applied at once, even during playback. The playing video is not
+interrupted because its URL was built at start. Anything opened next uses the new URL;
+a playlist item built earlier may still point at the old server, which is accepted.
 
 Size rule: if a section is over 1 MiB, or the body is over 2 MiB, drop `history`, then
 `progress`, and try again. If a must-sync section is still too big, skip the upload and
@@ -360,9 +359,8 @@ Public surface: `window.svtlv_sync_boot(done)`, which calls `done` exactly once,
 - [ ] implement `poll()` per the poll diagram with `lastDoc`/`lastEtag`; one request at a time; the save flow (Task 5) starts with `poll()`
 - [ ] triggers: `visibilitychange` to visible, a 60s timer that runs only while visible and uploads are on, and the start of each save; stop the timer on logout or 401/409
 - [ ] live apply through `Lampa.Storage.set` with the `[`/`{` JSON rule and the `applying` guard; `Lampa.Favorite.read()` after `favorite`; skip dirty keys
-- [ ] defer while `Lampa.Player.opened()`; apply the latest pending doc on `Lampa.Player.listener` `destroy`
 - [ ] write tests: 304 changes nothing; 200 writes only differing non-dirty table keys and calls `Favorite.read` only when `favorite` changed; applied keys do not trigger a PUT; dirty keys are kept and win on the next save
-- [ ] write tests: hidden page does not poll; becoming visible polls once; player open defers and `destroy` applies the newest doc; PUT ETag prevents downloading the page's own write; booleans/numbers/JSON round-trip through `Storage.get` like a fresh read
+- [ ] write tests: hidden page does not poll; becoming visible polls once; PUT ETag prevents downloading the page's own write; booleans/numbers/JSON round-trip through `Storage.get` like a fresh read
 - [ ] run node tests - must pass before task 7
 
 ### Task 7: Verify acceptance criteria
@@ -370,13 +368,13 @@ Public surface: `window.svtlv_sync_boot(done)`, which calls `done` exactly once,
 - [ ] first login (browser redirect or TV device flow): server data applied with at most one reload; guest data uploaded only when the server has no document
 - [ ] later starts: server values used without reload
 - [ ] change while signed in: one GET + PUT after debounce, and keys changed on another device are not rolled back
-- [ ] a change on another device shows up on a running page within about 60s (or on screen return) without a reload, and never while the player is open
+- [ ] a change on another device shows up on a running page within about 60s (or on screen return) without a reload, also during playback
 - [ ] logout or expired session: synced keys gone, device keys (`player`, `jackett_*`, `plugins`, …) untouched
 - [ ] run full suite: `node --test docs/tests/*.test.cjs backend/pkg/storage/testdata/torrserver-one-link.test.cjs`, `npx --yes acorn@8.14.0 --ecma5 --silent svtlv/*.js`, and `make test race lint` in `backend/`
 - [ ] confirm `git diff` does not touch `app.min.js`, `css/app.css`, `lang/*`, `assembly.json`
 
 ### Task 8: [Final] Update documentation
-- [ ] `docs/settings-sync-backend-design.md`: §6/§7 describe boot apply, polling with ETag, live apply (deferred during playback) and "fresh server copy + dirty keys"; §8 notes the user-data precondition, `ETag`/`304` on GET and the ETag on PUT; §5.3.1 notes that each poll is one Keycloak call; §10 lists `account-sync.js` (no `account-sync.css`); §10.3 marks best-effort sections; §16 resolved (clear on logout); Status → Implemented
+- [ ] `docs/settings-sync-backend-design.md`: §6/§7 describe boot apply, polling with ETag, live apply (also during playback) and "fresh server copy + dirty keys"; §8 notes the user-data precondition, `ETag`/`304` on GET and the ETag on PUT; §5.3.1 notes that each poll is one Keycloak call; §10 lists `account-sync.js` (no `account-sync.css`); §10.3 marks best-effort sections; §16 resolved (clear on logout); Status → Implemented
 - [ ] §14 Plan 4 deviations: no feature flag; `file_view_*` not mapped; §6.3 read-back GET dropped; key-level last-wins instead of whole-document; CUB writers not coordinated (`favorite`/`file_view` unused while CUB sync is active); "Clear cache" and CUB backup restore are undone by the next boot GET; unsaved changes lost on 401/logout; sign-in/out notices disappear in the reload
 - [ ] keep `docs/tests/ownership-docs.test.cjs` passing after doc edits
 - [ ] `CLAUDE.md` Svtlv add-ons section: add `account-sync.js`, the seam order, the marker key, raw-string values and the save rule
@@ -397,9 +395,9 @@ or Compose changes. Check that `svtlv/account-sync.js` is served by `lampa-web`.
   (check on A after a reload)
 - with B idle on the bookmarks screen, add a bookmark on A: it appears on B within about
   60s without a reload; switching B's app away and back shows it immediately
-- B plays a torrent; change the TorrServer URL on A: B's video keeps playing; after B
-  closes the player its settings and My Torrents show the new server; both devices now
-  share one server ID
+- B plays a torrent; change the TorrServer URL on A: within about 60s B's settings show the
+  new URL while its video keeps playing; after closing the player My Torrents shows the new
+  server; both devices now share one server ID
 - first login on a device with guest data and no server document uploads that data;
   with an existing server document the guest data is cleared instead
 - logout on the TV clears bookmarks; browser SSO logout returns to a clean guest page;
