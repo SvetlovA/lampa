@@ -195,13 +195,14 @@ Draft lists, **the user decides the final ones** before Task 3:
 How to add a key later:
 1. Move the key in `svtlv/storage-scope.json` into `user` (must sync) or `user_optional`
    (best-effort). Prefix rules like `foo_*` also work.
-2. If it is a secret, also add it to `encrypt` in the same file.
+2. If it should be encrypted, also add it to `encrypt` in the same file (optional; not checked).
 3. Run the tests, commit, deploy `lampa-web`. No add-on or backend change.
 
-The guard checks that every `encrypt` entry is a synced exact key, and that every synced
-settings input that looks secret (`*password*`, `*_key*`, `*token*`) is in `encrypt`.
-That rule replaces the Go `SensitiveSettings`/`plainUIInputs` lists, so an upstream pull
-never needs a Go edit.
+What to encrypt is the UI's decision only: there is no guard for it. A key not listed in
+`encrypt` is stored as plain JSON. `TestSensitiveSettings_matchUI` and the Go
+`SensitiveSettings`/`plainUIInputs` lists are deleted, so an upstream pull never needs a
+Go edit. `TestStorageScope_matchBundle` stays: it lists new upstream storage keys so the
+user can decide whether to sync them.
 
 ### Document (schema version 2)
 
@@ -326,7 +327,7 @@ non-HTTP(S) origins (`^https?:$` guard).
 - [ ] `userdata.go`: drop `orderedData`; encode `data` with sorted keys so equal documents give equal bytes (needed for a stable ETag)
 - [ ] write tests: any JSON values round-trip; listed keys are sealed in the stored JSONB (plaintext absent) and come back decrypted; unlisted keys stay plain; listed-but-missing keys ignored; reserved `$sealed` input → 400; wrong data key → `connections_unreadable`
 - [ ] write tests: bad key, oversize value, oversize body, `encrypt` too long or malformed, version 1 rejected on PUT and read as 404; migration drops the column and the health probe still passes
-- [ ] remove `SensitiveSettings` and `TestSensitiveSettings_matchUI`'s Go lists (the guard moves to Task 3)
+- [ ] delete `SensitiveSettings`, `TestSensitiveSettings_matchUI` and its `plainUIInputs` list (no replacement guard)
 - [ ] run `make fmt test race lint` in `backend/` - must pass before task 2
 
 ### Task 2: Expected-user precondition and ETag
@@ -352,7 +353,7 @@ non-HTTP(S) origins (`^https?:$` guard).
 
 - [ ] ⚠️ get the user's final key lists (must sync vs best-effort) and apply them
 - [ ] add the `user_optional` scope; move best-effort keys into it; move `file_view_*` to `external` (unless the user decides otherwise); add the top-level `encrypt` list; update `_policy` and the key notes
-- [ ] guard: add `user_optional` to `storageScopeNames`; every `encrypt` entry is an exact synced key; every synced settings input from the bundle whose name looks secret (`password`, `_key`, `token`) is in `encrypt`; update the Plan 4 assertions (~596–612) and drop the old sealed/plain lists
+- [ ] scope guard: add `user_optional` to `storageScopeNames` and accept the top-level `encrypt` list without checking its contents; update the Plan 4 assertions (~596–612) and drop the sealed-key assertions
 - [ ] update `ownership-docs.test.cjs` for the new scope
 - [ ] run `make test` in `backend/` and `node --test docs/tests/*.test.cjs` - must pass before task 4
 
