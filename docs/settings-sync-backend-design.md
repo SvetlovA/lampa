@@ -572,10 +572,13 @@ save, including on a page already hidden. Only one save runs at a time; a
 trigger during that save requests one more pass.
 
 Before saving, poll the latest document and apply clean remote changes. Overlay
-only dirty local keys, enforce the encoded size rule (§4), and PUT with the
+only dirty local keys, including `''` tombstones for cleared or removed values,
+enforce the encoded size rule (§4), and PUT with the
 latest `If-Match`. A `412` polls and retries once. A `404` switches to a full
 local export without `If-Match`. Successful PUT updates the base from the sent
-values and retains its ETag, avoiding a download of the page's own write.
+values, removes fingerprints for sent tombstones and retains its ETag, avoiding
+a download of the page's own write. Other devices apply the tombstones to clear
+their values and mask IndexedDB reserve copies.
 
 Live refresh polls every 60 seconds while visible and on return to visible.
 Requests share an in-flight poll and use `If-None-Match: <lastEtag>`; `304`
@@ -587,6 +590,14 @@ Call `Lampa.Favorite.read()` after `favorite` changes and `Lampa.Timeline.read()
 after the key from `Timeline.filename()` changes. These updates happen without
 a reload, also during playback. Hidden pages stop the periodic timer; logout
 or `401`/`409` stops both polling and saves.
+
+If a previously synchronized key in the current `encrypt` list is absent from a
+response, retain its local plaintext and make it dirty for recovery. A live
+refresh schedules a save; boot recovery uses the normal post-boot save timer.
+An explicit `''` tombstone is a clear instruction and does not trigger recovery.
+Omitted optional values outside the encryption list retain best-effort behavior.
+When decryption omits a value, the API returns `200` even for a matching
+`If-None-Match`, retaining the stored ETag for the recovery PUT's `If-Match`.
 
 ### 6.5 Later startup or refresh
 
@@ -615,8 +626,10 @@ changes written with `nolisten` (the language picker), after reload or failed sa
 
 Server apply skips dirty keys and updates the base for values it applies.
 Successful PUT records fingerprints of the values actually sent, so another
-edit during that request stays dirty. `If-Match` atomically protects an existing
-row; a stale or missing row returns `412` and the client polls and retries once.
+edit during that request stays dirty. Cleared values travel as `''` tombstones;
+their base fingerprints are removed after a successful PUT. `If-Match` atomically
+protects an existing row; a stale or missing row returns `412` and the client
+polls and retries once.
 Independent keys survive concurrent saves. Changes to the same key use last
 successful save wins, including a whole `favorite` or progress string. There
 is no merge within a key, mutation log or tombstone table. Initial creation
@@ -624,7 +637,9 @@ without `If-Match` remains an unconditional upsert.
 
 Clearing local values uses `''` to hide IndexedDB reserve copies (§16). Live
 apply does not clear a key merely because it is absent from the server document;
-login/account replacement and logout perform explicit clearing.
+login/account replacement and logout perform explicit clearing. An absent
+previously synced encrypted key instead becomes dirty when local plaintext
+survives, allowing the next save to restore an unreadable sealed field.
 
 ## 8. API
 

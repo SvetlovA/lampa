@@ -305,17 +305,21 @@ func TestServer_UserDataExpectedUser(t *testing.T) {
 
 func TestServer_GetUserDataETag(t *testing.T) {
 	for _, tc := range []struct {
-		name, tag string
-		status    int
+		name, tag  string
+		status     int
+		unreadable bool
 	}{
 		{name: "absent", status: http.StatusOK},
 		{name: "match", tag: `"test-etag"`, status: http.StatusNotModified},
 		{name: "weak", tag: `W/"test-etag"`, status: http.StatusNotModified},
 		{name: "different", tag: `"other"`, status: http.StatusOK},
+		{name: "unreadable values", tag: `"test-etag"`, status: http.StatusOK, unreadable: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			svc := &mocks.UserDataMock{GetFunc: func(context.Context, string) (storage.Document, error) {
-				return testDocument(), nil
+				doc := testDocument()
+				doc.UnreadableValues = tc.unreadable
+				return doc, nil
 			}}
 			srv, _ := newTestServer(t, svc, allowAll(testUserID))
 			req := newRequest(http.MethodGet, userDataPath, http.NoBody)

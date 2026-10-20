@@ -31,7 +31,8 @@ func (s *Server) getUserData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("ETag", strconv.Quote(doc.ETag))
-	if stripWeakETag(r.Header.Get("If-None-Match")) == strconv.Quote(doc.ETag) {
+	// clients must see omitted values so a surviving local copy can repair them with this ETag.
+	if !doc.UnreadableValues && stripWeakETag(r.Header.Get("If-None-Match")) == strconv.Quote(doc.ETag) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusNotModified)
 		return

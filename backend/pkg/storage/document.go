@@ -54,11 +54,12 @@ type Limits struct {
 
 // Document is the logical per-user document with arbitrary JSON values.
 type Document struct {
-	SchemaVersion int
-	Data          map[string]json.RawMessage
-	ETag          string   // sha256 of canonical plaintext data, without quotes
-	Encrypt       []string // keys selected by the client for encryption at rest
-	UpdatedAt     time.Time
+	SchemaVersion    int
+	Data             map[string]json.RawMessage
+	UnreadableValues bool     // unreadable sealed values were omitted from Data
+	ETag             string   // sha256 of canonical plaintext data, without quotes
+	Encrypt          []string // keys selected by the client for encryption at rest
+	UpdatedAt        time.Time
 }
 
 // envelope is the wire shape of a PUT body.

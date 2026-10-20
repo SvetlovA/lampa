@@ -329,11 +329,12 @@
   function overlay(lastDoc) {
     var data = Object.create(null);
     Object.keys(lastDoc).forEach(function (key) {
-      if (synced(key) && typeof lastDoc[key] == 'string' && lastDoc[key] !== '') data[key] = lastDoc[key];
+      if (synced(key) && typeof lastDoc[key] == 'string') data[key] = lastDoc[key];
     });
-    var local = exportLocal();
-    Object.keys(local).forEach(function (key) {
-      if (dirty(key)) data[key] = local[key];
+    dirtyKeys().forEach(function (key) {
+      var value = storage('getItem', key);
+      // A missing local item also needs a tombstone to clear other devices.
+      data[key] = value === null ? '' : value;
     });
     return data;
   }
@@ -363,6 +364,7 @@
   function applyDoc(data, live) {
     var previous = readBase();
     var changed = false;
+    var recover = false;
     var written = Object.create(null);
     var keys = Object.keys(data).filter(function (key) {
       return synced(key) && typeof data[key] == 'string';
@@ -372,6 +374,14 @@
     });
     if (live) applying = true;
     try {
+      scope.encrypt.forEach(function (key) {
+        if (synced(key) && !own(data, key) && own(previous, key) && !dirty(key)) {
+          // An unreadable sealed field is absent on GET. Keep its plaintext,
+          // but stop treating it as saved so this device can seal it again.
+          delete previous[key];
+          recover = true;
+        }
+      });
       keys.forEach(function (key) {
         if (dirty(key)) return;
         var value = data[key];
@@ -392,7 +402,11 @@
       }
       return {changed: changed};
     } finally {
-      if (live) applying = false;
+      if (live) {
+        applying = false;
+        // A running save already includes recovered values in its overlay.
+        if (recover && !saving) scheduleSave();
+      }
     }
   }
 
@@ -696,7 +710,7 @@
         if (!ok) { finish(false); return; }
         try {
           // A missing server document needs every local value, even clean ones.
-          var body = fitBody(missing ? exportLocal() : overlay(lastDoc));
+          var body = fitBody(overlay(missing ? exportLocal() : lastDoc));
           if (!body) { finish(false); return; }
           request('PUT', '/api/v1/user-data', {user: accountUser, etag: lastEtag, body: body}, function (ok, data, xhr) {
             if (!active()) return;
@@ -708,7 +722,11 @@
             }
             try {
               var previous = readBase();
-              Object.keys(body.data).forEach(function (key) { previous[key] = fp(body.data[key]); });
+              Object.keys(body.data).forEach(function (key) {
+                var fingerprint = fp(body.data[key]);
+                if (fingerprint === null) delete previous[key];
+                else previous[key] = fingerprint;
+              });
               writeBase();
               lastDoc = body.data;
               lastEtag = xhr.getResponseHeader('ETag') || '';
@@ -736,7 +754,7 @@
       if (disabled || !scope) return null;
       var body = {schema_version: 2, data: Object.create(null), encrypt: scope.encrypt.slice()};
       Object.keys(data).forEach(function (key) {
-        if (synced(key) && typeof data[key] == 'string' && data[key] !== '') {
+        if (synced(key) && typeof data[key] == 'string') {
           encodedBytes(data[key]);
           body.data[key] = data[key];
         }

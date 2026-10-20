@@ -172,8 +172,9 @@ found at any time. The marker and base are written before any reload, so the rel
 takes the pre-boot path and cannot loop.
 
 Key decisions:
-- **Raw strings.** Each value sent is the exact `localStorage` string. An empty string
-  counts as "no value" everywhere.
+- **Raw strings.** Each value sent is the exact `localStorage` string. Empty and absent
+  local values have no fingerprint; dirty clears travel as `''` tombstones so other
+  devices clear them too.
 - **Clearing writes `''`, not `removeItem`.** An empty item hides the IndexedDB `reserve`
   copy that `Storage.get` would otherwise fall back to, so a guest never sees the previous
   user's large keys.
@@ -251,7 +252,10 @@ Backend rules (no key names anywhere):
   `412 precondition_failed`. Without `If-Match` → upsert (first save). Answers `204` with
   the new `ETag` (was 200 with a body).
 - **Unreadable sealed value** (wrong or lost data key): left out of the GET response with a
-  `[WARN]` log, so the device re-uploads its local value instead of failing every save.
+  `[WARN]` log. Such a response is `200` even for matching `If-None-Match`, with the
+  stored ETag retained for conditional PUT. Previously synced local values in the
+  current `encrypt` list become dirty and are scheduled for recovery; explicit empty
+  tombstones remain clear instructions.
 - Migration `00003`: drop `encrypted_connections`, add `etag text not null default ''`.
   A row with `schema_version` 1 reads as "not found" (`404`); no real client wrote v1.
 
@@ -295,9 +299,9 @@ start, so the current video keeps playing.
 save (one at a time; a trigger during a save → one more save after it)
 timer: 2s after a change if any must-sync key is dirty, else 5 min; flush when hidden
 poll → base doc = lastDoc
-overlay every dirty key with its local string (skip keys with no value) → size rule
+overlay every dirty key with its local string (empty/missing → '' tombstone) → size rule
 PUT  If-Match: lastEtag (omitted when lastDoc came from a 404)
-   204 → base[K] = fp(sent K) for sent keys, lastDoc = sent, lastEtag = response ETag
+   204 → base[K] = fp(sent K), remove base[K] for tombstones; lastDoc = sent, lastEtag = response ETag
    412 → poll + PUT once more; a second 412 waits for the next trigger
 ```
 **Note:** the poll before each save applies other devices' changes first, so the PUT only
@@ -502,6 +506,24 @@ coverage, zero lint issues). Documentation guards validate the published v2
 examples, current user-data DDL, API statuses, body limit and scope inventory.
 The design is marked Implemented; production deployment and real browser/TV
 checks remain in Post-Completion. Protected upstream files are unchanged.
+
+### Review corrections
+
+- [x] propagate dirty empty/removed values as explicit empty-string tombstones,
+  retain them in later saves, and remove their saved fingerprints without losing
+  edits made during a PUT
+- [x] recover previously synced encrypted values omitted by GET: retain local
+  plaintext, mark it dirty and schedule recovery; bypass 304 while the backend
+  omits unreadable fields, retaining the stored ETag for conditional repair
+- [x] cover clearing and recovery across two devices and reboot, explicit remote
+  tombstones, optional omissions, and corrupted ciphertext followed by repair
+- [x] correct AGENTS.md's stale add-on inventory, loader seam and frontend test
+  instructions; update sync behavior in the design, README and repository guidance
+
+Verification: all 244 Node tests, pinned ES5 parsing, Compose configuration,
+and backend `make test race lint` with `LAMPA_API_REQUIRE_DOCKER=1` pass. Backend
+coverage remains 94.1%, with zero lint issues. The documented unconditional
+first-creation policy remains unchanged.
 
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*

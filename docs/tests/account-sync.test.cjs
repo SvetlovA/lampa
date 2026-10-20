@@ -296,6 +296,55 @@ test('overlay keeps the latest server copy and overlays only dirty local strings
   assert.equal(server.language, 'de', 'input is not mutated');
 });
 
+test('overlay exports empty and removed dirty values as tombstones and retains remote tombstones', () => {
+  for (const value of ['', null]) {
+    const p = page({items: {language: 'en', torrserver_password: 'secret'}}); p.load();
+    p.syncedBase({language: 'en', torrserver_password: 'secret'});
+    p.change('language', value);
+    const data = clean(p.core.overlay({language: 'de', torrserver_password: 'secret', tmdb_lang: ''}));
+    assert.deepEqual(data, {language: '', torrserver_password: 'secret', tmdb_lang: ''});
+    assert.deepEqual(clean(p.core.fitBody(data).data), data);
+    assert.equal(p.core.dirty('language'), true);
+    assert.equal(p.core.applyDoc({language: 'fr'}).changed, false, 'polling cannot restore a dirty deletion');
+    const q = page({items: {language: 'en', tmdb_lang: 'ru'}}); q.load();
+    q.syncedBase({language: 'en', tmdb_lang: 'ru'});
+    q.core.applyDoc(data);
+    assert.equal(q.items.language, ''); assert.equal(q.items.tmdb_lang, '');
+    assert.equal(Object.hasOwn(JSON.parse(q.items[BASE]), 'language'), false);
+    assert.equal(q.core.dirty('language'), false);
+  }
+});
+
+test('missing encrypted fields invalidate only a clean prior base and preserve dirty deletions', () => {
+  for (const value of ['secret', 'changed', '', null]) {
+    const p = page({items: {torrserver_password: 'secret', file_view: 'progress'}}); p.load();
+    p.syncedBase({torrserver_password: 'secret', file_view: 'progress'});
+    p.change('torrserver_password', value);
+    assert.equal(p.core.applyDoc({}).changed, false);
+    assert.equal(p.items.torrserver_password, value === null ? undefined : value);
+    assert.equal(p.core.dirty('torrserver_password'), true);
+    assert.equal(p.core.dirty('file_view'), false, 'best-effort nonencrypted omissions remain clean');
+    assert.deepEqual(clean(p.core.overlay({})), {torrserver_password: value || ''});
+    if (value !== 'secret') assert.equal(JSON.parse(p.items[BASE]).torrserver_password, p.core.fp('secret'),
+      'dirty values retain their old comparison base, including deletions');
+    const restarted = page({items: p.items}); restarted.load();
+    assert.equal(restarted.core.dirty('torrserver_password'), true, 'recovery survives reload');
+  }
+});
+
+test('an explicit remote encrypted tombstone clears its base and never becomes a recovery upload', () => {
+  const p = page({items: {torrserver_password: 'secret'}}); p.load();
+  p.syncedBase({torrserver_password: 'secret'});
+  assert.equal(p.core.applyDoc({torrserver_password: ''}).changed, true);
+  assert.equal(p.items.torrserver_password, '');
+  assert.equal(Object.hasOwn(JSON.parse(p.items[BASE]), 'torrserver_password'), false);
+  assert.equal(p.core.dirty('torrserver_password'), false);
+  assert.deepEqual(clean(p.core.overlay({torrserver_password: ''})), {torrserver_password: ''});
+  p.core.applyDoc({});
+  assert.equal(p.core.dirty('torrserver_password'), false, 'later omission cannot resurrect a cleared credential');
+  assert.deepEqual(clean(p.core.overlay({})), {});
+});
+
 test('clear writes empty tombstones, masks reserve-only keys, and removes marker/base', () => {
   const p = page({items: {favorite: '{"book":[1]}', file_view: '{}', plugins: 'code', player: 'native',
     file_view_123: 'cub', [USER]: 'Alice'}});
@@ -413,11 +462,11 @@ test('lone surrogates and encoding failures skip uploads with a notice, valid pa
   assert.equal(p.core.failure(), 'save');
 });
 
-test('body filters disallowed, empty and non-string data and accepts new allowlist keys', () => {
+test('body keeps tombstones, filters disallowed and non-string data, and accepts new allowlist keys', () => {
   const scope = clean(realScope); scope.scopes.user.push('new.setting');
   const p = page(); p.load(scope);
   const body = p.core.fitBody({'new.setting': 'yes', plugins: 'code', language: '', tmdb_lang: null, favorite: {a: 1}});
-  assert.deepEqual(clean(body.data), {'new.setting': 'yes'});
+  assert.deepEqual(clean(body.data), {'new.setting': 'yes', language: ''});
 });
 
 test('invalid scope JSON disables sync and produces a localized notice', () => {
@@ -950,6 +999,123 @@ test('several synced changes batch into one conditional GET and PUT containing s
   assert.equal(p.requests.length, p.initialRequests + 2); assert.deepEqual(p.notices, []);
 });
 
+test('empty and removed values save tombstones, clean the base, and stay clean after reboot', () => {
+  for (const value of ['', null]) for (const missing of [false, true]) {
+    const p = savingPage({torrserver_password: 'secret', language: 'en'});
+    const get = startSave(p, 'torrserver_password', value);
+    if (missing) get.fail(404, missingDocument); else get.success(undefined, 304);
+    const put = p.requests.at(-1);
+    assert.deepEqual(putBody(put).data, {torrserver_password: '', language: 'en'});
+    assert.deepEqual(putBody(put).encrypt, realScope.encrypt);
+    put.success('', 204, '"cleared"');
+    assert.equal(p.core.dirty('torrserver_password'), false);
+    assert.equal(Object.hasOwn(JSON.parse(p.items[BASE]), 'torrserver_password'), false);
+    assert.deepEqual(clean(p.core.bootState().lastDoc), {torrserver_password: '', language: 'en'});
+    p.tick(10000); assert.equal(p.requests.length, p.initialRequests + 2);
+    const restarted = bootPage(p.items);
+    restarted.scopeRequest.success(clean(realScope));
+    restarted.dataRequest.success(documentV2(putBody(put).data), 200, '"cleared"');
+    assert.equal(restarted.items.torrserver_password, '', 'server tombstone masks any reserve after reboot');
+    assert.equal(restarted.core.dirty('torrserver_password'), false);
+    assert.equal(restarted.core.disabled(), false, 'a successful clear never persists an invalid null fingerprint');
+  }
+});
+
+test('edits during a clear PUT and clears during an edited PUT both remain dirty and save next', () => {
+  for (const clear of ['', null]) for (const clearingFirst of [false, true]) {
+    const p = savingPage({torrserver_password: 'secret'});
+    const firstValue = clearingFirst ? clear : 'new secret';
+    startSave(p, 'torrserver_password', firstValue).success(undefined, 304);
+    const first = p.requests.at(-1), sent = firstValue || '';
+    const secondValue = clearingFirst ? 'replacement secret' : clear;
+    p.change('torrserver_password', secondValue);
+    first.success('', 204, '"first"');
+    assert.equal(p.core.dirty('torrserver_password'), true);
+    assert.equal(p.items.torrserver_password, secondValue === null ? undefined : secondValue);
+    const secondGet = p.requests.at(-1);
+    assert.equal(secondGet.config.type, 'GET');
+    secondGet.success(documentV2({torrserver_password: sent}), 200, '"first"');
+    const second = p.requests.at(-1);
+    assert.equal(putBody(second).data.torrserver_password, secondValue || '');
+    second.success('', 204, '"second"');
+    assert.equal(p.core.dirty('torrserver_password'), false);
+    p.tick(10000); assert.equal(p.requests.length, p.initialRequests + 4);
+  }
+});
+
+test('boot omission recovers a previously saved encrypted value through enableUploads without a write event', () => {
+  const saved = savingPage({torrserver_password: 'old secret', file_view: 'progress'});
+  startSave(saved, 'torrserver_password', 'saved secret').success(undefined, 304);
+  saved.requests.at(-1).success('', 204, '"saved"');
+  assert.equal(saved.core.dirty('torrserver_password'), false);
+  const p = bootPage(saved.items);
+  p.scopeRequest.success(clean(realScope));
+  p.dataRequest.success(documentV2({}), 200, '"saved"');
+  assert.equal(p.starts(), 1); assert.equal(p.items.torrserver_password, 'saved secret');
+  assert.equal(p.core.dirty('torrserver_password'), true);
+  assert.equal(p.core.dirty('file_view'), false);
+  p.window.svtlv_account_state = signedIn('Alice'); p.install(); p.tick(100);
+  p.tick(1999); assert.equal(p.requests.length, 2);
+  p.tick(1);
+  const get = p.requests.at(-1);
+  assert.equal(get.config.headers['If-None-Match'], '"saved"');
+  get.success(documentV2({}), 200, '"saved"');
+  const put = p.requests.at(-1);
+  assert.deepEqual(putBody(put).data, {torrserver_password: 'saved secret'});
+  assert.deepEqual(putBody(put).encrypt, realScope.encrypt);
+  put.success('', 204, '"recovered"');
+  assert.equal(p.core.dirty('torrserver_password'), false);
+  p.visibility(true);
+  const count = p.requests.length;
+  p.tick(600000); assert.equal(p.requests.length, count, 'successful recovery does not reschedule itself');
+  const restarted = bootPage(p.items);
+  restarted.scopeRequest.success(clean(realScope));
+  restarted.dataRequest.success(documentV2(putBody(put).data), 200, '"recovered"');
+  assert.equal(restarted.core.dirty('torrserver_password'), false);
+});
+
+test('live omission schedules one encrypted recovery, retaining plaintext and best-effort optional values', () => {
+  const p = savingPage({torrserver_password: 'old secret', file_view: 'progress'});
+  startSave(p, 'torrserver_password', 'saved secret').success(undefined, 304);
+  p.requests.at(-1).success('', 204, '"saved"');
+  p.visibility(false);
+  p.requests.at(-1).success(documentV2({}), 200, '"saved"');
+  assert.equal(p.items.torrserver_password, 'saved secret');
+  assert.equal(p.core.dirty('torrserver_password'), true);
+  assert.equal(p.core.dirty('file_view'), false);
+  assert.equal(JSON.parse(p.items[BASE]).file_view, p.core.fp('progress'));
+  assert.deepEqual(p.storageWrites, [], 'recovery never clears or rewrites the local credential');
+  const before = p.requests.length;
+  p.tick(1999); assert.equal(p.requests.length, before);
+  p.tick(1);
+  const get = p.requests.at(-1);
+  assert.equal(get.config.headers['If-None-Match'], '"saved"');
+  get.success(documentV2({}), 200, '"saved"');
+  const put = p.requests.at(-1);
+  assert.deepEqual(putBody(put).data, {torrserver_password: 'saved secret'});
+  assert.deepEqual(putBody(put).encrypt, realScope.encrypt);
+  put.success('', 204, '"recovered"');
+  assert.equal(p.core.dirty('torrserver_password'), false);
+  p.visibility(true);
+  const count = p.requests.length;
+  p.tick(600000); assert.equal(p.requests.length, count, 'omitted nonencrypted progress never forces a save loop');
+});
+
+test('a live remote encrypted tombstone never schedules recovery or restores the old credential', () => {
+  const p = savingPage({torrserver_password: 'secret'});
+  p.visibility(false);
+  p.requests.at(-1).success(documentV2({torrserver_password: ''}), 200, '"cleared"');
+  assert.equal(p.items.torrserver_password, '');
+  assert.equal(p.core.dirty('torrserver_password'), false);
+  const count = p.requests.length;
+  p.tick(2000); assert.equal(p.requests.length, count);
+  p.tick(58000); p.requests.at(-1).success(documentV2({}), 200, '"omitted"');
+  assert.equal(p.core.dirty('torrserver_password'), false);
+  p.visibility(true);
+  p.tick(600000); assert.equal(p.requests.length, count + 1);
+  assert.equal(p.requests.filter(request => request.config.type === 'PUT').length, 0);
+});
+
 test('change events only schedule: device keys, applying events, and clean writes do not save', () => {
   const p = savingPage();
   p.change('plugins', 'code'); p.change('language', 'en');
@@ -1390,10 +1556,13 @@ test('idle polling recovers from network failures and starts a new notification 
 function sharedDocument(initial = null) {
   let data = initial === null ? null : clean(initial), revision = 1;
   const answered = new WeakSet(), responses = [];
+  const unreadable = new Set();
   const etag = () => '"revision-' + revision + '"';
   return {
     responses,
     data: () => clean(data),
+    etag,
+    omitEncrypted(...keys) { for (const key of keys) unreadable.add(key); },
     respond(request) {
       assert.ok(request && !answered.has(request), 'respond to each queued request only once');
       answered.add(request);
@@ -1402,10 +1571,14 @@ function sharedDocument(initial = null) {
       assert.equal(config.headers['X-Lampa-Expected-User'], 'Alice');
       let status;
       if (config.type === 'GET') {
-        status = data === null ? 404 : config.headers['If-None-Match'] === etag() ? 304 : 200;
+        status = data === null ? 404 : !unreadable.size && config.headers['If-None-Match'] === etag() ? 304 : 200;
         responses.push(status);
         if (status === 404) request.fail(status, missingDocument);
-        else request.success(status === 200 ? documentV2(clean(data)) : undefined, status, etag());
+        else {
+          const readable = clean(data);
+          for (const key of unreadable) delete readable[key];
+          request.success(status === 200 ? documentV2(readable) : undefined, status, etag());
+        }
       } else {
         assert.equal(config.type, 'PUT');
         assert.equal(config.headers['X-Lampa-Csrf'], '1');
@@ -1416,7 +1589,7 @@ function sharedDocument(initial = null) {
         } else {
           const body = putBody(request);
           assert.equal(body.schema_version, 2);
-          data = clean(body.data); revision++;
+          data = clean(body.data); revision++; unreadable.clear();
           responses.push(204);
           request.success('', 204, etag());
         }
@@ -1483,6 +1656,72 @@ test('acceptance: a nolisten language edit survives a fresh boot and reaches the
   const other = acceptanceDevice(server);
   assert.equal(other.window.Lampa.Storage.get('language'), 'ru');
   assert.equal(other.window.Lampa.Storage.get('tmdb_lang'), 'ru');
+});
+
+test('acceptance: empty and removed values clear a second device and survive saves and reboot', () => {
+  for (const value of ['', null]) {
+    const server = sharedDocument({language: 'en', torrserver_password: 'secret'});
+    const a = acceptanceDevice(server), b = acceptanceDevice(server, {reserve: {torrserver_password: 'reserve secret'}});
+    a.change('torrserver_password', value); a.tick(2000);
+    server.respond(a.requests.at(-1));
+    assert.equal(putBody(a.requests.at(-1)).data.torrserver_password, '');
+    server.respond(a.requests.at(-1));
+    assert.equal(Object.hasOwn(JSON.parse(a.items[BASE]), 'torrserver_password'), false);
+    b.tick(60000); server.respond(b.requests.at(-1));
+    assert.equal(b.items.torrserver_password, '');
+    assert.equal(b.window.Lampa.Storage.get('torrserver_password', ''), '', 'the tombstone masks the old reserve');
+    assert.equal(Object.hasOwn(JSON.parse(b.items[BASE]), 'torrserver_password'), false);
+    b.change('language', 'ru'); b.tick(2000);
+    server.respond(b.requests.at(-1));
+    assert.equal(putBody(b.requests.at(-1)).data.torrserver_password, '', 'another save retains the remote tombstone');
+    server.respond(b.requests.at(-1));
+    assert.deepEqual(server.data(), {language: 'ru', torrserver_password: ''});
+    for (const p of [a, b]) {
+      const restarted = acceptanceDevice(server, {items: p.items, hidden: true});
+      assert.equal(restarted.items.torrserver_password, '');
+      assert.equal(Object.hasOwn(JSON.parse(restarted.items[BASE]), 'torrserver_password'), false);
+      restarted.tick(600000);
+      assert.equal(restarted.requests.length, 2, 'a successful clear stays clean across reboot');
+      assert.deepEqual(restarted.notices, []);
+    }
+  }
+});
+
+test('acceptance: boot and live omission recover previously saved credentials without uploading repeatedly', () => {
+  for (const reboot of [false, true]) {
+    const server = sharedDocument({language: 'en', torrserver_password: 'old secret'});
+    const a = acceptanceDevice(server);
+    a.change('torrserver_password', 'saved secret'); a.tick(2000);
+    server.respond(a.requests.at(-1)); server.respond(a.requests.at(-1));
+    let b = acceptanceDevice(server);
+    const savedEtag = server.etag();
+    server.omitEncrypted('torrserver_password');
+    if (reboot) b = acceptanceDevice(server, {items: b.items});
+    else {
+      b.tick(60000); const get = b.requests.at(-1);
+      assert.equal(get.config.headers['If-None-Match'], savedEtag);
+      server.respond(get);
+      assert.equal(server.responses.at(-1), 200, 'unreadable fields must bypass conditional 304');
+    }
+    assert.equal(b.items.torrserver_password, 'saved secret');
+    b.tick(2000); server.respond(b.requests.at(-1));
+    const put = b.requests.at(-1);
+    assert.equal(put.config.headers['If-Match'], savedEtag, 'recovery PUT keeps the stored-document ETag');
+    assert.equal(putBody(put).data.torrserver_password, 'saved secret');
+    assert.deepEqual(putBody(put).encrypt, realScope.encrypt);
+    server.respond(put);
+    assert.equal(JSON.parse(b.items[BASE]).torrserver_password,
+      JSON.parse(a.items[BASE]).torrserver_password, 'successful recovery restores the clean saved base');
+    assert.equal(server.data().torrserver_password, 'saved secret');
+    b.tick(60000); server.respond(b.requests.at(-1));
+    assert.equal(server.responses.at(-1), 304);
+    b.visibility(true);
+    const count = b.requests.length;
+    b.tick(600000); assert.equal(b.requests.length, count);
+    const restarted = acceptanceDevice(server, {items: b.items, hidden: true});
+    restarted.tick(600000); assert.equal(restarted.requests.length, 2);
+    assert.equal(restarted.items.torrserver_password, 'saved secret');
+  }
 });
 
 test('acceptance: simultaneous saves from two devices preserve both edits through a 412 interleaving', () => {

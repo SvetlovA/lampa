@@ -74,7 +74,13 @@ func (s *Service) Get(ctx context.Context, userID string) (Document, error) {
 	if err != nil {
 		return Document{}, fmt.Errorf("open stored data: %w", err)
 	}
-	return Document{SchemaVersion: rec.SchemaVersion, Data: opened, UpdatedAt: rec.UpdatedAt, ETag: rec.ETag}, nil
+	return Document{
+		SchemaVersion:    rec.SchemaVersion,
+		Data:             opened,
+		UnreadableValues: len(opened) != len(data),
+		UpdatedAt:        rec.UpdatedAt,
+		ETag:             rec.ETag,
+	}, nil
 }
 
 // Replace validates raw as a PUT body and stores it as the whole document of userID.

@@ -354,3 +354,58 @@ func TestServer_UserDataETagFlow(t *testing.T) {
 	assert.Equal(t, http.StatusPreconditionFailed, missing.Code)
 	assert.Empty(t, store.records, "conditional writes must not insert a missing document")
 }
+
+func TestServer_UserDataUnreadableRepairFlow(t *testing.T) {
+	srv, store := newFlowServer(t)
+	request := func(method, body, tag string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := newRequest(method, userDataPath, strings.NewReader(body))
+		req.Header.Set("X-Test-User", flowUserA)
+		req.Header.Set("Content-Type", "application/json")
+		if tag != "" {
+			if method == http.MethodGet {
+				req.Header.Set("If-None-Match", tag)
+			} else {
+				req.Header.Set("If-Match", tag)
+			}
+		}
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		return w
+	}
+	const body = `{"schema_version":2,"data":{"secret":"local-credential","language":"ru"},"encrypt":["secret"]}`
+	put := request(http.MethodPut, body, "")
+	require.Equal(t, http.StatusNoContent, put.Code)
+	tag := put.Header().Get("ETag")
+	require.NotEmpty(t, tag)
+
+	// ciphertext damage does not alter the stored plaintext tag.
+	rec := store.records[flowUserA]
+	var data map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rec.Data, &data))
+	data["secret"] = json.RawMessage(`{"$sealed":"corrupt"}`)
+	var err error
+	rec.Data, err = json.Marshal(data)
+	require.NoError(t, err)
+	store.records[flowUserA] = rec
+
+	get := request(http.MethodGet, "", tag)
+	require.Equal(t, http.StatusOK, get.Code, "matching tag must not hide an omitted unreadable credential")
+	assert.Equal(t, tag, get.Header().Get("ETag"))
+	var got documentResponse
+	require.NoError(t, json.Unmarshal(get.Body.Bytes(), &got))
+	assert.NotContains(t, got.Data, "secret")
+	assert.JSONEq(t, `"ru"`, string(got.Data["language"]))
+
+	repair := request(http.MethodPut, body, get.Header().Get("ETag"))
+	require.Equal(t, http.StatusNoContent, repair.Code)
+	assert.Equal(t, tag, repair.Header().Get("ETag"))
+	assert.NotContains(t, string(store.records[flowUserA].Data), "local-credential")
+	get = request(http.MethodGet, "", "")
+	require.Equal(t, http.StatusOK, get.Code)
+	require.NoError(t, json.Unmarshal(get.Body.Bytes(), &got))
+	assert.JSONEq(t, `"local-credential"`, string(got.Data["secret"]))
+	unchanged := request(http.MethodGet, "", tag)
+	assert.Equal(t, http.StatusNotModified, unchanged.Code)
+	assert.Empty(t, unchanged.Body.String())
+}

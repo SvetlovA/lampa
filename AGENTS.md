@@ -8,7 +8,7 @@ This is the **distribution** repo of Lampa (a media-catalog / player app for TVs
 
 Consequences that shape everything else:
 
-- There is **no package.json, no build system, no tests, no linter** for the frontend. Nothing to install, nothing to compile. The one exception is the fork-only Go service under `backend/` (see "lampa-api" below).
+- There is **no package.json or build system** for the frontend. Fork-only add-ons have Node runtime checks and an ES5 syntax gate; browser and TV verification remains manual. The fork-only Go service under `backend/` has its own tests and linter (see "lampa-api" below).
 - `app.min.js` (~56k lines) is the whole application. **Despite the name it is not minified** — it is a readable Rollup IIFE bundle passed through Babel (ES5 output, 2-space indent, JSDoc comments in Russian preserved). Edit it directly.
 - `css/app.css` is compiled + autoprefixed SCSS output. Edit it directly too; do not expect a `.scss` source here.
 - Upstream commits (author `yumata`) touch `app.min.js` + `assembly.json`, sometimes `css/app.css` and `lang/*.js`. Follow the same pattern.
@@ -28,7 +28,7 @@ docker run -p 8080:80 -d --restart unless-stopped -it --name lampa lampa
 
 `{domain}` is required — the build substitutes it into `msx/start.json`. `--build-arg prefix=` defaults to `http://`.
 
-Verification is manual: load the page in a browser and exercise the change. `window.Lampa` exposes every module in the console, so most checks can be done from devtools.
+Browser and TV verification is manual: load the page and exercise the change. `window.Lampa` exposes every module in the console, so most checks can be done from devtools. Add-on runtime checks are listed under "Svtlv add-ons" below.
 
 ## Navigating app.min.js
 
@@ -111,11 +111,12 @@ A fork-only Go module (`go 1.26`, vendored) that signs users in with the Svtlv K
 
 ### Svtlv add-ons (`svtlv/`)
 
-Fork-only frontend features live in `svtlv/` as plain ES5 files (today `account.js` + `account.css`: the Account settings entry, the header avatar that replaces CUB's profile icon while keeping CUB reachable from its menu, and Keycloak sign-in / sign-out). Design: `docs/settings-sync-backend-design.md` §10.
+Fork-only frontend features live in `svtlv/` as plain ES5 files. `account.js` + `account.css` provide the Account settings entry, header avatar (keeping CUB reachable), and Keycloak sign-in / sign-out. `account-sync.js` applies account data before boot, polls for remote changes and saves local edits; `storage-scope.json` is its runtime sync and encryption policy. Design: `docs/settings-sync-backend-design.md` §10.
 
 - **Never edit `app.min.js`, `css/app.css` or `lang/*` for them.** An add-on uses only the public `window.Lampa` API, like a third-party plugin, so upstream pulls do not conflict with it.
-- The only seam is the marked `<!-- svtlv:begin -->` … `<!-- svtlv:end -->` block at the end of `index.html`'s `<body>`; it appends the CSS link and `putScript`s the JS with a no-op `onerror`, so a missing file never shows the `.no-network` overlay. Preserve that block when taking upstream `index.html`.
-- CI (`tests.yaml`) parses `svtlv/*.js` with pinned `acorn --ecma5`, which checks syntax only: post-ES5 APIs (`fetch`, `Object.assign`, …) still have to be avoided by hand. There is no JS test runner; behavior is checked manually in a browser and on the TV client.
+- The loader seam is the marked `<!-- svtlv:begin -->` … `<!-- svtlv:end -->` block at the end of `index.html`'s `<body>`. It appends `account.css`, loads `account.js` without waiting, then `torrserver-ownership.js` → `account-sync.js` → `svtlv_sync_boot(svtlvStart)` → `startLampa()`. Missing/throwing sync scripts advance startup without the `.no-network` overlay. The hook completes immediately without an account marker and waits at most 3 seconds with one. Preserve that block when taking upstream `index.html`.
+- CI (`tests.yaml`) parses `svtlv/*.js` with pinned `acorn --ecma5`, which checks syntax only: post-ES5 APIs (`fetch`, `Object.assign`, …) still have to be avoided by hand. Runtime and documentation checks run with `node --test docs/tests/*.test.cjs backend/pkg/storage/testdata/torrserver-one-link.test.cjs`; browser and TV verification remains manual.
+- To sync a key, add it to `user`/`user_optional` in `storage-scope.json`; to encrypt it, also add it to `encrypt`. `user_connection` also must sync. `svtlv_sync_user` records local data ownership and `svtlv_sync_base` persists raw-value fingerprints. Dirty clears travel as `''` tombstones; absent previously synced encrypted values retain local plaintext and schedule recovery. GET returns 200 while omitting unreadable sealed values even for a matching ETag, retaining that tag for conditional recovery PUT.
 - An add-on must disable itself without breaking Lampa boot (non-HTTP(S) origin, API unreachable) and keep its CSS scoped to its own classes, because the stylesheet loads even when the add-on is off. Strings are an inline `{en, ru}` object, not `lang/*` keys.
 
 ## Conventions and gotchas
