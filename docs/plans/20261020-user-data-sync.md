@@ -469,15 +469,24 @@ only. Nothing is defined on non-HTTP(S) origins (`^https?:$` guard).
 - [x] run node tests - must pass before task 9
 
 ### Task 9: Verify acceptance criteria
-- [ ] anonymous (no marker): no `/user-data` request at all
-- [ ] first login (browser redirect or TV device flow): server data applied with at most one reload; guest data uploaded only when the server has no document, cleared otherwise
-- [ ] later starts: server values used without reload; a language picked in Settings survives the reload and reaches the server
-- [ ] change while signed in: one poll + PUT after the timer; keys changed on another device are not rolled back; simultaneous saves on two devices both survive (412 retry)
-- [ ] a change on another device shows up on a running page within about 60s (or on screen return) without a reload, also during playback, including bookmarks and progress
-- [ ] adding a key only to `storage-scope.json` makes it sync with no JS or Go change (test with a temporary scope)
-- [ ] logout or expired session: synced keys gone (also those in IndexedDB reserve), device keys (`player`, `jackett_*`, `plugins`, …) untouched
-- [ ] run full suite: `node --test docs/tests/*.test.cjs backend/pkg/storage/testdata/torrserver-one-link.test.cjs`, `npx --yes acorn@8.14.0 --ecma5 --silent svtlv/*.js`, and `make test race lint` in `backend/`
-- [ ] confirm `git diff` does not touch `app.min.js`, `css/app.css`, `lang/*`, `assembly.json`
+- [x] anonymous (no marker): no `/user-data` request at all
+- [x] first login (browser redirect or TV device flow): server data applied with at most one reload; guest data uploaded only when the server has no document, cleared otherwise (automated account-state/VM flows verified; real browser/TV check skipped - not automatable here)
+- [x] later starts: server values used without reload; a language picked in Settings survives the reload and reaches the server (automated `nolisten`/fresh-boot flow verified; Settings UI check skipped - not automatable here)
+- [x] change while signed in: one poll + PUT after the timer; keys changed on another device are not rolled back; simultaneous saves on two devices both survive (412 retry)
+- [x] a change on another device shows up on a running page within about 60s (or on screen return) without a reload, also during playback, including bookmarks and progress (two independent VM pages verified; physical playback check skipped - not automatable here)
+- [x] adding a key only to `storage-scope.json` makes it sync with no JS or Go change (test with a temporary scope)
+- [x] logout or expired session: synced keys gone (also those in IndexedDB reserve), device keys (`player`, `jackett_*`, `plugins`, …) untouched
+- [x] run full suite: `node --test docs/tests/*.test.cjs backend/pkg/storage/testdata/torrserver-one-link.test.cjs`, `npx --yes acorn@8.14.0 --ecma5 --silent svtlv/*.js`, and `make test race lint` in `backend/`
+- [x] confirm `git diff` does not touch `app.min.js`, `css/app.css`, `lang/*`, `assembly.json`
+
+Verification: all 231 Node tests and the pinned ES5 parser pass. Backend `make test race
+lint` passes with `LAMPA_API_REQUIRE_DOCKER=1`, including PostgreSQL tests (94.1% coverage,
+zero lint issues). Six new acceptance tests run the unmodified add-on with the actual
+upstream Storage methods: shared-document races in both commit orders, restart-safe
+language edits, guest/login behavior, live bookmarks/progress, temporary must-sync and
+optional whitelist entries, and logout/expiry reserve masking. Protected upstream files
+are unchanged from `4c76cb6` (before Task 1). Real browser/TV checks remain listed in
+Post-Completion.
 
 ### Task 10: [Final] Update documentation
 - [ ] `docs/settings-sync-backend-design.md`: §4 any-JSON document v2, `encrypt`, in-place `$sealed`, `etag` column, dropped `encrypted_connections`, limits; §6/§7 boot apply, fingerprints, ETag polling, live apply (also during playback), save with `If-Match`; §8 precondition, `ETag`/`304`/`412`, PUT 204 and the v2 example; §5.3.1 Keycloak calls per poll/save; §10 lists `account-sync.js` (no `account-sync.css`) and how it reads the whitelist; §12 secrets chosen by `encrypt`; §16 resolved (clear on logout); Status → Implemented

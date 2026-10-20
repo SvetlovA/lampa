@@ -1384,3 +1384,196 @@ test('idle polling recovers from network failures and starts a new notification 
   assert.deepEqual(p.notices, ['Not saved to Account', 'Not saved to Account']);
   assert.equal(p.reloads.length, 0);
 });
+
+// A shared document lets two independent copies of the unmodified add-on race.
+// Go tests cover the real API/storage; this fixture only supplies its HTTP contract.
+function sharedDocument(initial = null) {
+  let data = initial === null ? null : clean(initial), revision = 1;
+  const answered = new WeakSet(), responses = [];
+  const etag = () => '"revision-' + revision + '"';
+  return {
+    responses,
+    data: () => clean(data),
+    respond(request) {
+      assert.ok(request && !answered.has(request), 'respond to each queued request only once');
+      answered.add(request);
+      const {config} = request;
+      assert.equal(config.url, '/api/v1/user-data');
+      assert.equal(config.headers['X-Lampa-Expected-User'], 'Alice');
+      let status;
+      if (config.type === 'GET') {
+        status = data === null ? 404 : config.headers['If-None-Match'] === etag() ? 304 : 200;
+        responses.push(status);
+        if (status === 404) request.fail(status, missingDocument);
+        else request.success(status === 200 ? documentV2(clean(data)) : undefined, status, etag());
+      } else {
+        assert.equal(config.type, 'PUT');
+        assert.equal(config.headers['X-Lampa-Csrf'], '1');
+        const expected = config.headers['If-Match'];
+        if (expected && (data === null || expected !== etag())) {
+          responses.push(412);
+          request.fail(412, {error: {code: 'precondition_failed'}});
+        } else {
+          const body = putBody(request);
+          assert.equal(body.schema_version, 2);
+          data = clean(body.data); revision++;
+          responses.push(204);
+          request.success('', 204, etag());
+        }
+      }
+    }
+  };
+}
+
+function acceptanceDevice(server, options = {}, scope = realScope) {
+  const p = page({...options, preboot: true, uninspected: true, upstreamStorage: true,
+    state: signedIn('Alice'), items: {[USER]: 'Alice', ...options.items}});
+  let starts = 0;
+  p.window.svtlv_sync_boot(() => { starts++; p.install(); });
+  p.requests.find(r => r.config.url.startsWith('svtlv/storage-scope.json')).success(clean(scope));
+  server.respond(p.requests.find(r => r.config.url === '/api/v1/user-data'));
+  p.tick(100);
+  assert.equal(starts, 1);
+  assert.equal(p.reloads.length, 0);
+  assert.equal(p.requests.length, 2, 'successful boot needs no post-boot document fetch');
+  return p;
+}
+
+test('acceptance: guest stays local through edits and visibility changes; first login handles both document states', () => {
+  for (const existing of [false, true]) {
+    const server = sharedDocument(existing ? {language: 'en'} : null);
+    const p = page({state: guestState, uninspected: true, upstreamStorage: true,
+      items: {language: 'ru', favorite: '{"book":["guest"]}', player: 'native'}});
+    let starts = 0;
+    p.window.svtlv_sync_boot(() => starts++);
+    p.change('tmdb_lang', 'ru'); p.visibility(true); p.visibility(false); p.tick(600000);
+    assert.equal(starts, 1); assert.equal(p.requests.length, 0);
+    p.state(signedIn('Alice'));
+    p.requests[0].success(clean(realScope)); server.respond(p.requests.at(-1));
+    assert.equal(p.items[USER], 'Alice');
+    assert.equal(p.items.player, 'native');
+    if (existing) {
+      assert.equal(p.reloads.length, 1);
+      assert.equal(p.items.language, 'en'); assert.equal(p.items.favorite, '');
+      const restarted = acceptanceDevice(server, {items: p.reloads[0]});
+      restarted.tick(2000);
+      assert.equal(restarted.requests.length, 2, 'discarded guest data is never uploaded');
+      assert.deepEqual(server.data(), {language: 'en'});
+    } else {
+      assert.equal(p.reloads.length, 0);
+      p.tick(2000); server.respond(p.requests.at(-1));
+      const put = p.requests.at(-1);
+      assert.equal(put.config.headers['If-Match'], undefined);
+      server.respond(put);
+      assert.deepEqual(server.data(), {language: 'ru', tmdb_lang: 'ru', favorite: '{"book":["guest"]}'});
+    }
+  }
+});
+
+test('acceptance: a nolisten language edit survives a fresh boot and reaches the shared document', () => {
+  const server = sharedDocument({language: 'en', tmdb_lang: 'en'});
+  const first = acceptanceDevice(server);
+  first.window.Lampa.Storage.set('language', 'ru', true);
+  first.window.Lampa.Storage.set('tmdb_lang', 'ru', true);
+  assert.equal(first.requests.length, 2, 'nolisten itself does not schedule a save');
+  const restarted = acceptanceDevice(server, {items: first.items});
+  assert.equal(restarted.items.language, 'ru'); assert.equal(restarted.items.tmdb_lang, 'ru');
+  restarted.tick(2000); server.respond(restarted.requests.at(-1)); server.respond(restarted.requests.at(-1));
+  assert.deepEqual(server.data(), {language: 'ru', tmdb_lang: 'ru'});
+  const other = acceptanceDevice(server);
+  assert.equal(other.window.Lampa.Storage.get('language'), 'ru');
+  assert.equal(other.window.Lampa.Storage.get('tmdb_lang'), 'ru');
+});
+
+test('acceptance: simultaneous saves from two devices preserve both edits through a 412 interleaving', () => {
+  for (const firstWriter of [0, 1]) {
+    const server = sharedDocument({language: 'en', favorite: '{"book":[]}'});
+    const devices = [acceptanceDevice(server), acceptanceDevice(server)];
+    devices[0].change('language', 'ru');
+    devices[1].change('favorite', '{"book":[42]}');
+    for (const p of devices) { p.tick(2000); server.respond(p.requests.at(-1)); }
+    const winner = devices[firstWriter], retrying = devices[1 - firstWriter];
+    // Both PUTs were built from the same revision before either could commit.
+    assert.equal(winner.requests.at(-1).config.headers['If-Match'],
+      retrying.requests.at(-1).config.headers['If-Match']);
+    server.respond(winner.requests.at(-1)); server.respond(retrying.requests.at(-1));
+    assert.equal(server.responses.at(-1), 412);
+    server.respond(retrying.requests.at(-1)); server.respond(retrying.requests.at(-1));
+    assert.deepEqual(server.data(), {language: 'ru', favorite: '{"book":[42]}'});
+    winner.tick(60000); server.respond(winner.requests.at(-1));
+    for (const p of devices) {
+      assert.equal(p.items.language, 'ru');
+      assert.deepEqual(clean(p.window.Lampa.Storage.get('favorite')), {book: [42]});
+      assert.equal(p.reloads.length, 0); assert.deepEqual(p.notices, []);
+    }
+    assert.equal(winner.requests.length, 5, 'one save GET/PUT followed by one idle poll');
+    assert.equal(retrying.requests.length, 6, 'one save GET/PUT plus exactly one GET/PUT retry');
+  }
+});
+
+test('acceptance: progress writes and remote bookmarks converge live on the timer and screen return', () => {
+  const server = sharedDocument({favorite: '{"book":[]}', file_view: '{"movie":0.1}', torrserver_url: 'http://old'});
+  const a = acceptanceDevice(server, {items: {player: 'native', jackett_key: 'a', plugins: '["a"]'}});
+  const b = acceptanceDevice(server, {items: {player: 'external', jackett_key: 'b', plugins: '["b"]'}});
+  b.change('file_view', '{"movie":0.5}');
+  a.change('favorite', '{"book":[42]}'); a.change('torrserver_url', 'http://new'); a.tick(2000);
+  server.respond(a.requests.at(-1)); server.respond(a.requests.at(-1));
+  b.tick(59999); assert.equal(b.requests.length, 2);
+  b.tick(1); server.respond(b.requests.at(-1));
+  assert.deepEqual(clean(b.window.Lampa.Storage.get('favorite')), {book: [42]});
+  assert.equal(b.items.torrserver_url, 'http://new'); assert.equal(b.items.file_view, '{"movie":0.5}');
+  assert.deepEqual(b.refreshes, ['favorite']);
+  b.visibility(true); server.respond(b.requests.at(-1)); server.respond(b.requests.at(-1));
+  assert.deepEqual(server.data(), {favorite: '{"book":[42]}', file_view: '{"movie":0.5}', torrserver_url: 'http://new'});
+  a.visibility(true); a.visibility(false); server.respond(a.requests.at(-1));
+  assert.deepEqual(clean(a.window.Lampa.Storage.get('file_view')), {movie: 0.5});
+  assert.deepEqual(a.refreshes, ['timeline']);
+  for (const [p, player, key] of [[a, 'native', 'a'], [b, 'external', 'b']]) {
+    assert.equal(p.items.player, player); assert.equal(p.items.jackett_key, key);
+    assert.equal(p.items.plugins, JSON.stringify([key]));
+    assert.equal(p.reloads.length, 0); assert.deepEqual(p.notices, []);
+  }
+});
+
+test('acceptance: temporary whitelist additions alone enable export, import and encrypt metadata', () => {
+  for (const scopeName of ['user', 'user_optional']) {
+    const scope = clean(realScope), key = 'acceptance_setting';
+    scope.scopes[scopeName].push(key); scope.encrypt.push(key);
+    const server = sharedDocument({});
+    const a = acceptanceDevice(server, {hidden: true}, scope);
+    const b = acceptanceDevice(server, {hidden: true}, scope);
+    a.change(key, '{ "value": "новое" } '); a.tick(scopeName === 'user' ? 2000 : 300000);
+    server.respond(a.requests.at(-1));
+    assert.deepEqual(putBody(a.requests.at(-1)).encrypt, scope.encrypt);
+    server.respond(a.requests.at(-1));
+    assert.equal(server.data()[key], a.items[key]);
+    b.visibility(false); server.respond(b.requests.at(-1));
+    assert.equal(b.items[key], a.items[key]);
+    assert.deepEqual(clean(b.window.Lampa.Storage.get(key)), {value: 'новое'});
+    assert.equal(b.reloads.length, 0);
+  }
+});
+
+test('acceptance: logout and confirmed session expiry mask reserve data while retaining device settings', () => {
+  for (const status of [null, 401, 409]) {
+    const reserve = {favorite: {book: ['private']}, file_view: {private: 1}, torrserver_password: 'private'};
+    const local = {player: 'native', jackett_key: 'local-key', plugins: '["local"]', file_view_cub: 'external'};
+    const server = sharedDocument({language: 'en', favorite: '{"book":[42]}'});
+    const p = acceptanceDevice(server, {items: local, reserve});
+    if (status) {
+      p.tick(60000); p.requests.at(-1).fail(status);
+      assert.equal(expireCount(p), 1);
+    }
+    // account.js confirms guest after the expiry event; it owns that recheck.
+    p.state(guestState);
+    assert.equal(p.reloads.length, 1);
+    const guest = page({items: p.reloads[0], reserve, state: guestState, upstreamStorage: true, uninspected: true});
+    for (const key of Object.keys(reserve)) {
+      assert.equal(guest.items[key], '');
+      assert.equal(guest.window.Lampa.Storage.get(key, ''), '', 'the actual upstream getter masks reserve');
+    }
+    for (const [key, value] of Object.entries(local)) assert.equal(guest.items[key], value);
+    assert.equal(guest.items[USER], undefined); assert.equal(guest.items[BASE], undefined);
+    guest.tick(600000); assert.equal(guest.requests.length, 0);
+  }
+});
