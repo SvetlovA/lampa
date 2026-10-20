@@ -7,10 +7,13 @@
 - Keep it as simple as possible. Config and user data must sync reliably. History,
   progress and torrent views are best-effort: they sync when they fit and are dropped
   otherwise, with no extra logic to force them through.
-- **One whitelist, edited by hand.** `svtlv/storage-scope.json` is the only list of synced
-  keys: `user` and `user_connection` (must sync) and a new `user_optional` (best-effort).
-  The add-on reads this file at runtime and the backend stores a flat `{key: value}` map
-  without knowing key names, so adding a key is a one-line JSON edit with no JS or Go change.
+- **One config, edited by hand.** `svtlv/storage-scope.json` is the only place that says
+  which keys sync (`user` and `user_connection` must sync, new `user_optional` best-effort)
+  and which are encrypted (new `encrypt` list). The add-on reads it at runtime and sends
+  the `encrypt` list with every PUT. The backend stores any JSON it receives for the user,
+  seals the listed fields in place as `{"$sealed": "…"}` and unseals every such value on
+  read. It knows no key names, so adding or encrypting a key is a JSON edit with no JS or
+  Go change.
 - The UI keeps using `localStorage` exactly like upstream Lampa; only the add-on talks to
   the API, so upstream bundle updates do not conflict with sync.
 - A running device picks up changes from other devices by **polling with an ETag**
@@ -94,11 +97,11 @@
                  │ local change → GET + PUT dirty  │
                  └────────────────┬────────────────┘
                                   ▼
-                lampa-api: flat {key: value}, no key names
-                (except sealed credentials) → Postgres
+                lampa-api: any JSON per user, seals the keys the PUT
+                lists in "encrypt", knows no key names → Postgres jsonb
 ```
 **Note:** Lampa itself never talks to our API. The add-on is the only part that knows
-which keys sync, and it learns that from one JSON file.
+which keys sync and which are secret, and it learns both from one JSON file.
 
 Four rules keep it simple and safe:
 
@@ -184,36 +187,59 @@ Draft lists, **the user decides the final ones** before Task 3:
 | Scope | Keys | Guarantee |
 |---|---|---|
 | `user` | `language`, `tmdb_lang`, `favorite`, `mine_reactions`, `person_subscribes_id` | must sync |
-| `user_connection` | `torrserver_url`, `torrserver_auth`, `torrserver_login`, `torrserver_password` | must sync (login/password sealed) |
+| `user_connection` | `torrserver_url`, `torrserver_auth`, `torrserver_login`, `torrserver_password` | must sync (login/password in `encrypt`) |
 | `user_optional` (new) | `file_view`, `online_view`, `online_watched_last`, `torrents_view`, `search_history`, `online_last_balanser`, `user_clarifys` | best-effort |
 | moved out | `file_view_*` → `external` | CUB-profile progress; never synced (§10.3) |
+| `encrypt` (new list) | `torrserver_login`, `torrserver_password` | sealed by the backend |
 
 How to add a key later:
 1. Move the key in `svtlv/storage-scope.json` into `user` (must sync) or `user_optional`
    (best-effort). Prefix rules like `foo_*` also work.
-2. If it is a secret, add it to `SensitiveSettings` in `backend/pkg/storage/crypto.go`
-   so it is sealed (`TestSensitiveSettings_matchUI` points this out for settings inputs).
-3. Run the tests, commit, deploy `lampa-web`. No add-on or other backend change.
+2. If it is a secret, also add it to `encrypt` in the same file.
+3. Run the tests, commit, deploy `lampa-web`. No add-on or backend change.
+
+The guard checks that every `encrypt` entry is a synced exact key, and that every synced
+settings input that looks secret (`*password*`, `*_key*`, `*token*`) is in `encrypt`.
+That rule replaces the Go `SensitiveSettings`/`plainUIInputs` lists, so an upstream pull
+never needs a Go edit.
 
 ### Document (schema version 2)
 
+PUT body:
 ```json
-{"schema_version": 2, "data": {
-  "language": "ru",
-  "torrserver_url": "http://ts:8090",
-  "torrserver_password": "secret",
-  "favorite": "{\"book\":[...],\"history\":[...]}",
-  "file_view": "{...}"}}
+{"schema_version": 2,
+ "data": {
+   "language": "ru",
+   "torrserver_url": "http://ts:8090",
+   "torrserver_password": "secret",
+   "favorite": "{\"book\":[...],\"history\":[...]}",
+   "file_view": "{...}"},
+ "encrypt": ["torrserver_login", "torrserver_password"]}
 ```
 
-Backend rules (no key names except `SensitiveSettings`):
-- `data` is an object of string values; keys match `^[A-Za-z0-9_-]{1,128}$`.
+Stored in `lampa_user_data.data` (jsonb):
+```json
+{"language": "ru", "torrserver_url": "http://ts:8090",
+ "torrserver_password": {"$sealed": "base64(nonce+ciphertext)"},
+ "favorite": "{...}", "file_view": "{...}"}
+```
+**Note:** the encrypted value stays under its own key, inside the same JSON. GET returns
+the PUT's `data` unchanged (sealed values decrypted back to their strings), without the
+`encrypt` list.
+
+Backend rules (no key names anywhere):
+- `data` is a JSON object; keys match `^[A-Za-z0-9_-]{1,128}$`; values are any JSON except
+  an object containing `$sealed` (reserved, `400`).
+- `encrypt` is an optional array of keys (same pattern, ≤ 64 entries). Each listed key
+  present in `data` is sealed with the existing AES-GCM code and `LAMPA_API_DATA_KEY`;
+  listed keys missing from `data` are ignored.
+- On read, every top-level `{"$sealed": …}` value is opened. A value that fails to open
+  answers `500 connections_unreadable` as today (lost or wrong data key).
 - Each value ≤ `MaxValueBytes` (1 MiB, replaces `MaxSectionBytes`); body ≤ `MaxBodyBytes`
   (raised to 4 MiB in `appsettings.json`); depth checks stay.
-- `SensitiveSettings` keys are taken from the top level of `data` and sealed as today.
+- The `encrypted_connections` column is no longer used; migration `00003` drops it.
 - A stored row with `schema_version` 1 is treated as no document (`404`), so the first
-  Plan 4 login uploads fresh. There is no migration, because no real client has written
-  version 1 documents.
+  Plan 4 login uploads fresh. No real client has written version 1 documents.
 
 Size rule in the add-on: a `user_optional` value over 1 MiB is left out; a must-sync value
 over 1 MiB blocks the upload with a Noty. If the body is over 4 MiB, `user_optional` keys
@@ -282,21 +308,25 @@ non-HTTP(S) origins (`^https?:$` guard).
 
 ## Implementation Steps
 
-### Task 1: Flat user-data document (schema version 2)
+### Task 1: Any-JSON user document with in-place sealing (schema version 2)
 
 **Files:**
 - Modify: `backend/pkg/storage/document.go`, `document_test.go`
 - Modify: `backend/pkg/storage/crypto.go`, `crypto_test.go`
 - Modify: `backend/pkg/storage/service.go`, `service_test.go`
+- Modify: `backend/pkg/storage/postgres.go`, `postgres_test.go`
+- Create: `backend/migrations/00003_drop_encrypted_connections.sql`
 - Modify: `backend/pkg/api/userdata.go`, `userdata_test.go`
 - Modify: `backend/pkg/config/defaults/appsettings.json`, `backend/pkg/config/*.go` (limit rename), `config_test.go`
 
-- [ ] `ParseDocument`: `schema_version` must be 2; `data` is an object of string values with keys matching `^[A-Za-z0-9_-]{1,128}$`; each value ≤ `MaxValueBytes`; remove `Sections` and the section filling
-- [ ] rename `MaxSectionBytes` → `MaxValueBytes` (1 MiB); raise `Api.MaxBodyBytes` to 4194304 in `appsettings.json`
-- [ ] sealing: take `SensitiveSettings` keys from the top level of `data` instead of `settings`; reading merges them back as before
-- [ ] `Service.Get`: a stored row with `schema_version` ≠ 2 answers "not found"
-- [ ] `userdata.go`: drop `orderedData`; encode `data` with sorted keys so equal documents give equal bytes
-- [ ] write tests: valid flat document; rejected non-string value, bad key, oversize value, oversize body, version 1; sealed keys never appear in JSONB and come back on read; a version-1 row reads as 404
+- [ ] `ParseDocument`: `schema_version` must be 2; `data` is an object with keys matching `^[A-Za-z0-9_-]{1,128}$` and any JSON values except a reserved `$sealed` object; optional `encrypt` array (same key pattern, ≤ 64); each value ≤ `MaxValueBytes`; remove `Sections` and section filling
+- [ ] rename `MaxSectionBytes` → `MaxValueBytes` (1 MiB); raise `Api.MaxBodyBytes` to 4194304
+- [ ] `crypto.go`: replace `SensitiveSettings` extraction with `sealListed(data, encrypt)` (each listed key → `{"$sealed": base64}`) and `openAll(data)` (every `$sealed` value → original JSON); keep the AES-GCM code and key handling
+- [ ] `service.go`/`postgres.go`: store the sealed `data` in the `data` column only; stop reading/writing `encrypted_connections`; migration `00003` drops the column; a row with `schema_version` ≠ 2 reads as "not found"
+- [ ] `userdata.go`: drop `orderedData`; encode `data` with sorted keys so equal documents give equal bytes (needed for a stable ETag)
+- [ ] write tests: any JSON values round-trip; listed keys are sealed in the stored JSONB (plaintext absent) and come back decrypted; unlisted keys stay plain; listed-but-missing keys ignored; reserved `$sealed` input → 400; wrong data key → `connections_unreadable`
+- [ ] write tests: bad key, oversize value, oversize body, `encrypt` too long or malformed, version 1 rejected on PUT and read as 404; migration drops the column and the health probe still passes
+- [ ] remove `SensitiveSettings` and `TestSensitiveSettings_matchUI`'s Go lists (the guard moves to Task 3)
 - [ ] run `make fmt test race lint` in `backend/` - must pass before task 2
 
 ### Task 2: Expected-user precondition and ETag
@@ -321,8 +351,8 @@ non-HTTP(S) origins (`^https?:$` guard).
 - Modify: `docs/tests/ownership-docs.test.cjs`
 
 - [ ] ⚠️ get the user's final key lists (must sync vs best-effort) and apply them
-- [ ] add the `user_optional` scope; move best-effort keys into it; move `file_view_*` to `external` (unless the user decides otherwise); update `_policy` and the key notes
-- [ ] guard: add `user_optional` to `storageScopeNames`; sealed keys may live only in `user_connection` or `connection`; update the Plan 4 assertions (~596–612)
+- [ ] add the `user_optional` scope; move best-effort keys into it; move `file_view_*` to `external` (unless the user decides otherwise); add the top-level `encrypt` list; update `_policy` and the key notes
+- [ ] guard: add `user_optional` to `storageScopeNames`; every `encrypt` entry is an exact synced key; every synced settings input from the bundle whose name looks secret (`password`, `_key`, `token`) is in `encrypt`; update the Plan 4 assertions (~596–612) and drop the old sealed/plain lists
 - [ ] update `ownership-docs.test.cjs` for the new scope
 - [ ] run `make test` in `backend/` and `node --test docs/tests/*.test.cjs` - must pass before task 4
 
@@ -334,7 +364,7 @@ non-HTTP(S) origins (`^https?:$` guard).
 - Modify: `.github/workflows/tests.yaml`
 
 - [ ] create `svtlv/account-sync.js` IIFE with the protocol guard, inline `{en, ru}` strings and a `$.ajax` helper (JSON, timeout, `Content-Type` on PUT)
-- [ ] `loadScope()` fetches `svtlv/storage-scope.json?v=<cache_version>` and validates it; `classify(key)` uses exact → longest prefix precedence; `synced(key)` is true for `user`, `user_connection`, `user_optional`
+- [ ] `loadScope()` fetches `svtlv/storage-scope.json?v=<cache_version>` and validates it; `classify(key)` uses exact → longest prefix precedence; `synced(key)` is true for `user`, `user_connection`, `user_optional`; every PUT body carries the file's `encrypt` list
 - [ ] `exportLocal()` walks `localStorage` keys, keeps synced ones (raw strings, skip null); `overlay(base, dirtyKeys)`; the size rule with `user_optional` dropped largest first
 - [ ] `applyDoc(data)` (pre-boot, raw `setItem`): only synced keys with string values; returns `{changed, missingOnServer}`; `setItem` failure throws; `clearSynced()` removes synced keys and the marker
 - [ ] wrap every storage access in try/catch; failures turn sync off for the page and never block boot
@@ -413,10 +443,10 @@ non-HTTP(S) origins (`^https?:$` guard).
 - [ ] confirm `git diff` does not touch `app.min.js`, `css/app.css`, `lang/*`, `assembly.json`
 
 ### Task 10: [Final] Update documentation
-- [ ] `docs/settings-sync-backend-design.md`: §4 flat document v2 and limits; §6/§7 boot apply, ETag polling, live apply (also during playback) and "fresh server copy + dirty keys"; §8 precondition, `ETag`/`304`, PUT ETag and the v2 example; §5.3.1 one Keycloak call per poll; §10 lists `account-sync.js` (no `account-sync.css`) and how it reads the whitelist; §10.3 adds `user_optional` and "how to add a key"; §16 resolved (clear on logout); Status → Implemented
+- [ ] `docs/settings-sync-backend-design.md`: §4 any-JSON document v2, the `encrypt` list, in-place `$sealed` values, the dropped `encrypted_connections` column and limits; §12 secrets are chosen by `storage-scope.json` `encrypt`; §6/§7 boot apply, ETag polling, live apply (also during playback) and "fresh server copy + dirty keys"; §8 precondition, `ETag`/`304`, PUT ETag and the v2 example; §5.3.1 one Keycloak call per poll; §10 lists `account-sync.js` (no `account-sync.css`) and how it reads the whitelist; §10.3 adds `user_optional` and "how to add a key"; §16 resolved (clear on logout); Status → Implemented
 - [ ] §14 Plan 4 deviations: flat document instead of sections; no feature flag; `file_view_*` not synced; §6.3 read-back GET dropped; key-level last-wins; CUB writers not coordinated (`favorite`/`file_view` unused while CUB sync is active); "Clear cache" and CUB backup restore undone by the next boot GET; unsaved changes lost on 401/logout; sign-in/out notices disappear in the reload
 - [ ] keep `docs/tests/ownership-docs.test.cjs` passing after doc edits
-- [ ] `CLAUDE.md`: Svtlv add-ons section gets `account-sync.js`, the seam order, the marker key, and "to sync a key, add it to `user`/`user_optional` in `storage-scope.json`"; lampa-api section notes the flat v2 document
+- [ ] `CLAUDE.md`: Svtlv add-ons section gets `account-sync.js`, the seam order, the marker key, and "to sync a key, add it to `user`/`user_optional` in `storage-scope.json`; to encrypt it, also add it to `encrypt`"; lampa-api section replaces the `SensitiveSettings`/`TestSensitiveSettings_matchUI` text with the any-JSON v2 document and in-place sealing
 - [ ] `backend/README.md`: document v2 shape, precondition and ETag
 - [ ] move this plan to `docs/plans/completed/`
 
