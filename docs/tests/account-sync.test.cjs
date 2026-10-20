@@ -16,12 +16,14 @@ const inspected = source.replace(/\}\)\(\);\s*$/, `window.core = {
   exportLocal: exportLocal, overlay: overlay, applyDoc: applyDoc,
   clearSynced: clearSynced, fitBody: fitBody,
   bootState: function () { return {ready: ready, lastDoc: lastDoc, lastEtag: lastEtag, scope: !!scope}; },
+  accountState: function () { return {uploads: uploads, handledUser: handledUser}; },
   disabled: function () { return disabled; }, failure: function () { return failure; }
 }; })();`);
 
 function page(options = {}) {
   const items = Object.assign(Object.create(null), options.items);
   const faults = {}, calls = [], requests = [], notices = [], trace = [];
+  const listeners = {}, windowEvents = {}, reloads = [], events = [];
   const timers = new Map();
   let clock = 0, timerID = 0;
   function setTimeout(fn, delay) {
@@ -56,15 +58,28 @@ function page(options = {}) {
     removeItem(key) { check('removeItem', key); if (!faults.silentRemove) delete items[key]; }
   };
   const window = {
-    location: {protocol: options.protocol || 'https:'},
-    Lampa: {Storage: {get: () => options.language || 'en'}, Noty: {show: text => notices.push(text)}}
+    location: {protocol: options.protocol || 'https:', reload() { reloads.push({...items}); }},
+    svtlv_account_state: options.state,
+    Lampa: {
+      Storage: {get: (key, fallback) => key === 'language' && fallback !== '' ? options.language || 'en' :
+        items[key] ?? options.reserve?.[key] ?? fallback},
+      Noty: {show: text => notices.push(text)},
+      Listener: {
+        follow(name, fn) { (listeners[name] ||= []).push(fn); },
+        send(name, event) { events.push({name, event}); for (const fn of listeners[name] || []) fn(event); }
+      }
+    }
   };
   const Lampa = window.Lampa;
   if (options.preboot) delete window.Lampa;
   Object.defineProperty(window, 'localStorage', {
     get() { if (faults.property) throw new Error('localStorage getter'); return store; }
   });
-  const $ = {ajax(config) {
+  function $(target) {
+    assert.equal(target, window);
+    return {on(name, fn) { (windowEvents[name] ||= []).push(fn); }};
+  }
+  $.ajax = function (config) {
     trace.push({url: config.url});
     if (faults.ajax) throw new Error('ajax');
     const xhr = {status: 200, getResponseHeader: name => name === 'ETag' ? '"etag"' : null};
@@ -78,12 +93,19 @@ function page(options = {}) {
     };
     requests.push(request);
     return request;
-  }};
+  };
   const context = vm.createContext({window, $, cache_version: 42, setTimeout, clearTimeout: id => timers.delete(id)});
   vm.runInContext(options.uninspected ? source : inspected, context);
   return {
-    window, core: window.core, items, faults, calls, requests, notices, timers, trace, tick,
+    window, core: window.core, items, faults, calls, requests, notices, timers, trace, tick, reloads, events,
     install() { window.Lampa = Lampa; },
+    state(state) {
+      window.svtlv_account_state = state;
+      Lampa.Listener.send('svtlv_account', {type: 'state', state});
+    },
+    storageEvent(change, wrapped = true) {
+      for (const fn of windowEvents.storage || []) fn(wrapped ? {originalEvent: change} : change);
+    },
     reload() { vm.runInContext(inspected, context); },
     load(scope = realScope) {
       let result;
@@ -407,6 +429,7 @@ test('ajax helper sends JSON, timeout, conditional identity and CSRF headers', (
 function bootPage(items = {}) {
   const p = page({preboot: true, items: {[USER]: 'Alice', ...items}});
   let starts = 0;
+  p.bootTraceStart = p.trace.length;
   p.window.svtlv_sync_boot(() => starts++);
   p.starts = () => starts;
   p.scopeRequest = p.requests.find(r => r.config.url.startsWith('svtlv/storage-scope.json'));
@@ -421,13 +444,15 @@ test('unmarked boot starts immediately with no scope or user-data requests, exac
   for (const marker of [undefined, '']) {
     const p = page({preboot: true, items: {language: 'ru', [USER]: marker}, uninspected: true});
     let starts = 0, second = 0;
+    const bootTraceStart = p.trace.length;
     p.window.svtlv_sync_boot(() => starts++);
     p.window.svtlv_sync_boot(() => second++);
+    p.install();
     p.tick(10000);
     assert.equal(starts, 1); assert.equal(second, 0);
     assert.equal(p.requests.length, 0); assert.equal(p.timers.size, 0);
     assert.equal(p.items.language, 'ru');
-    assert.deepEqual(p.trace[0], {timer: 3000}, 'deadline is armed before reading storage');
+    assert.deepEqual(p.trace[bootTraceStart], {timer: 3000}, 'deadline is armed before reading storage');
   }
 });
 
@@ -436,7 +461,7 @@ test('marked boot fetches in parallel with identity, applies before starting, an
     const p = bootPage({player: 'device'});
     assert.equal(p.requests.length, 2);
     assert.equal(p.starts(), 0);
-    assert.deepEqual(p.trace[0], {timer: 3000});
+    assert.deepEqual(p.trace[p.bootTraceStart], {timer: 3000});
     assert.deepEqual(clean(p.dataRequest.config.headers), {'X-Lampa-Expected-User': 'Alice'});
     assert.equal(p.dataRequest.config.timeout, 3000);
     const data = {language: 'ru', favorite: '{"book":[1]}', plugins: '["untrusted"]', tmdb_lang: false};
@@ -451,7 +476,7 @@ test('marked boot fetches in parallel with identity, applies before starting, an
     assert.equal(p.items[USER], 'Alice');
     assert.deepEqual(clean(p.core.bootState()), {ready: true, lastDoc: data, lastEtag: '"etag"', scope: true});
     assert.equal(JSON.parse(p.items[BASE]).language, p.core.fp('ru'));
-    p.tick(5000);
+    p.install(); p.tick(5000);
     assert.equal(p.starts(), 1); assert.equal(p.timers.size, 0); assert.equal(p.notices.length, 0);
   }
 });
@@ -588,4 +613,242 @@ test('storage access and synchronous ajax exceptions cannot hold boot', () => {
     p.install(); p.tick(0); assert.equal(p.notices.length, 1);
     p.tick(5000); assert.equal(starts, 1);
   }
+});
+
+const signedIn = user_id => ({status: 'signed_in', user_id});
+const guestState = {status: 'guest', user_id: ''};
+function loginPage(options = {}, user = 'Alice') {
+  const p = page(options);
+  p.state(signedIn(user));
+  const scopeRequest = p.requests.find(r => r.config.url.startsWith('svtlv/storage-scope.json'));
+  if (scopeRequest) scopeRequest.success(clean(realScope));
+  p.dataRequest = p.requests.find(r => r.config.url === '/api/v1/user-data');
+  return p;
+}
+
+test('polls for Lampa, reads the latest account snapshot, and installs listeners only once', () => {
+  const p = page({preboot: true, state: signedIn('Old')});
+  p.tick(300); assert.equal(p.requests.length, 0);
+  p.window.svtlv_account_state = signedIn('Alice');
+  p.install(); p.tick(100);
+  assert.equal(p.requests.length, 1);
+  p.requests[0].success(clean(realScope));
+  assert.equal(p.requests.length, 2);
+  assert.equal(p.requests[1].config.headers['X-Lampa-Expected-User'], 'Alice');
+  p.requests[1].success(documentV2({}));
+  p.reload(); p.tick(1000); p.state(signedIn('Alice'));
+  assert.equal(p.requests.length, 2);
+  assert.equal(p.core.accountState().uploads, true);
+});
+
+test('TV sign-in replaces guest data and persists marker/base before its single reload', () => {
+  const p = loginPage({items: {favorite: '{"guest":1}', language: 'ru', player: 'native', plugins: 'code'}});
+  assert.equal(p.dataRequest.config.headers['X-Lampa-Expected-User'], 'Alice');
+  p.dataRequest.success(documentV2({favorite: '{"server":2}', language: 'en', plugins: 'remote'}));
+  assert.equal(p.reloads.length, 1);
+  assert.equal(p.reloads[0][USER], 'Alice');
+  assert.equal(JSON.parse(p.reloads[0][BASE]).favorite, p.core.fp('{"server":2}'));
+  assert.equal(p.items.favorite, '{"server":2}'); assert.equal(p.items.language, 'en');
+  assert.equal(p.items.player, 'native'); assert.equal(p.items.plugins, 'code');
+  assert.equal(p.core.dirty('favorite'), false);
+  p.state(signedIn('Alice')); p.dataRequest.success(documentV2({language: 'de'}));
+  assert.equal(p.reloads.length, 1); assert.equal(p.items.language, 'en');
+});
+
+test('equal TV sign-in data enables uploads without reloading; repeated signed-in is ignored', () => {
+  const data = {favorite: '{"book":[1]}', language: 'en'};
+  const p = loginPage({items: data});
+  p.state(signedIn('Alice'));
+  assert.equal(p.requests.length, 2, 'duplicate pending state does not request twice');
+  p.dataRequest.success(documentV2(data));
+  assert.equal(p.reloads.length, 0);
+  assert.deepEqual(clean(p.core.accountState()), {uploads: true, handledUser: 'Alice'});
+  assert.equal(p.items[USER], 'Alice'); assert.equal(p.core.dirty('favorite'), false);
+  const before = {...p.items}, calls = p.calls.length;
+  p.state(signedIn('Alice')); p.state({status: 'checking'}); p.state({status: 'unavailable'}); p.state(signedIn('Alice'));
+  assert.equal(p.requests.length, 2); assert.equal(p.calls.length, calls);
+  assert.deepEqual({...p.items}, before); assert.equal(p.core.accountState().uploads, true);
+});
+
+test('a server document without favorite clears guest favorite and reloads', () => {
+  const p = loginPage({items: {favorite: '{"guest":1}'}});
+  p.dataRequest.success(documentV2({}));
+  assert.equal(p.items.favorite, ''); assert.equal(p.reloads.length, 1);
+  assert.equal(p.reloads[0][USER], 'Alice'); assert.deepEqual(JSON.parse(p.items[BASE]), {});
+});
+
+test('a server document clears reserve-only favorites before reloading', () => {
+  const p = loginPage({reserve: {favorite: {book: [1]}}});
+  p.dataRequest.success(documentV2({}));
+  assert.equal(p.items.favorite, ''); assert.equal(p.reloads.length, 1);
+});
+
+test('a different account replaces previous synced data instead of preserving it as dirty', () => {
+  const p = loginPage({items: {[USER]: 'Bob', favorite: 'old private data', torrserver_password: 'old secret',
+    language: 'ru', player: 'native'}});
+  p.dataRequest.success(documentV2({language: 'en'}));
+  assert.equal(p.items.favorite, ''); assert.equal(p.items.torrserver_password, '');
+  assert.equal(p.items.language, 'en'); assert.equal(p.items.player, 'native');
+  assert.equal(p.reloads[0][USER], 'Alice'); assert.equal(p.core.dirty('language'), false);
+});
+
+test('404 on first login retains guest data, resets base, and enables its upload', () => {
+  const p = loginPage({items: {favorite: '{"guest":1}', language: 'ru', [BASE]: '{"language":"2:123"}'}});
+  p.dataRequest.fail(404, missingDocument);
+  assert.equal(p.reloads.length, 0); assert.equal(p.items[USER], 'Alice');
+  assert.deepEqual(JSON.parse(p.items[BASE]), {});
+  assert.equal(p.core.accountState().uploads, true);
+  assert.equal(p.core.dirty('favorite'), true); assert.equal(p.core.dirty('language'), true);
+  assert.deepEqual(clean(p.core.fitBody(p.core.overlay(p.core.bootState().lastDoc)).data),
+    {favorite: '{"guest":1}', language: 'ru'});
+  assert.equal(p.core.bootState().lastEtag, '');
+});
+
+test('404 for a different account clears its data and persists the new empty base/marker before reload', () => {
+  const p = loginPage({items: {[USER]: 'Bob', favorite: 'private', language: 'ru', plugins: 'local'}});
+  p.dataRequest.fail(404, missingDocument);
+  assert.equal(p.items.favorite, ''); assert.equal(p.items.language, ''); assert.equal(p.items.plugins, 'local');
+  assert.equal(p.reloads.length, 1); assert.equal(p.reloads[0][USER], 'Alice');
+  assert.deepEqual(JSON.parse(p.reloads[0][BASE]), {});
+  assert.deepEqual(clean(p.core.exportLocal()), {});
+});
+
+test('same-account recovery preserves dirty edits and reloads only if server apply changes a value', () => {
+  for (const changed of [false, true]) {
+    const p = page({items: {[USER]: 'Alice', language: 'ru', favorite: 'same'}});
+    p.syncedBase({language: 'en', favorite: 'same'});
+    p.state(signedIn('Alice')); p.requests[0].success(clean(realScope));
+    p.requests[1].success(documentV2({language: 'en', favorite: changed ? 'new' : 'same'}));
+    assert.equal(p.items.language, 'ru'); assert.equal(p.core.dirty('language'), true);
+    assert.equal(p.items.favorite, changed ? 'new' : 'same');
+    assert.equal(p.reloads.length, changed ? 1 : 0);
+    assert.equal(p.core.accountState().uploads, !changed);
+    assert.equal(p.items[USER], 'Alice');
+  }
+});
+
+test('successful pre-boot data enables same-account uploads without a second request or reload', () => {
+  const p = bootPage();
+  p.scopeRequest.success(clean(realScope)); p.dataRequest.success(documentV2({language: 'en'}));
+  p.window.svtlv_account_state = signedIn('Alice'); p.install(); p.tick(100);
+  assert.equal(p.requests.length, 2); assert.equal(p.reloads.length, 0);
+  assert.equal(p.core.accountState().uploads, true);
+});
+
+test('404 recovery for the same account preserves its local data and dirty base', () => {
+  const p = page({items: {[USER]: 'Alice', language: 'ru'}});
+  p.syncedBase({language: 'en'}); const before = p.items[BASE];
+  p.state(signedIn('Alice')); p.requests[0].success(clean(realScope)); p.requests[1].fail(404, missingDocument);
+  assert.equal(p.items.language, 'ru'); assert.equal(p.items[BASE], before);
+  assert.equal(p.core.dirty('language'), true); assert.equal(p.core.accountState().uploads, true);
+  assert.equal(p.reloads.length, 0);
+});
+
+for (const leaving of [false, true]) {
+  test('logout clears synced data and ' + (leaving ? 'lets SSO navigate' : 'reloads the TV'), () => {
+    const p = loginPage({items: {language: 'en', favorite: 'book', player: 'native', file_view_123: 'cub'}});
+    p.dataRequest.success(documentV2({language: 'en', favorite: 'book'}));
+    assert.equal(p.reloads.length, 0);
+    p.window.svtlv_account_leaving = leaving;
+    p.state(guestState);
+    assert.equal(p.items.favorite, ''); assert.equal(p.items.language, ''); assert.equal(p.items.file_view, '');
+    assert.equal(p.items.player, 'native'); assert.equal(p.items.file_view_123, 'cub');
+    assert.equal(p.items[USER], undefined); assert.equal(p.items[BASE], undefined);
+    assert.equal(p.core.accountState().uploads, false);
+    assert.equal(p.reloads.length, leaving ? 0 : 1);
+    if (!leaving) assert.equal(p.reloads[0][USER], undefined);
+    p.state(guestState); assert.equal(p.reloads.length, leaving ? 0 : 1);
+  });
+}
+
+test('confirmed guest at startup clears marked data after loading scope without a user-data request', () => {
+  const p = page({items: {[USER]: 'Alice', favorite: 'private'}, state: guestState});
+  assert.equal(p.requests.length, 1); assert.match(p.requests[0].config.url, /^svtlv\/storage-scope/);
+  p.requests[0].success(clean(realScope));
+  assert.equal(p.requests.length, 1); assert.equal(p.items.favorite, ''); assert.equal(p.items[USER], undefined);
+  assert.equal(p.reloads.length, 1);
+});
+
+test('anonymous startup and checking/unavailable states preserve local data and make no requests', () => {
+  const p = page({state: guestState, items: {favorite: 'guest'}});
+  p.state({status: 'checking'}); p.state({status: 'unavailable'}); p.state(guestState); p.tick(120000);
+  assert.equal(p.items.favorite, 'guest'); assert.equal(p.requests.length, 0); assert.equal(p.reloads.length, 0);
+  const marked = page({state: {status: 'checking'}, items: {[USER]: 'Alice', favorite: 'book'}});
+  marked.state({status: 'unavailable'});
+  assert.equal(marked.items.favorite, 'book'); assert.equal(marked.requests.length, 0);
+});
+
+test('another tab changing the marker reloads once, while other storage events do nothing', () => {
+  for (const wrapped of [false, true]) {
+    const p = page();
+    p.storageEvent({key: 'favorite', oldValue: 'a', newValue: 'b'}, wrapped);
+    p.storageEvent({key: USER, oldValue: 'Alice', newValue: 'Alice'}, wrapped);
+    assert.equal(p.reloads.length, 0);
+    p.storageEvent({key: USER, oldValue: 'Alice', newValue: null}, wrapped);
+    p.storageEvent({key: USER, oldValue: null, newValue: 'Bob'}, wrapped);
+    assert.equal(p.reloads.length, 1); assert.equal(p.core.accountState().uploads, false);
+  }
+});
+
+test('late data responses cannot apply after guest or another signed-in account', () => {
+  for (const next of [guestState, signedIn('Bob')]) {
+    const p = loginPage(); const old = p.dataRequest;
+    p.state(next);
+    old.success(documentV2({favorite: 'Alice private data'})); old.fail(401);
+    assert.equal(p.items.favorite, undefined); assert.equal(p.items[USER], undefined);
+    assert.equal(p.events.filter(e => e.event.type === 'expired').length, 0);
+    if (next.user_id) {
+      p.requests.at(-1).fail(404, missingDocument);
+      assert.equal(p.items[USER], 'Bob'); assert.equal(p.core.accountState().uploads, true);
+    }
+  }
+});
+
+test('late scope callbacks from an obsolete identity cannot disable the current sync', () => {
+  const p = page(); p.state(signedIn('Alice')); const old = p.requests[0];
+  p.state(signedIn('Bob')); const current = p.requests[1];
+  old.success({}); assert.equal(p.core.disabled(), false); assert.equal(p.requests.length, 2);
+  current.success(clean(realScope)); p.requests[2].success(documentV2({}));
+  assert.equal(p.items[USER], 'Bob'); assert.equal(p.core.accountState().uploads, true);
+});
+
+test('account fetch failures keep local data and allow a later signed-in event to retry', () => {
+  for (const response of ['network', 'invalid', 'wrong404']) {
+    const p = loginPage({items: {favorite: 'guest'}});
+    if (response === 'network') p.dataRequest.fail(503);
+    else if (response === 'invalid') p.dataRequest.success({schema_version: 1, data: {}});
+    else p.dataRequest.fail(404, {error: {code: 'other'}});
+    assert.equal(p.items.favorite, 'guest'); assert.equal(p.items[USER], undefined);
+    assert.equal(p.core.accountState().uploads, false); assert.equal(p.reloads.length, 0);
+    assert.deepEqual(p.notices, ['Not saved to Account']);
+    p.state(signedIn('Alice')); assert.equal(p.requests.length, 3);
+    p.requests[2].fail(404, missingDocument);
+    assert.equal(p.core.accountState().uploads, true);
+  }
+});
+
+test('post-boot scope fetch failure is safe; invalid scope disables the page', () => {
+  for (const invalid of [false, true]) {
+    const p = page({items: {favorite: 'guest'}}); p.state(signedIn('Alice'));
+    if (invalid) p.requests[0].success({}); else p.requests[0].fail(503);
+    assert.equal(p.items.favorite, 'guest'); assert.equal(p.requests.length, 1);
+    assert.equal(p.core.accountState().uploads, false); assert.equal(p.core.disabled(), invalid);
+    assert.equal(p.reloads.length, 0);
+  }
+});
+
+test('identity failures request a session recheck without applying the response', () => {
+  for (const status of [401, 409]) {
+    const p = loginPage({items: {favorite: 'guest'}}); p.dataRequest.fail(status);
+    assert.equal(p.items.favorite, 'guest'); assert.equal(p.core.accountState().uploads, false);
+    assert.equal(p.events.filter(e => e.event.type === 'expired').length, 1);
+    assert.equal(p.reloads.length, 0);
+  }
+});
+
+test('post-boot storage failure never escapes the account listener or enables uploads', () => {
+  const p = loginPage(); p.faults.quota = 'language';
+  assert.doesNotThrow(() => p.dataRequest.success(documentV2({language: 'en'})));
+  assert.equal(p.core.disabled(), true); assert.equal(p.core.accountState().uploads, false);
+  assert.equal(p.items[USER], undefined); assert.equal(p.reloads.length, 0);
 });

@@ -433,14 +433,14 @@ only. Nothing is defined on non-HTTP(S) origins (`^https?:$` guard).
 - Modify: `docs/tests/account-sync.test.cjs`
 - Modify: `docs/tests/account-state.test.cjs`
 
-- [ ] poll for `window.Lampa` like `account.js` (never `defineProperty`); read `svtlv_account_state` and follow `svtlv_account` state events; a repeated `signed_in(U)` for the handled U does nothing
-- [ ] `signed_in(U)` per the post-boot diagram, including the 404 split (no marker keeps guest data, another marker clears); marker and base before any reload; reload when anything was cleared or written
-- [ ] `guest` with marker set → clear + reload unless `window.svtlv_account_leaving`; `checking`/`unavailable` change nothing
-- [ ] `$(window).on('storage')` for `svtlv_sync_user` changes → reload
-- [ ] `account.js`: set `window.svtlv_account_leaving = true` before `applySession` when `logOutDone` will navigate to `logout_url`; change the "stays on this device" text (en and ru) to say data syncs to the Account
-- [ ] write tests: TV login with 200 (marker before reload, reload only when cleared/changed, no reload when equal → uploads on); 404 without marker uploads guest data; 404 with another marker clears; guest `favorite` with a server doc lacking `favorite` → cleared and reloaded; repeated `signed_in` ignored
-- [ ] write tests: logout clears (with `''`) and reloads; SSO logout clears without reload; `guest` at startup with a marker clears; anonymous start sends no request; storage event reloads; `account-state` test covers the leaving flag
-- [ ] run node tests - must pass before task 7
+- [x] poll for `window.Lampa` like `account.js` (never `defineProperty`); read `svtlv_account_state` and follow `svtlv_account` state events; a repeated `signed_in(U)` for the handled U does nothing
+- [x] `signed_in(U)` per the post-boot diagram, including the 404 split (no marker keeps guest data, another marker clears); marker and base before any reload; reload when anything was cleared or written
+- [x] `guest` with marker set → clear + reload unless `window.svtlv_account_leaving`; `checking`/`unavailable` change nothing
+- [x] `$(window).on('storage')` for `svtlv_sync_user` changes → reload
+- [x] `account.js`: set `window.svtlv_account_leaving = true` before `applySession` when `logOutDone` will navigate to `logout_url`; change the "stays on this device" text (en and ru) to say data syncs to the Account
+- [x] write tests: TV login with 200 (marker before reload, reload only when cleared/changed, no reload when equal → uploads on); 404 without marker uploads guest data; 404 with another marker clears; guest `favorite` with a server doc lacking `favorite` → cleared and reloaded; repeated `signed_in` ignored
+- [x] write tests: logout clears (with `''`) and reloads; SSO logout clears without reload; `guest` at startup with a marker clears; anonymous start sends no request; storage event reloads; `account-state` test covers the leaving flag
+- [x] run node tests - must pass before task 7
 
 ### Task 7: Save on change
 

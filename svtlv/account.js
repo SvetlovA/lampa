@@ -33,7 +33,7 @@
   var strings = {
     en: {
       title: 'Account',
-      descr: 'Sign in with your Svtlv account. Settings, bookmarks and history stay on this device; CUB is not affected.',
+      descr: 'Sign in with your Svtlv account. Settings, bookmarks and history sync to your Account; CUB is not affected.',
       signin_title: 'Sign in',
       signin_button: 'Sign in',
       user_title: 'Account',
@@ -69,7 +69,7 @@
     },
     ru: {
       title: 'Аккаунт',
-      descr: 'Вход через аккаунт Svtlv. Настройки, закладки и история остаются на этом устройстве; CUB не затрагивается.',
+      descr: 'Вход через аккаунт Svtlv. Настройки, закладки и история синхронизируются с Аккаунтом; CUB не затрагивается.',
       signin_title: 'Авторизация',
       signin_button: 'Войти',
       user_title: 'Аккаунт',
@@ -549,6 +549,7 @@
     loggingOut = false;
 
     if (status == 204 || status == 200) {
+      if (status == 200 && body && body.logout_url) window.svtlv_account_leaving = true;
       applySession({
         authenticated: false
       });

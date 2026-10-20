@@ -78,7 +78,8 @@ function page(options = {}) {
     follow(name, fn) { (listeners[name] ||= []).push(fn); },
     send(name, event) {
       if (name === 'svtlv_account' && event.type === 'state') {
-        events.push({state: {...event.state}, avatar: headIcon?.children[0]?.value, flag: items[flag]});
+        events.push({state: {...event.state}, avatar: headIcon?.children[0]?.value, flag: items[flag],
+          leaving: window.svtlv_account_leaving, href: window.location.href});
       }
       for (const fn of listeners[name] || []) fn(event);
     }
@@ -296,6 +297,8 @@ test('successful logout pauses heartbeat and publishes guest before redirect', (
   p.requests[1].respond({logout_url: 'https://sso.example.test/logout'}, 200);
   assert.equal(p.state().status, 'guest');
   assert.equal(p.items[flag], undefined);
+  assert.equal(p.events.at(-1).leaving, true, 'listeners see the leaving flag before guest cleanup');
+  assert.equal(p.events.at(-1).href, undefined, 'guest cleanup runs before SSO navigation');
   assert.equal(p.window.location.href, 'https://sso.example.test/logout');
   p.heartbeat();
   p.requests[2].fail();
@@ -317,6 +320,7 @@ test('logout waits for a renewal already in flight, even if expiry invalidated i
   assert.equal(q.requests[4].settings.url, '/api/v1/auth/logout');
   q.requests[4].respond({}, 204);
   assert.equal(q.state().status, 'guest');
+  assert.equal(q.events.at(-1).leaving, undefined, 'local TV logout allows the cleanup reload');
 });
 
 test('logout failure preserves an unchanged account; expiry during failure starts a recheck', () => {
@@ -325,6 +329,7 @@ test('logout failure preserves an unchanged account; expiry during failure start
   p.logout();
   p.requests[1].fail();
   assert.equal(p.state().user_id, 'Alice');
+  assert.equal(p.window.svtlv_account_leaving, undefined);
   p.logout();
   p.expire();
   p.requests[2].fail();

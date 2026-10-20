@@ -24,6 +24,11 @@
   var ready = false;
   var lastDoc = {};
   var lastEtag = '';
+  var accountUser = '';
+  var handledUser = '';
+  var accountRevision = 0;
+  var uploads = false;
+  var reloading = false;
   var strings = {
     en: {save: 'Not saved to Account', storage: 'Account sync is unavailable on this device'},
     ru: {save: 'Не сохранено в Аккаунт', storage: 'Синхронизация Аккаунта недоступна на этом устройстве'}
@@ -61,6 +66,7 @@
   function disable() {
     if (disabled) return;
     disabled = true;
+    uploads = false;
     notify('storage');
   }
 
@@ -364,6 +370,133 @@
     return changed;
   }
 
+  function reloadPage() {
+    if (reloading) return;
+    reloading = true;
+    uploads = false;
+    window.location.reload();
+  }
+
+  // Clear guest/previous-account data even when the server omits a key. Compare
+  // final values so a temporary clear + identical apply does not reload the TV.
+  function replaceDoc(data) {
+    var before = exportLocal();
+    var reserve = false;
+    Object.keys(scope.entries).forEach(function (key) {
+      if (synced(key) && storage('getItem', key) === null) {
+        var value = window.Lampa.Storage.get(key, '');
+        if (value !== '' && value !== null && value !== undefined) reserve = true;
+      }
+    });
+    clearSynced();
+    applyDoc(data);
+    var after = exportLocal();
+    return reserve || Object.keys(before).some(function (key) { return before[key] !== after[key]; }) ||
+      Object.keys(after).some(function (key) { return before[key] !== after[key]; });
+  }
+
+  function handleAccount(state) {
+    if (disabled || reloading || !state) return;
+    if (state.status != 'guest' && state.status != 'signed_in') return;
+    var user = state.status == 'signed_in' ? state.user_id : '';
+    if (state.status == 'signed_in' && (typeof user != 'string' || !user)) return;
+    if (user && (user == handledUser || user == accountUser)) return;
+
+    var revision = ++accountRevision;
+    accountUser = user;
+    handledUser = '';
+    uploads = false;
+    function active() { return !disabled && !reloading && revision == accountRevision; }
+    function failed() {
+      accountUser = '';
+      if (!disabled) notify('save');
+    }
+    function complete() {
+      if (!active()) return;
+      try {
+        var marker = storage('getItem', USER_KEY);
+        if (!user) {
+          ready = false;
+          lastDoc = {};
+          lastEtag = '';
+          if (marker) {
+            clearSynced();
+            if (!window.svtlv_account_leaving) reloadPage();
+          }
+          return;
+        }
+        if (marker == user && ready) {
+          handledUser = user;
+          uploads = true;
+          return;
+        }
+        request('GET', '/api/v1/user-data', {user: user}, function (ok, data, xhr) {
+          if (!active()) return;
+          try {
+            var changed = false;
+            if (ok && xhr.status == 200 && record(data) && data.schema_version === 2 && record(data.data)) {
+              changed = marker == user ? applyDoc(data.data).changed : replaceDoc(data.data);
+              lastDoc = data.data;
+              lastEtag = xhr.getResponseHeader('ETag') || '';
+            } else if (xhr.status == 404 && errorCode(xhr) == 'user_data_not_found') {
+              if (marker && marker != user) changed = clearSynced();
+              if (marker != user) {
+                base = Object.create(null);
+                writeBase();
+              }
+              lastDoc = {};
+              lastEtag = '';
+            } else if (xhr.status == 401 || xhr.status == 409) {
+              accountUser = '';
+              window.Lampa.Listener.send('svtlv_account', {type: 'expired'});
+              return;
+            } else {
+              failed();
+              return;
+            }
+            // Persist ownership before reload, including an empty document.
+            storage('setItem', USER_KEY, user);
+            ready = true;
+            handledUser = user;
+            if (changed) reloadPage();
+            else uploads = true;
+          } catch (err) { failed(); }
+        });
+      } catch (err) { failed(); }
+    }
+
+    try {
+      // Anonymous pages neither load the scope nor request user data.
+      if (!user && !storage('getItem', USER_KEY)) {
+        ready = false;
+        lastDoc = {};
+        lastEtag = '';
+        return;
+      }
+      if (scope) complete();
+      else loadScope(function (ok) {
+        if (!active()) return;
+        if (ok) complete();
+        else failed();
+      }, active);
+    } catch (err) { failed(); }
+  }
+
+  function whenReady() {
+    if (!window.Lampa || !window.Lampa.Listener) {
+      setTimeout(whenReady, 100);
+      return;
+    }
+    window.Lampa.Listener.follow('svtlv_account', function (event) {
+      if (event.type == 'state') handleAccount(event.state);
+    });
+    $(window).on('storage', function (event) {
+      var change = event.originalEvent || event;
+      if (change.key == USER_KEY && change.oldValue !== change.newValue) reloadPage();
+    });
+    handleAccount(window.svtlv_account_state);
+  }
+
   function encodedBytes(value) {
     // Check raw values as well: modern JSON.stringify escapes lone surrogates,
     // while old TV engines leave them literal and encodeURIComponent throws.
@@ -397,4 +530,6 @@
     notify('save');
     return null;
   }
+
+  whenReady();
 })();
