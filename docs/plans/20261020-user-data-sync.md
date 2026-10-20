@@ -418,12 +418,12 @@ only. Nothing is defined on non-HTTP(S) origins (`^https?:$` guard).
 - Modify: `docs/tests/account-sync.test.cjs`
 - Modify: `docs/tests/torrserver-ownership.test.cjs` (seam assertion ~821)
 
-- [ ] implement `window.svtlv_sync_boot(done)` per the boot diagram: ignore a second call; arm the 3s timer first; no marker → `done` with no request; scope and user-data fetched in parallel; `done` exactly once; late responses ignored
-- [ ] handle valid 200 (apply, ready), 404 `user_data_not_found` (ready), 401/409 (clear, not ready), other/invalid/no scope (not ready, remember for the after-boot Noty), must-sync apply failure (uploads off, Noty)
-- [ ] seam: ownership script → `account-sync.js` → start; load callback `try { window.svtlv_sync_boot ? window.svtlv_sync_boot(svtlvStart) : svtlvStart() } catch (e) { svtlvStart() }`; error callback `svtlvStart`
-- [ ] write tests for every boot branch, timeout, late response, `done` once, double call, a throwing boot still starting Lampa, scope fetch failure, a dirty key (language set with `nolisten`) surviving the boot apply
-- [ ] update the seam test for the new order; a missing add-on file still starts Lampa
-- [ ] run node tests - must pass before task 6
+- [x] implement `window.svtlv_sync_boot(done)` per the boot diagram: ignore a second call; arm the 3s timer first; no marker → `done` with no request; scope and user-data fetched in parallel; `done` exactly once; late responses ignored
+- [x] handle valid 200 (apply, ready), 404 `user_data_not_found` (ready), 401/409 (clear, not ready), other/invalid/no scope (not ready, remember for the after-boot Noty), must-sync apply failure (uploads off, Noty)
+- [x] seam: ownership script → `account-sync.js` → start; load callback `try { window.svtlv_sync_boot ? window.svtlv_sync_boot(svtlvStart) : svtlvStart() } catch (e) { svtlvStart() }`; error callback `svtlvStart`
+- [x] write tests for every boot branch, timeout, late response, `done` once, double call, a throwing boot still starting Lampa, scope fetch failure, a dirty key (language set with `nolisten`) surviving the boot apply
+- [x] update the seam test for the new order; a missing add-on file still starts Lampa
+- [x] run node tests - must pass before task 6
 
 ### Task 6: Post-boot account handling
 

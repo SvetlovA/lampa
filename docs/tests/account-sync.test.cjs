@@ -15,14 +15,33 @@ const inspected = source.replace(/\}\)\(\);\s*$/, `window.core = {
   fp: fp, dirty: dirty, readBase: readBase, writeBase: writeBase,
   exportLocal: exportLocal, overlay: overlay, applyDoc: applyDoc,
   clearSynced: clearSynced, fitBody: fitBody,
+  bootState: function () { return {ready: ready, lastDoc: lastDoc, lastEtag: lastEtag, scope: !!scope}; },
   disabled: function () { return disabled; }, failure: function () { return failure; }
 }; })();`);
 
 function page(options = {}) {
   const items = Object.assign(Object.create(null), options.items);
-  const faults = {}, calls = [], requests = [], notices = [];
+  const faults = {}, calls = [], requests = [], notices = [], trace = [];
+  const timers = new Map();
+  let clock = 0, timerID = 0;
+  function setTimeout(fn, delay) {
+    const id = ++timerID;
+    trace.push({timer: delay});
+    timers.set(id, {fn, time: clock + delay});
+    return id;
+  }
+  function tick(ms) {
+    const end = clock + ms;
+    for (;;) {
+      const next = [...timers].filter(([, timer]) => timer.time <= end).sort((a, b) => a[1].time - b[1].time)[0];
+      if (!next) break;
+      timers.delete(next[0]); clock = next[1].time; next[1].fn();
+    }
+    clock = end;
+  }
   function check(method, key) {
     calls.push({method, key});
+    trace.push({method, key});
     if (faults[method]) throw new Error(method);
     if (method === 'setItem' && faults.quota === key) {
       const error = new Error('quota'); error.name = 'QuotaExceededError'; throw error;
@@ -40,25 +59,31 @@ function page(options = {}) {
     location: {protocol: options.protocol || 'https:'},
     Lampa: {Storage: {get: () => options.language || 'en'}, Noty: {show: text => notices.push(text)}}
   };
+  const Lampa = window.Lampa;
   if (options.preboot) delete window.Lampa;
   Object.defineProperty(window, 'localStorage', {
     get() { if (faults.property) throw new Error('localStorage getter'); return store; }
   });
   const $ = {ajax(config) {
+    trace.push({url: config.url});
     if (faults.ajax) throw new Error('ajax');
     const xhr = {status: 200, getResponseHeader: name => name === 'ETag' ? '"etag"' : null};
     const request = {
       config,
       success(data, status = 200) { xhr.status = status; config.success(data, 'success', xhr); },
-      fail(status = 503) { config.error({...xhr, status}); }
+      fail(status = 503, body, textOnly = false) {
+        config.error({...xhr, status, responseJSON: textOnly ? undefined : body,
+          responseText: typeof body === 'string' ? body : JSON.stringify(body)});
+      }
     };
     requests.push(request);
     return request;
   }};
-  const context = vm.createContext({window, $, cache_version: 42});
-  vm.runInContext(inspected, context);
+  const context = vm.createContext({window, $, cache_version: 42, setTimeout, clearTimeout: id => timers.delete(id)});
+  vm.runInContext(options.uninspected ? source : inspected, context);
   return {
-    window, core: window.core, items, faults, calls, requests, notices,
+    window, core: window.core, items, faults, calls, requests, notices, timers, trace, tick,
+    install() { window.Lampa = Lampa; },
     reload() { vm.runInContext(inspected, context); },
     load(scope = realScope) {
       let result;
@@ -377,4 +402,190 @@ test('ajax helper sends JSON, timeout, conditional identity and CSRF headers', (
   p.faults.ajax = true;
   assert.doesNotThrow(() => p.core.request('GET', '/', {}, (ok, data, xhr) => { result = {ok, status: xhr.status}; }));
   assert.deepEqual(result, {ok: false, status: 0});
+});
+
+function bootPage(items = {}) {
+  const p = page({preboot: true, items: {[USER]: 'Alice', ...items}});
+  let starts = 0;
+  p.window.svtlv_sync_boot(() => starts++);
+  p.starts = () => starts;
+  p.scopeRequest = p.requests.find(r => r.config.url.startsWith('svtlv/storage-scope.json'));
+  p.dataRequest = p.requests.find(r => r.config.url === '/api/v1/user-data');
+  return p;
+}
+
+const documentV2 = data => ({schema_version: 2, data});
+const missingDocument = {error: {code: 'user_data_not_found', message: 'user data not found'}};
+
+test('unmarked boot starts immediately with no scope or user-data requests, exactly once', () => {
+  for (const marker of [undefined, '']) {
+    const p = page({preboot: true, items: {language: 'ru', [USER]: marker}, uninspected: true});
+    let starts = 0, second = 0;
+    p.window.svtlv_sync_boot(() => starts++);
+    p.window.svtlv_sync_boot(() => second++);
+    p.tick(10000);
+    assert.equal(starts, 1); assert.equal(second, 0);
+    assert.equal(p.requests.length, 0); assert.equal(p.timers.size, 0);
+    assert.equal(p.items.language, 'ru');
+    assert.deepEqual(p.trace[0], {timer: 3000}, 'deadline is armed before reading storage');
+  }
+});
+
+test('marked boot fetches in parallel with identity, applies before starting, and keeps ETag', () => {
+  for (const scopeFirst of [false, true]) {
+    const p = bootPage({player: 'device'});
+    assert.equal(p.requests.length, 2);
+    assert.equal(p.starts(), 0);
+    assert.deepEqual(p.trace[0], {timer: 3000});
+    assert.deepEqual(clean(p.dataRequest.config.headers), {'X-Lampa-Expected-User': 'Alice'});
+    assert.equal(p.dataRequest.config.timeout, 3000);
+    const data = {language: 'ru', favorite: '{"book":[1]}', plugins: '["untrusted"]', tmdb_lang: false};
+    const responses = [() => p.scopeRequest.success(clean(realScope)), () => p.dataRequest.success(documentV2(data))];
+    if (!scopeFirst) responses.reverse();
+    responses[0]();
+    assert.equal(p.starts(), 0); assert.equal(p.items.language, undefined);
+    responses[1]();
+    assert.equal(p.starts(), 1);
+    assert.equal(p.items.language, 'ru'); assert.equal(p.items.favorite, data.favorite);
+    assert.equal(p.items.player, 'device'); assert.equal(p.items.plugins, undefined); assert.equal(p.items.tmdb_lang, undefined);
+    assert.equal(p.items[USER], 'Alice');
+    assert.deepEqual(clean(p.core.bootState()), {ready: true, lastDoc: data, lastEtag: '"etag"', scope: true});
+    assert.equal(JSON.parse(p.items[BASE]).language, p.core.fp('ru'));
+    p.tick(5000);
+    assert.equal(p.starts(), 1); assert.equal(p.timers.size, 0); assert.equal(p.notices.length, 0);
+  }
+});
+
+test('a nolisten language edit survives boot and remains dirty against its persisted base', () => {
+  const seed = page(); seed.syncedBase({language: 'en'});
+  const p = bootPage({language: 'ru', [BASE]: seed.items[BASE]});
+  p.dataRequest.success(documentV2({language: 'en', tmdb_lang: 'en'}));
+  p.scopeRequest.success(clean(realScope));
+  assert.equal(p.items.language, 'ru'); assert.equal(p.items.tmdb_lang, 'en');
+  assert.equal(p.core.dirty('language'), true); assert.equal(p.core.dirty('tmdb_lang'), false);
+  assert.equal(JSON.parse(p.items[BASE]).language, p.core.fp('en'));
+  assert.equal(p.core.bootState().ready, true); assert.equal(p.starts(), 1);
+});
+
+test('404 is ready only for user_data_not_found and preserves local data and base', () => {
+  for (const textOnly of [false, true]) {
+    const p = bootPage({language: 'ru', [BASE]: '{}'});
+    p.scopeRequest.success(clean(realScope));
+    p.dataRequest.fail(404, missingDocument, textOnly);
+    assert.equal(p.core.bootState().ready, true);
+    assert.deepEqual(clean(p.core.bootState().lastDoc), {}); assert.equal(p.core.bootState().lastEtag, '');
+    assert.equal(p.items.language, 'ru'); assert.equal(p.items[BASE], '{}');
+    assert.equal(p.starts(), 1); assert.equal(p.core.failure(), '');
+  }
+});
+
+test('401 and 409 clear synced values, mask reserve copies, and remove marker/base before start', () => {
+  for (const status of [401, 409]) for (const scopeFirst of [false, true]) {
+    const p = bootPage({favorite: '{"book":[1]}', torrserver_password: 'secret', player: 'device', [BASE]: '{}'});
+    const replies = [() => p.scopeRequest.success(clean(realScope)), () => p.dataRequest.fail(status)];
+    if (!scopeFirst) replies.reverse();
+    replies[0](); assert.equal(p.starts(), 0);
+    replies[1]();
+    for (const key of ['favorite', 'torrserver_password', 'file_view']) assert.equal(p.items[key], '');
+    assert.equal(p.items.player, 'device'); assert.equal(p.items[USER], undefined); assert.equal(p.items[BASE], undefined);
+    assert.equal(p.core.bootState().ready, false); assert.equal(p.core.disabled(), false);
+    assert.equal(p.starts(), 1); assert.equal(p.core.failure(), '');
+  }
+});
+
+test('invalid documents and all other API failures preserve local data and defer one notice', () => {
+  const cases = [
+    r => r.success(null), r => r.success([]), r => r.success({schema_version: 1, data: {language: 'en'}}),
+    r => r.success({schema_version: 2, data: []}), r => r.success({schema_version: 2}),
+    r => r.success({schema_version: 2, data: null}), r => r.success(documentV2({language: 'en'}), 204),
+    r => r.success(undefined, 304), r => r.fail(0), r => r.fail(500), r => r.fail(503),
+    r => r.fail(400), r => r.fail(403), r => r.fail(413), r => r.fail(415),
+    r => r.fail(404, {error: {code: 'not_found'}}), r => r.fail(404, '<html>'),
+    r => r.fail(404)
+  ];
+  for (const reply of cases) {
+    const p = bootPage({language: 'ru', [BASE]: '{}'});
+    p.scopeRequest.success(clean(realScope)); reply(p.dataRequest);
+    assert.equal(p.starts(), 1); assert.equal(p.items.language, 'ru'); assert.equal(p.items[USER], 'Alice');
+    assert.equal(p.items[BASE], '{}'); assert.equal(p.core.bootState().ready, false);
+    assert.equal(p.core.disabled(), false); assert.equal(p.core.failure(), 'save');
+    assert.deepEqual(p.notices, []);
+    p.tick(100); assert.deepEqual(p.notices, []);
+    p.install(); p.tick(100);
+    assert.deepEqual(p.notices, ['Not saved to Account']);
+    p.tick(5000); assert.equal(p.notices.length, 1); assert.equal(p.starts(), 1);
+  }
+});
+
+test('scope failure and invalid scope do not apply a valid document or block boot', () => {
+  for (const invalid of [false, true]) {
+    const p = bootPage({language: 'ru'});
+    p.dataRequest.success(documentV2({language: 'en', favorite: '{}'}));
+    if (invalid) p.scopeRequest.success({}); else p.scopeRequest.fail(503);
+    assert.equal(p.starts(), 1); assert.equal(p.items.language, 'ru'); assert.equal(p.items.favorite, undefined);
+    assert.equal(p.core.bootState().ready, false); assert.equal(p.core.disabled(), invalid);
+    assert.equal(p.core.failure(), 'save');
+    p.install(); p.tick(0); assert.deepEqual(p.notices, ['Not saved to Account']);
+  }
+});
+
+test('three-second deadline starts Lampa once; late data and late scope responses do nothing', () => {
+  for (const first of ['scope', 'data', 'none']) for (const invalidLateScope of [false, true]) {
+    const p = bootPage({language: 'ru', [BASE]: '{}'});
+    if (first === 'scope') p.scopeRequest.success(clean(realScope));
+    if (first === 'data') p.dataRequest.success(documentV2({tmdb_lang: 'en'}));
+    p.tick(2999); assert.equal(p.starts(), 0);
+    p.tick(1); assert.equal(p.starts(), 1); assert.equal(p.core.bootState().ready, false);
+    const state = clean(p.core.bootState()), items = {...p.items};
+    p.scopeRequest.success(invalidLateScope ? {} : clean(realScope));
+    p.scopeRequest.fail(500);
+    p.dataRequest.success(documentV2({language: 'en', tmdb_lang: 'en'}));
+    p.dataRequest.fail(401);
+    assert.deepEqual(clean(p.items), items); assert.deepEqual(clean(p.core.bootState()), state);
+    assert.equal(p.core.disabled(), false, 'invalid late scope must not disable future recovery');
+    p.install(); p.tick(10000);
+    assert.equal(p.starts(), 1); assert.deepEqual(p.notices, ['Not saved to Account']);
+  }
+});
+
+test('duplicate boot calls and duplicate responses never restart or reapply', () => {
+  const p = bootPage(); let second = 0;
+  p.window.svtlv_sync_boot(() => second++);
+  assert.equal(p.requests.length, 2);
+  p.scopeRequest.success(clean(realScope));
+  p.dataRequest.success(documentV2({language: 'en'}));
+  p.items.language = 'ru';
+  p.scopeRequest.success({}); p.dataRequest.success(documentV2({language: 'de'})); p.dataRequest.fail(401);
+  p.window.svtlv_sync_boot(() => second++); p.tick(10000);
+  assert.equal(p.items.language, 'ru'); assert.equal(p.items[USER], 'Alice');
+  assert.equal(p.starts(), 1); assert.equal(second, 0); assert.equal(p.core.disabled(), false);
+});
+
+test('must-sync storage failure disables uploads and still starts with a deferred notice', () => {
+  const p = bootPage(); p.faults.quota = 'language';
+  p.scopeRequest.success(clean(realScope)); p.dataRequest.success(documentV2({language: 'ru'}));
+  assert.equal(p.starts(), 1); assert.equal(p.core.bootState().ready, false); assert.equal(p.core.disabled(), true);
+  assert.equal(p.core.failure(), 'storage'); assert.deepEqual(p.notices, []);
+  p.install(); p.tick(0); assert.deepEqual(p.notices, ['Account sync is unavailable on this device']);
+  assert.equal(p.core.fitBody({language: 'ru'}), null);
+});
+
+test('optional quota failure skips that value but boot is ready', () => {
+  const p = bootPage(); p.faults.quota = 'file_view';
+  p.scopeRequest.success(clean(realScope));
+  p.dataRequest.success(documentV2({file_view: '{}', language: 'ru'}));
+  assert.equal(p.items.file_view, undefined); assert.equal(p.items.language, 'ru');
+  assert.equal(p.core.bootState().ready, true); assert.equal(p.core.disabled(), false); assert.equal(p.starts(), 1);
+});
+
+test('storage access and synchronous ajax exceptions cannot hold boot', () => {
+  for (const fault of ['property', 'getItem', 'ajax']) {
+    const p = page({preboot: true, items: {[USER]: 'Alice'}}); p.faults[fault] = true;
+    let starts = 0;
+    assert.doesNotThrow(() => p.window.svtlv_sync_boot(() => starts++));
+    assert.equal(starts, 1); assert.equal(p.core.bootState().ready, false);
+    assert.equal(p.core.disabled(), fault !== 'ajax');
+    p.install(); p.tick(0); assert.equal(p.notices.length, 1);
+    p.tick(5000); assert.equal(starts, 1);
+  }
 });

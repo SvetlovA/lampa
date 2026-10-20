@@ -185,7 +185,19 @@
             svtlv_started = true
             startLampa()
         }
-        putScript('svtlv/torrserver-ownership.js?v=' + cache_version, svtlvStart, svtlvStart)
+        var svtlv_sync_loading = false
+        function svtlvSync() {
+            if (svtlv_sync_loading) return
+            svtlv_sync_loading = true
+            putScript('svtlv/account-sync.js?v=' + cache_version, function () {
+                try {
+                    window.svtlv_sync_boot ? window.svtlv_sync_boot(svtlvStart) : svtlvStart()
+                } catch (e) {
+                    svtlvStart()
+                }
+            }, svtlvStart)
+        }
+        putScript('svtlv/torrserver-ownership.js?v=' + cache_version, svtlvSync, svtlvSync)
     </script>
     <!-- svtlv:end -->
 </body>

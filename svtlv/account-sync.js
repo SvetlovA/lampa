@@ -19,6 +19,11 @@
   var base;
   var disabled = false;
   var failure = '';
+  var pendingNotice = false;
+  var bootCalled = false;
+  var ready = false;
+  var lastDoc = {};
+  var lastEtag = '';
   var strings = {
     en: {save: 'Not saved to Account', storage: 'Account sync is unavailable on this device'},
     ru: {save: 'Не сохранено в Аккаунт', storage: 'Синхронизация Аккаунта недоступна на этом устройстве'}
@@ -34,15 +39,23 @@
 
   function notify(key) {
     failure = key;
+    pendingNotice = true;
     try {
       var lampa = window.Lampa;
       if (lampa && lampa.Noty) {
         var language = lampa.Storage.get('language', 'ru');
         lampa.Noty.show((strings[language] || strings.en)[key]);
+        pendingNotice = false;
       }
     } catch (err) {
       // Remember pre-boot errors; a missing UI cannot prevent Lampa starting.
     }
+  }
+
+  function showPendingNotice() {
+    if (!pendingNotice) return;
+    notify(failure);
+    if (pendingNotice) setTimeout(showPendingNotice, 100);
   }
 
   function disable() {
@@ -127,9 +140,10 @@
     return {entries: entries, encrypt: encrypt.slice()};
   }
 
-  function loadScope(done) {
+  function loadScope(done, active) {
     var version = typeof cache_version == 'undefined' ? Math.floor(new Date().getTime() / 9e5) : cache_version;
     return request('GET', 'svtlv/storage-scope.json?v=' + version, {}, function (ok, data) {
+      if (active && !active()) return;
       if (disabled) { done(false); return; }
       if (!ok) { done(false); return; }
       try { scope = validateScope(data); }
@@ -137,6 +151,84 @@
       done(true);
     });
   }
+
+  function errorCode(xhr) {
+    try {
+      var body = xhr.responseJSON || JSON.parse(xhr.responseText);
+      return body && body.error && body.error.code;
+    } catch (err) { return ''; }
+  }
+
+  // Run before the bundle: no Lampa API or account event is available yet.
+  window.svtlv_sync_boot = function (done) {
+    if (bootCalled) return;
+    bootCalled = true;
+    var finished = false;
+    var scopeDone = false, scopeOK = false, dataDone = false;
+    var result;
+    // Arm the deadline before even reading localStorage or starting requests.
+    var timer = setTimeout(function () {
+      if (finished) return;
+      notify('save');
+      finish();
+    }, 3000);
+
+    function finish() {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      try { done(); }
+      finally {
+        if (pendingNotice) setTimeout(showPendingNotice, 0);
+      }
+    }
+
+    function settle() {
+      if (finished || !scopeDone || !dataDone) return;
+      try {
+        if (!scopeOK) {
+          if (!failure) notify('save');
+        } else if (result.xhr.status == 401 || result.xhr.status == 409) {
+          clearSynced();
+        } else if (result.ok && result.xhr.status == 200 && record(result.data) &&
+          result.data.schema_version === 2 && record(result.data.data)) {
+          applyDoc(result.data.data);
+          lastDoc = result.data.data;
+          lastEtag = result.xhr.getResponseHeader('ETag') || '';
+          ready = true;
+        } else if (result.xhr.status == 404 && errorCode(result.xhr) == 'user_data_not_found') {
+          lastDoc = {};
+          lastEtag = '';
+          ready = true;
+        } else {
+          notify('save');
+        }
+      } catch (err) {
+        if (!disabled) notify('save');
+      }
+      finish();
+    }
+
+    try {
+      var marker = storage('getItem', USER_KEY);
+      if (!marker) { finish(); return; }
+      loadScope(function (ok) {
+        if (finished || scopeDone) return;
+        scopeDone = true;
+        scopeOK = ok;
+        settle();
+      }, function () { return !finished; });
+      request('GET', '/api/v1/user-data', {user: marker, timeout: 3000}, function (ok, data, xhr) {
+        if (finished || dataDone) return;
+        dataDone = true;
+        result = {ok: ok, data: data, xhr: xhr};
+        settle();
+      });
+    } catch (err) {
+      if (!disabled) notify('save');
+      finish();
+    }
+  };
 
   function classify(key) {
     if (!scope || typeof key != 'string') return '';

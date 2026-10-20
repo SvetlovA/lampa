@@ -818,35 +818,57 @@ test('synchronous API exceptions fail closed and unexpected mutation status neve
   assert.equal(q.notices.length, 1);
 });
 
-test('loader waits for ownership load or missing-file fallback and starts each bundle once', () => {
+test('loader orders ownership then sync, tolerates missing/throwing add-ons, and starts once', () => {
   const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].map(match => match[1]).filter(Boolean);
-  for (const missing of [false, true]) for (const remote of [false, true]) {
+  for (const missingOwnership of [false, true]) for (const missingSync of [false, true])
+    for (const remote of [false, true]) for (const hook of ['absent', 'throw', 'delayed']) {
     const appended = [];
     const window = {location: {href: remote ? 'file:///index.html' : 'https://lampa/'}};
+    let bootCalls = 0, resume;
+    if (hook !== 'absent') window.svtlv_sync_boot = done => {
+      bootCalls++;
+      if (hook === 'throw') throw new Error('broken add-on');
+      resume = done;
+    };
     const context = vm.createContext({window, location: window.location, console: {log() {}},
       AndroidJS: remote ? {getLampaURL: () => 'https://remote/'} : undefined,
       $: () => ({append() {}, removeClass() { assert.fail('network overlay'); }, text() {}}),
       document: {createElement: () => ({}), getElementsByTagName: () => [{appendChild: script => appended.push(script)}]}});
     for (const script of scripts) vm.runInContext(script, context);
-    assert.equal(appended.some(script => script.src.includes('app.min.js')), false);
+    const countMain = () => appended.filter(script => script.src.includes('app.min.js')).length;
+    const countSync = () => appended.filter(script => script.src.includes('account-sync.js')).length;
+    function missing(script) { script.onerror(); appended.at(-1).onerror(); appended.at(-1).onerror(); }
+    assert.equal(countMain(), 0); assert.equal(countSync(), 0);
     const ownership = appended.find(script => script.src.includes('torrserver-ownership.js'));
-    ownership.readyState = 'loading';
-    ownership.onreadystatechange();
-    assert.equal(appended.some(script => script.src.includes('app.min.js')), false);
+    ownership.readyState = 'loading'; ownership.onreadystatechange();
+    assert.equal(countMain(), 0); assert.equal(countSync(), 0);
     ownership.readyState = 'loaded';
-    if (missing) {
-      ownership.onerror(); appended.at(-1).onerror(); appended.at(-1).onerror();
-    } else {
-      ownership.onload(); ownership.onreadystatechange();
+    if (missingOwnership) missing(ownership);
+    else { ownership.onload(); ownership.onreadystatechange(); }
+    assert.equal(countMain(), 0); assert.equal(countSync(), 1, 'duplicate ownership callbacks load sync only once');
+    const sync = appended.find(script => script.src.includes('account-sync.js'));
+    sync.readyState = 'loading'; sync.onreadystatechange();
+    assert.equal(countMain(), 0);
+    sync.readyState = 'loaded';
+    if (missingSync) missing(sync);
+    else {
+      sync.onload();
+      if (hook === 'delayed') {
+        assert.equal(countMain(), 0, 'bundle waits for the sync hook');
+        resume(); resume();
+      }
+      sync.onreadystatechange();
+      if (hook === 'delayed') resume();
     }
-    assert.equal(appended.filter(script => script.src.includes('app.min.js')).length, 1);
+    assert.equal(countMain(), 1);
+    assert.equal(bootCalls > 0, !missingSync && hook !== 'absent');
     const main = appended.find(script => script.src.includes('app.min.js'));
     assert.equal(main.src, remote ? 'https://remote/app.min.js?v=' + context.cache_version : 'app.min.js?v=' + context.cache_version);
     if (remote) {
-      main.onerror(); appended.at(-1).onerror(); appended.at(-1).onerror();
+      missing(main);
       const fallback = appended.at(-1);
       assert.ok(fallback.src.includes('lampa-main/app.min.js'));
-      fallback.onerror(); appended.at(-1).onerror(); appended.at(-1).onerror();
+      missing(fallback);
       assert.ok(appended.at(-1).src.startsWith('app.min.js'));
     }
   }
