@@ -17,6 +17,7 @@ function upstreamStorageMethod(method) {
 }
 const realScope = JSON.parse(fs.readFileSync(path.join(__dirname, '../../svtlv/storage-scope.json'), 'utf8'));
 const BASE = 'svtlv_sync_base', USER = 'svtlv_sync_user';
+const REVISION = 'svtlv_sync_revision';
 const LIMIT = 4 * 1024 * 1024;
 const clean = value => JSON.parse(JSON.stringify(value));
 // Inspect private core functions without adding a production debug/public API.
@@ -1058,6 +1059,9 @@ function savingPage(data = {language: 'en', favorite: '{"book":[1]}'}, options =
   p.dataRequest.success(documentV2(data), 200, '"initial"');
   assert.equal(p.reloads.length, 0);
   p.initialRequests = p.requests.length;
+  // These fixtures measure save/poll effects after the login cache refresh.
+  p.storageWrites.length = 0;
+  p.refreshes.length = 0;
   return p;
 }
 const putBody = request => JSON.parse(request.config.data);
@@ -1738,6 +1742,99 @@ function acceptanceDevice(server, options = {}, scope = realScope) {
   assert.equal(p.requests.length, 2, 'successful boot needs no post-boot document fetch');
   return p;
 }
+
+for (const mode of ['login', 'recovery', 'omitted']) test('account application refreshes stale guest caches without a raw change: ' + mode, () => {
+  const server = sharedDocument(mode === 'omitted' ? {} : {favorite: '{"book":[2]}'});
+  const sharedItems = {favorite: '{"book":[1]}', ...(mode === 'recovery' ? {[USER]: 'Alice'} : {})};
+  const p = page({sharedItems, upstreamStorage: true, uninspected: true});
+  assert.deepEqual(clean(p.window.Lampa.Storage.get('favorite')), {book: [1]});
+  sharedItems.favorite = mode === 'omitted' ? '' : '{"book":[2]}';
+  p.storageEvent({key: 'favorite', oldValue: '{"book":[1]}', newValue: sharedItems.favorite});
+  p.state(signedIn('Alice'));
+  p.requests[0].success(clean(realScope)); server.respond(p.requests.at(-1));
+  assert.equal(p.reloads.length, 0, 'equal raw values keep the no-reload login path');
+  const favorite = p.window.Lampa.Storage.get('favorite', {book: []});
+  assert.deepEqual(clean(favorite), {book: mode === 'omitted' ? [] : [2]});
+  assert.ok(p.refreshes.includes('favorite'), 'refresh the module cache as well as Storage');
+  favorite.book.push(3); p.window.Lampa.Storage.set('favorite', favorite);
+  p.tick(2000); server.respond(p.requests.at(-1)); server.respond(p.requests.at(-1));
+  assert.deepEqual(JSON.parse(server.data().favorite), {book: mode === 'omitted' ? [3] : [2, 3]});
+});
+
+test('clearing ownership retains a fresh revision when the baseline returns to absence', () => {
+  const p = loginPage();
+  p.core.clearSynced();
+  const revision = p.items[REVISION];
+  assert.equal(typeof revision, 'string');
+  assert.equal(p.items[BASE], undefined); assert.equal(p.items[USER], undefined);
+  p.core.clearSynced();
+  assert.notEqual(p.items[REVISION], revision);
+  const stale = p.dataRequest;
+  stale.success(documentV2({favorite: 'obsolete private data'}));
+  assert.equal(p.items.favorite, '', 'an intervening cleanup invalidates the earlier login response');
+  assert.notEqual(p.requests.at(-1), stale);
+  p.requests.at(-1).success(documentV2({}));
+  assert.equal(p.core.accountState().uploads, true);
+});
+
+for (const mode of ['poll', 'boot', 'scope']) test('delayed GETs reject a baseline that returned to its original contents: ' + mode, () => {
+  const original = '{"book":["original"]}';
+  const server = sharedDocument({favorite: original});
+  const sharedItems = {[USER]: 'Alice'};
+  const b = acceptanceDevice(server, {sharedItems});
+  const a = mode === 'poll' ? acceptanceDevice(server, {sharedItems}) :
+    page({preboot: true, sharedItems, upstreamStorage: true, uninspected: true, state: signedIn('Alice')});
+  const remote = acceptanceDevice(server);
+  remote.change('favorite', '{"book":["original","removed"]}'); remote.tick(2000);
+  server.respond(remote.requests.at(-1)); server.respond(remote.requests.at(-1));
+  if (mode === 'poll') a.tick(60000);
+  else a.window.svtlv_sync_boot(() => a.install());
+  const stale = a.requests.at(-1), staleData = documentV2(server.data()), staleTag = server.etag();
+  if (mode === 'boot') a.requests[0].success(clean(realScope));
+  if (mode === 'scope') stale.success(staleData, 200, staleTag);
+  const originalBase = sharedItems[BASE];
+  for (const favorite of ['{"book":["original","temporary"]}', original]) {
+    b.change('favorite', favorite); b.tick(2000);
+    server.respond(b.requests.at(-1)); server.respond(b.requests.at(-1));
+  }
+  assert.equal(sharedItems[BASE], originalBase, 'the fingerprints really return to the snapshot');
+  if (mode === 'scope') a.requests[0].success(clean(realScope));
+  else stale.success(staleData, 200, staleTag);
+  assert.equal(sharedItems.favorite, original, 'a completed deletion cannot be undone by the delayed GET');
+  assert.notEqual(a.requests.at(-1), stale, 'a repeated baseline still requires a fresh GET');
+  server.respond(a.requests.at(-1));
+  if (mode !== 'poll') a.tick(100);
+  const favorite = a.window.Lampa.Storage.get('favorite');
+  favorite.book.push('added'); a.window.Lampa.Storage.set('favorite', favorite);
+  a.tick(2000); server.respond(a.requests.at(-1)); server.respond(a.requests.at(-1));
+  assert.deepEqual(JSON.parse(server.data().favorite), {book: ['original', 'added']});
+});
+
+test('a delayed PUT acknowledgement rejects a baseline that returned to its original contents', () => {
+  const original = '{"book":["original"]}';
+  const server = sharedDocument({favorite: original});
+  const sharedItems = {[USER]: 'Alice'};
+  const a = acceptanceDevice(server, {sharedItems}), b = acceptanceDevice(server, {sharedItems});
+  a.change('favorite', '{"book":["original","removed"]}'); a.tick(2000);
+  server.respond(a.requests.at(-1));
+  const put = a.requests.at(-1), success = put.config.success, sentBase = sharedItems[BASE];
+  let acknowledge;
+  put.config.success = (...args) => { acknowledge = () => success(...args); };
+  server.respond(put);
+  for (const favorite of ['{"book":["original","temporary"]}', original]) {
+    b.change('favorite', favorite); b.tick(2000);
+    server.respond(b.requests.at(-1)); server.respond(b.requests.at(-1));
+  }
+  assert.equal(sharedItems[BASE], sentBase);
+  acknowledge();
+  assert.equal(sharedItems[BASE], sentBase, 'the old acknowledgement cannot restore obsolete fingerprints');
+  assert.equal(a.requests.at(-1).config.type, 'GET');
+  server.respond(a.requests.at(-1));
+  const favorite = a.window.Lampa.Storage.get('favorite');
+  favorite.book.push('added'); a.window.Lampa.Storage.set('favorite', favorite);
+  a.tick(2000); server.respond(a.requests.at(-1)); server.respond(a.requests.at(-1));
+  assert.deepEqual(JSON.parse(server.data().favorite), {book: ['original', 'added']});
+});
 
 test('delayed polls and pre-save GETs cannot roll back a sibling tab save', () => {
   for (const mode of ['poll', 'save', 'joined']) {

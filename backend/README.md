@@ -477,10 +477,14 @@ and torrent membership need the database. The critical database check probes bot
   remote changes live, including during playback. A normal save costs a poll GET plus a PUT;
   each authenticates against Keycloak, even a 304 (no cache). Dirty fingerprints in
   `svtlv_sync_base` survive reload and network failures; `svtlv_sync_user` identifies their
-  owner. Imports persist that owner before writing account values, so partial failures
-  still permit cleanup. Logout/confirmed expiry clears synced keys with empty strings to
-  mask IndexedDB reserve copies and drops both keys; device settings and cloud data remain. Boot with a
-  marker waits at most 3 seconds before starting Lampa; no marker sends no user-data request.
+  owner. A local `svtlv_sync_revision` changes on each baseline write or clear to reject
+  delayed responses even when fingerprint contents repeat. Imports persist the owner
+  before writing account values, so partial failures still permit cleanup. Equal-data
+  login refreshes this tab's caches before enabling uploads. Logout/confirmed expiry
+  clears synced keys with empty strings to mask IndexedDB reserve copies and drops
+  the owner and fingerprints, retaining a fresh local revision. Device settings and
+  cloud data remain. Boot with a marker waits at most 3 seconds before starting Lampa;
+  no marker sends no user-data request.
 - Optional history/progress values are dropped largest-first when the encoded request would
   exceed 4 MiB. CUB writers, Clear cache and manual backup restore are not coordinated with
   account sync; the next boot GET may restore server values. `file_view_*` belongs to CUB

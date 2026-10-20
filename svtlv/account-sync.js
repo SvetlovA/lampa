@@ -11,6 +11,7 @@
   window.svtlv_sync_loaded = true;
 
   var BASE_KEY = 'svtlv_sync_base';
+  var REVISION_KEY = 'svtlv_sync_revision';
   var USER_KEY = 'svtlv_sync_user';
   var MAX_BYTES = 4 * 1024 * 1024;
   var KEY_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
@@ -18,6 +19,8 @@
   var scope;
   var base;
   var baseRaw;
+  var baseWriter = new Date().getTime().toString(36) + ':' + Math.random().toString(36).slice(2);
+  var baseSequence = 0;
   var disabled = false;
   var failure = '';
   var pendingNotice = false;
@@ -145,7 +148,7 @@
   function requestDocument(options, active, done) {
     var snapshot, owner;
     try {
-      snapshot = storage('getItem', BASE_KEY);
+      snapshot = baseSnapshot();
       owner = storage('getItem', USER_KEY);
     }
     catch (err) { done(false, null, {status: 0}); return; }
@@ -158,7 +161,7 @@
           done(false, null, {status: 0});
           return;
         }
-        if (snapshot !== storage('getItem', BASE_KEY)) {
+        if (snapshot !== baseSnapshot()) {
           requestDocument(options, active, done);
           return;
         }
@@ -248,7 +251,7 @@
         if (marker !== storage('getItem', USER_KEY)) { finish(); return; }
         if (!scopeOK) {
           if (!failure) notify('save');
-        } else if (result.snapshot !== storage('getItem', BASE_KEY)) {
+        } else if (result.snapshot !== baseSnapshot()) {
           // The document may have arrived before the scope, then become stale.
           loadData();
           return;
@@ -356,8 +359,19 @@
     }
   }
 
+  function baseSnapshot() {
+    return JSON.stringify([storage('getItem', BASE_KEY), storage('getItem', REVISION_KEY)]);
+  }
+
+  function advanceBase() {
+    storage('setItem', REVISION_KEY, baseWriter + ':' + (++baseSequence));
+  }
+
   function writeBase() {
     var raw = JSON.stringify(base || readBase());
+    // Fingerprints can return to old contents. A distinct revision also detects
+    // intervening saves when delayed GETs or PUT acknowledgements arrive.
+    advanceBase();
     storage('setItem', BASE_KEY, raw);
     baseRaw = raw;
   }
@@ -445,6 +459,19 @@
     if (lampa.Timeline && written[lampa.Timeline.filename()]) lampa.Timeline.read();
   }
 
+  function refreshLocal() {
+    var written = Object.create(null);
+    applying = true;
+    try {
+      // Account application can leave raw storage unchanged while this tab still
+      // caches guest/previous-account values, including keys cleared or omitted.
+      localKeys().forEach(function (key) {
+        if (writeLive(key, storage('getItem', key), classify(key) == 'user_optional', true)) written[key] = true;
+      });
+      refreshLive(written);
+    } finally { applying = false; }
+  }
+
   function applyDoc(data, live) {
     var previous = readBase();
     var changed = false;
@@ -512,6 +539,9 @@
           changed = true;
         }
       });
+      // Keep a fresh revision through logout too: an empty baseline/owner can
+      // otherwise return to the snapshot of a delayed first-login request.
+      advanceBase();
       storage('removeItem', BASE_KEY);
       storage('removeItem', USER_KEY);
       base = Object.create(null);
@@ -631,7 +661,10 @@
             readyUser = user;
             handledUser = user;
             if (changed) reloadPage();
-            else enableUploads();
+            else {
+              refreshLocal();
+              enableUploads();
+            }
           } catch (err) { failed(); }
         });
       } catch (err) { failed(); }
@@ -861,7 +894,7 @@
             finish(false);
             return;
           }
-          var sentBase = storage('getItem', BASE_KEY);
+          var sentBase = baseSnapshot();
           request('PUT', '/api/v1/user-data', {user: accountUser, etag: lastEtag, body: body}, function (ok, data, xhr) {
             if (!active()) return;
             if (xhr.status == 412 && !retry) { attempt(true); return; }
@@ -872,7 +905,7 @@
             }
             try {
               if (storage('getItem', USER_KEY) !== accountUser) { reloadPage(); return; }
-              if (storage('getItem', BASE_KEY) !== sentBase) {
+              if (baseSnapshot() !== sentBase) {
                 // Another tab may have saved after this PUT committed, before its
                 // acknowledgement arrived. Preserve its base and fetch current data.
                 lastEtag = '';

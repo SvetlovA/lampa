@@ -550,8 +550,10 @@ account values. If the marker cannot be written, abort the import. A later value
 fingerprint write failure leaves the marker available for logout/account cleanup.
 
 Write marker and base before reloading, and reload only if anything was cleared
-or changed. A login needs at most one reload; equal data enables uploads and
-polling immediately. Repeated `signed_in` for the handled user does nothing.
+or changed. A login needs at most one reload; equal data refreshes this tab's
+Storage and Favorite/Timeline caches from the final local values before enabling
+uploads and polling, including dirty values and cleared or omitted keys.
+Repeated `signed_in` for the handled user does nothing.
 Another tab's change to `svtlv_sync_user` reloads this page.
 
 ### 6.3 Login when server data does not exist
@@ -641,11 +643,15 @@ A key is dirty whenever its local fingerprint differs from that base, including
 changes written with `nolisten` (the language picker), after reload or failed saves.
 Each dirty check refreshes the cached base if the shared localStorage value changed,
 including saves from other tabs before their storage event is delivered.
-Every document GET snapshots that shared base. If it changes before the response
-can be applied, the client discards the response and fetches again, including
+`svtlv_sync_revision` records a distinct revision for each baseline write or clear,
+using a page identifier and sequence number. It stays local and contains no user data.
+Every document GET snapshots both the shared base and revision. If either changes
+before the response can be applied, the client discards it and fetches again, including
 at boot and during account recovery. Boot still uses its original three-second
-deadline. An older response cannot roll back a sibling tab's completed save.
-PUT acknowledgements also check the shared owner and base before recording sent
+deadline. The revision detects intervening saves even when the fingerprints return
+to their original contents. It is retained and advanced on logout, so an absent
+baseline cannot repeat an old request's snapshot after account cleanup.
+PUT acknowledgements also check the shared owner, base and revision before recording sent
 fingerprints. A changed owner reloads the page; an advanced base is preserved and
 reconciled with a fresh GET, including any local edits queued during the save.
 

@@ -577,6 +577,18 @@ Second-pass verification: all 266 Node tests, pinned ES5 parsing, Compose valida
 and backend `make test race lint` with `LAMPA_API_REQUIRE_DOCKER=1` pass (94.1%
 coverage, zero lint issues). Protected upstream frontend files remain unchanged.
 
+- [x] delayed-response and account-cache review: refresh this tab's Storage and
+  Favorite/Timeline caches before enabling uploads after a no-reload account apply,
+  including cleared/omitted keys; reject delayed GETs and PUT acknowledgements using
+  a distinct local baseline revision even when fingerprints return to old contents
+- [x] retain and advance the revision through ownership cleanup; regressions cover
+  equal-data login, same-account recovery, omitted favorites, repeated fingerprints
+  during live/boot/deferred-scope GETs, delayed PUT acknowledgements and cleanup
+
+Verification: all 274 Node tests, ES5 parsing, Compose validation and backend
+`make test race lint` with `LAMPA_API_REQUIRE_DOCKER=1` pass (94.1% coverage,
+zero lint issues). Protected upstream frontend files remain unchanged.
+
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*
 
