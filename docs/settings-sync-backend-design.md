@@ -635,6 +635,10 @@ A key is dirty whenever its local fingerprint differs from that base, including
 changes written with `nolisten` (the language picker), after reload or failed saves.
 Each dirty check refreshes the cached base if the shared localStorage value changed,
 including saves from other tabs before their storage event is delivered.
+Every document GET snapshots that shared base. If it changes before the response
+can be applied, the client discards the response and fetches again, including
+at boot and during account recovery. Boot still uses its original three-second
+deadline. An older response cannot roll back a sibling tab's completed save.
 
 Server apply skips dirty keys and updates the base for values it applies.
 Successful PUT records fingerprints of the values actually sent, so another

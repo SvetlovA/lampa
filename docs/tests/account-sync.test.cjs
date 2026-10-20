@@ -1352,14 +1352,15 @@ function pollingPage(data = {}, options = {}) {
 test('visible pages poll every 60s with ETag; 304 leaves storage, base and caches untouched', () => {
   const p = pollingPage({language: 'en', favorite: '{"book":[1]}'});
   const before = {...p.items};
-  const writes = p.calls.length;
+  const mutations = () => p.calls.filter(call => call.method === 'setItem' || call.method === 'removeItem');
+  const writes = mutations();
   p.tick(59999); assert.equal(p.requests.length, p.initialRequests);
   p.tick(1);
   const get = p.requests.at(-1);
   assert.equal(get.config.type, 'GET');
   assert.deepEqual(clean(get.config.headers), {'X-Lampa-Expected-User': 'Alice', 'If-None-Match': '"initial"'});
   get.success(undefined, 304);
-  assert.deepEqual({...p.items}, before); assert.equal(p.calls.length, writes);
+  assert.deepEqual({...p.items}, before); assert.deepEqual(mutations(), writes);
   assert.deepEqual(p.storageWrites, []); assert.deepEqual(p.refreshes, []);
   p.tick(60000); assert.equal(p.requests.length, p.initialRequests + 2);
   p.requests.at(-1).success(undefined, 304);
@@ -1617,6 +1618,109 @@ function acceptanceDevice(server, options = {}, scope = realScope) {
   assert.equal(p.requests.length, 2, 'successful boot needs no post-boot document fetch');
   return p;
 }
+
+test('delayed polls and pre-save GETs cannot roll back a sibling tab save', () => {
+  for (const mode of ['poll', 'save', 'joined']) {
+    const server = sharedDocument({language: 'en', tmdb_lang: 'en'});
+    const sharedItems = {[USER]: 'Alice'};
+    const a = acceptanceDevice(server, {sharedItems});
+    const b = acceptanceDevice(server, {sharedItems});
+    const remote = acceptanceDevice(server);
+    remote.change('language', 'de'); remote.tick(2000);
+    server.respond(remote.requests.at(-1)); server.respond(remote.requests.at(-1));
+    if (mode === 'save') { a.change('tmdb_lang', 'fr'); a.tick(2000); }
+    else a.tick(60000);
+    const stale = a.requests.at(-1), staleData = documentV2(server.data()), staleTag = server.etag();
+    if (mode === 'joined') {
+      a.change('tmdb_lang', 'fr'); a.tick(2000);
+      assert.equal(a.requests.at(-1), stale, 'the save joins the already pending poll');
+    }
+    assert.notEqual(stale.config.headers['If-None-Match'], staleTag, 'the delayed GET really returns 200');
+    b.change('language', 'ru'); b.tick(2000);
+    server.respond(b.requests.at(-1)); server.respond(b.requests.at(-1));
+    const savedBase = sharedItems[BASE];
+    stale.success(staleData, 200, staleTag);
+    assert.equal(sharedItems.language, 'ru', 'an older response cannot replace the saved shared value');
+    assert.equal(sharedItems[BASE], savedBase, 'an older response cannot rewind shared fingerprints');
+    assert.equal(a.requests.at(-1).config.type, 'GET', 'refetch before applying or uploading');
+    assert.notEqual(a.requests.at(-1), stale);
+    server.respond(a.requests.at(-1));
+    if (mode !== 'poll') server.respond(a.requests.at(-1));
+    // Continue the original failure sequence: a sibling saves an unrelated key,
+    // then this tab saves another edit. Neither can turn stale data into a local edit.
+    b.change('tmdb_lang', 'es'); b.tick(2000);
+    server.respond(b.requests.at(-1)); server.respond(b.requests.at(-1));
+    a.change('tmdb_lang', 'it'); a.tick(2000);
+    server.respond(a.requests.at(-1)); server.respond(a.requests.at(-1));
+    assert.deepEqual(server.data(), {language: 'ru', tmdb_lang: 'it'});
+    assert.deepEqual(a.notices, []); assert.deepEqual(b.notices, []);
+    assert.equal(a.reloads.length, 0); assert.equal(b.reloads.length, 0);
+  }
+});
+
+test('boot refetches an old document when shared fingerprints advance before scope or data arrives', () => {
+  for (const scopeFirst of [false, true]) {
+    const server = sharedDocument({language: 'en'});
+    const sharedItems = {[USER]: 'Alice'};
+    const b = acceptanceDevice(server, {sharedItems});
+    const a = page({preboot: true, sharedItems, state: signedIn('Alice')});
+    let starts = 0;
+    a.window.svtlv_sync_boot(() => { starts++; a.install(); });
+    const scopeRequest = a.requests[0], stale = a.requests[1];
+    const staleData = documentV2(server.data()), staleTag = server.etag();
+    if (scopeFirst) scopeRequest.success(clean(realScope));
+    else stale.success(staleData, 200, staleTag);
+    b.change('language', 'ru'); b.tick(2000);
+    server.respond(b.requests.at(-1)); server.respond(b.requests.at(-1));
+    const savedBase = sharedItems[BASE];
+    if (scopeFirst) stale.success(staleData, 200, staleTag);
+    else scopeRequest.success(clean(realScope));
+    assert.equal(starts, 0, 'startup waits for a fresh document within the original deadline');
+    assert.equal(sharedItems.language, 'ru'); assert.equal(sharedItems[BASE], savedBase);
+    assert.equal(a.requests.length, 3);
+    server.respond(a.requests.at(-1));
+    assert.equal(starts, 1); a.tick(100);
+    assert.equal(sharedItems.language, 'ru'); assert.equal(a.core.accountState().uploads, true);
+    assert.equal(a.reloads.length, 0);
+  }
+});
+
+test('account recovery refetches a document superseded by another tab save', () => {
+  const server = sharedDocument({language: 'en'});
+  const sharedItems = {[USER]: 'Alice'};
+  const b = acceptanceDevice(server, {sharedItems});
+  const a = page({sharedItems});
+  a.state(signedIn('Alice')); a.requests[0].success(clean(realScope));
+  const stale = a.requests.at(-1), staleData = documentV2(server.data()), staleTag = server.etag();
+  b.change('language', 'ru'); b.tick(2000);
+  server.respond(b.requests.at(-1)); server.respond(b.requests.at(-1));
+  const savedBase = sharedItems[BASE];
+  stale.success(staleData, 200, staleTag);
+  assert.equal(sharedItems.language, 'ru'); assert.equal(sharedItems[BASE], savedBase);
+  assert.equal(a.reloads.length, 0); assert.equal(a.core.accountState().uploads, false);
+  assert.notEqual(a.requests.at(-1), stale);
+  server.respond(a.requests.at(-1));
+  assert.equal(a.core.accountState().uploads, true); assert.equal(a.reloads.length, 0);
+});
+
+test('boot refetch keeps the original deadline and ignores its late response', () => {
+  const p = page({preboot: true, items: {[USER]: 'Alice', language: 'en'}});
+  p.syncedBase({language: 'en'});
+  let starts = 0;
+  p.window.svtlv_sync_boot(() => starts++);
+  p.requests[0].success(clean(realScope));
+  p.tick(2500);
+  p.items.language = 'ru'; p.syncedBase({language: 'ru'});
+  const savedBase = p.items[BASE];
+  p.requests[1].success(documentV2({language: 'en'}));
+  assert.equal(p.requests.length, 3); assert.equal(starts, 0);
+  p.tick(500);
+  assert.equal(starts, 1, 'refetch cannot restart the three-second deadline');
+  p.requests[2].success(documentV2({language: 'de'}));
+  assert.equal(starts, 1); assert.equal(p.requests.length, 3);
+  assert.equal(p.items.language, 'ru'); assert.equal(p.items[BASE], savedBase);
+  assert.equal(p.core.bootState().ready, false);
+});
 
 test('shared tabs refresh saved fingerprints before merging a newer remote edit', () => {
   const server = sharedDocument({language: 'en', tmdb_lang: 'en'});

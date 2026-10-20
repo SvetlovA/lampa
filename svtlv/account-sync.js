@@ -137,6 +137,26 @@
     }
   }
 
+  // A sibling can commit while a GET is in flight. Its newer shared baseline
+  // must never make an older response look safe to apply or use for a save.
+  function requestDocument(options, active, done) {
+    var snapshot;
+    try { snapshot = storage('getItem', BASE_KEY); }
+    catch (err) { done(false, null, {status: 0}); return; }
+    var answered = false;
+    request('GET', '/api/v1/user-data', options, function (ok, data, xhr) {
+      if (answered || !active()) return;
+      answered = true;
+      try {
+        if (snapshot !== storage('getItem', BASE_KEY)) {
+          requestDocument(options, active, done);
+          return;
+        }
+      } catch (err) { done(false, null, {status: 0}); return; }
+      done(ok, data, xhr, snapshot);
+    });
+  }
+
   function validateScope(value) {
     if (!record(value) || value.version !== 1 || !record(value.scopes) ||
       Object.keys(value.scopes).length !== SCOPE_NAMES.length) throw new Error('Invalid scope');
@@ -216,6 +236,10 @@
       try {
         if (!scopeOK) {
           if (!failure) notify('save');
+        } else if (result.snapshot !== storage('getItem', BASE_KEY)) {
+          // The document may have arrived before the scope, then become stale.
+          loadData();
+          return;
         } else if (result.xhr.status == 401 || result.xhr.status == 409) {
           clearSynced();
         } else if (result.ok && result.xhr.status == 200 && record(result.data) &&
@@ -237,6 +261,17 @@
       finish();
     }
 
+    function loadData() {
+      dataDone = false;
+      requestDocument({user: marker, timeout: 3000}, function () { return !finished && !dataDone; },
+        function (ok, data, xhr, snapshot) {
+          if (finished || dataDone) return;
+          dataDone = true;
+          result = {ok: ok, data: data, xhr: xhr, snapshot: snapshot};
+          settle();
+        });
+    }
+
     try {
       var marker = storage('getItem', USER_KEY);
       if (!marker) { finish(); return; }
@@ -246,12 +281,7 @@
         scopeOK = ok;
         settle();
       }, function () { return !finished; });
-      request('GET', '/api/v1/user-data', {user: marker, timeout: 3000}, function (ok, data, xhr) {
-        if (finished || dataDone) return;
-        dataDone = true;
-        result = {ok: ok, data: data, xhr: xhr};
-        settle();
-      });
+      loadData();
     } catch (err) {
       if (!disabled) notify('save');
       finish();
@@ -532,7 +562,7 @@
           enableUploads();
           return;
         }
-        request('GET', '/api/v1/user-data', {user: user}, function (ok, data, xhr) {
+        requestDocument({user: user}, active, function (ok, data, xhr) {
           if (!active()) return;
           try {
             var changed = false;
@@ -716,7 +746,9 @@
     var flight = {revision: accountRevision, callbacks: done ? [done] : []};
     pollFlight = flight;
     var incomplete = unreadableKeys.length > 0;
-    request('GET', '/api/v1/user-data', {user: accountUser, etag: incomplete ? '' : lastEtag}, function (ok, data, xhr) {
+    requestDocument({user: accountUser, etag: incomplete ? '' : lastEtag}, function () {
+      return pollFlight === flight && flight.revision == accountRevision && uploads && !disabled && !reloading;
+    }, function (ok, data, xhr) {
       if (pollFlight !== flight || flight.revision != accountRevision || !uploads || disabled || reloading) return;
       var success = false, missing = false;
       try {

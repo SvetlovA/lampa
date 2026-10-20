@@ -274,6 +274,8 @@ after PUT 204 of sent value V for K:   base[K] = fp(V)
 matches `fp(V)`, so K stays dirty and goes out with the next save instead of being reverted
 by the next poll. `svtlv_sync_base` is plain `localStorage`, outside `Lampa.Storage`.
 Its cached copy is refreshed when the shared raw value changes, including another tab's save.
+Document GETs snapshot the shared base and refetch if it advances before apply,
+including while boot waits for the scope file. Boot keeps its original deadline.
 Missing must-sync local items still present in Lampa's memory/IndexedDB fallback disable
 uploads for the page instead of becoming false deletion tombstones after quota failures.
 
@@ -541,6 +543,12 @@ first-creation policy remains unchanged.
 Second-review verification: all 248 Node tests, ES5 parsing, Compose configuration,
 and backend `make test race lint` with `LAMPA_API_REQUIRE_DOCKER=1` pass (94.1%
 coverage, zero lint issues). Protected upstream frontend files remain unchanged.
+
+- [x] delayed-response review: snapshot shared fingerprints for document GETs and
+  refetch when a sibling tab advances them, including boot scope waits, account
+  recovery, periodic polls, and saves joining an in-flight poll
+- [x] regressions cover saved settings surviving delayed responses and later edits;
+  a boot refetch retains the original deadline and ignores its late response
 
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*
