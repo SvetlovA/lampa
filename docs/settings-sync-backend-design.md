@@ -639,6 +639,9 @@ Every document GET snapshots that shared base. If it changes before the response
 can be applied, the client discards the response and fetches again, including
 at boot and during account recovery. Boot still uses its original three-second
 deadline. An older response cannot roll back a sibling tab's completed save.
+PUT acknowledgements also check the shared owner and base before recording sent
+fingerprints. A changed owner reloads the page; an advanced base is preserved and
+reconciled with a fresh GET, including any local edits queued during the save.
 
 Server apply skips dirty keys and updates the base for values it applies.
 Successful PUT records fingerprints of the values actually sent, so another
@@ -1373,10 +1376,10 @@ fingerprints, live ETag polling and conditional saves (§4, §6–§8). Device
 settings remain local; guests send no user-data request. Automated VM acceptance
 checks, including two-device races, run alongside Go database/race/lint checks
 and the ES5 gate. Production deployment, physical browser/TV playback checks and
-rollback verification remain in the completed plan's Post-Completion list.
+rollback verification remain in the plan's Post-Completion list.
 
 Deviations and accepted behavior recorded while implementing Plan 4
-(`docs/plans/completed/20261020-user-data-sync.md`):
+(`docs/plans/20261020-user-data-sync.md`, retained there during active review):
 
 - Any-JSON schema v2 replaces the eight fixed sections. The whitelist and client
   `encrypt` list replace backend secret names; migration `00003` drops
@@ -1470,6 +1473,9 @@ Reload after clearing so Lampa discards its cached values. Browser SSO logout
 sets `window.svtlv_account_leaving` before publishing guest and follows
 `logout_url` without that extra reload. Another tab reloads on a marker change.
 An unavailable session check alone never clears data.
+Disabling synchronization after a storage failure does not disable this cleanup:
+confirmed guest state or a different account still clears the previous owner's
+data and reloads when storage is accessible, without re-enabling API requests.
 
 TorrServer account hashes never move into guest storage. Logout restores the
 pre-existing device-local guest membership list (§10.4), independently of the

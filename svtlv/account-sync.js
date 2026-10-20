@@ -33,6 +33,7 @@
   var uploads = false;
   var reloading = false;
   var applying = false;
+  var clearing = false;
   var saveTimer = null;
   var saveDelay = 0;
   var saving = false;
@@ -90,7 +91,8 @@
 
   // Even obtaining localStorage, length or key() can throw in a TV WebView.
   function storage(method, key, value, optional) {
-    if (disabled) throw new Error('Account sync disabled');
+    // Disabled synchronization must still allow ownership cleanup on logout.
+    if (disabled && !clearing) throw new Error('Account sync disabled');
     try {
       var store = window.localStorage;
       if (method == 'length') return store.length;
@@ -490,23 +492,30 @@
   }
 
   function clearSynced() {
-    var keys = Object.create(null);
-    var changed = false;
-    localKeys().forEach(function (key) { keys[key] = true; });
-    Object.keys(readBase()).forEach(function (key) { if (synced(key)) keys[key] = true; });
-    // Exact rules also mask reserve-only copies with an empty local item.
-    Object.keys(scope.entries).forEach(function (key) { if (synced(key)) keys[key] = true; });
-    Object.keys(keys).forEach(function (key) {
-      if (storage('getItem', key) !== '') {
-        storage('setItem', key, '');
-        changed = true;
-      }
-    });
-    storage('removeItem', BASE_KEY);
-    storage('removeItem', USER_KEY);
-    base = Object.create(null);
-    baseRaw = null;
-    return changed;
+    var wasClearing = clearing;
+    clearing = true;
+    try {
+      var keys = Object.create(null);
+      var changed = false;
+      localKeys().forEach(function (key) { keys[key] = true; });
+      var previous = {};
+      try { previous = readBase(); }
+      catch (err) { /* A corrupt base cannot prevent clearing known account keys. */ }
+      Object.keys(previous).forEach(function (key) { if (synced(key)) keys[key] = true; });
+      // Exact rules also mask reserve-only copies with an empty local item.
+      Object.keys(scope.entries).forEach(function (key) { if (synced(key)) keys[key] = true; });
+      Object.keys(keys).forEach(function (key) {
+        if (storage('getItem', key) !== '') {
+          storage('setItem', key, '');
+          changed = true;
+        }
+      });
+      storage('removeItem', BASE_KEY);
+      storage('removeItem', USER_KEY);
+      base = Object.create(null);
+      baseRaw = null;
+      return changed;
+    } finally { clearing = wasClearing; }
   }
 
   function reloadPage() {
@@ -537,10 +546,22 @@
   }
 
   function handleAccount(state) {
-    if (disabled || reloading || !state) return;
+    if (reloading || !state) return;
     if (state.status != 'guest' && state.status != 'signed_in') return;
     var user = state.status == 'signed_in' ? state.user_id : '';
     if (state.status == 'signed_in' && (typeof user != 'string' || !user)) return;
+    if (disabled) {
+      clearing = true;
+      try {
+        var marker = storage('getItem', USER_KEY);
+        if (scope && marker && marker !== user) {
+          clearSynced();
+          if (!window.svtlv_account_leaving) reloadPage();
+        }
+      } catch (err) { /* A storage failure cannot escape the account listener. */ }
+      finally { clearing = false; }
+      return;
+    }
     if (user && (user == handledUser || user == accountUser)) return;
 
     var revision = ++accountRevision;
@@ -835,6 +856,7 @@
             finish(false);
             return;
           }
+          var sentBase = storage('getItem', BASE_KEY);
           request('PUT', '/api/v1/user-data', {user: accountUser, etag: lastEtag, body: body}, function (ok, data, xhr) {
             if (!active()) return;
             if (xhr.status == 412 && !retry) { attempt(true); return; }
@@ -844,6 +866,15 @@
               return;
             }
             try {
+              if (storage('getItem', USER_KEY) !== accountUser) { reloadPage(); return; }
+              if (storage('getItem', BASE_KEY) !== sentBase) {
+                // Another tab may have saved after this PUT committed, before its
+                // acknowledgement arrived. Preserve its base and fetch current data.
+                lastEtag = '';
+                finish(true);
+                poll(function (ok) { if (ok) scheduleSave(); });
+                return;
+              }
               var previous = readBase();
               Object.keys(body.data).forEach(function (key) {
                 var fingerprint = fp(body.data[key]);

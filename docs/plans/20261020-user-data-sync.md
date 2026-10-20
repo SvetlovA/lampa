@@ -506,7 +506,8 @@ Post-Completion.
 - [x] keep `docs/tests/ownership-docs.test.cjs` passing after doc edits
 - [x] `CLAUDE.md`: Svtlv add-ons section gets `account-sync.js`, the seam order, the marker and base keys, and "to sync a key, add it to `user`/`user_optional` in `storage-scope.json`; to encrypt it, also add it to `encrypt`"; lampa-api section replaces the `SensitiveSettings`/`TestSensitiveSettings_matchUI` text with the any-JSON v2 document, in-place sealing and ETag
 - [x] `backend/README.md`: document v2 shape, precondition, ETag and `If-Match`
-- [x] move this plan to `docs/plans/completed/`
+- [x] retain this plan at `docs/plans/20261020-user-data-sync.md` during active review;
+  defer archival to Post-Completion and keep the design's reference accurate
 
 Verification: all 234 Node tests and the pinned ES5 parser pass. Backend
 `make test race lint` passes with `LAMPA_API_REQUIRE_DOCKER=1` (94.1%
@@ -550,8 +551,23 @@ coverage, zero lint issues). Protected upstream frontend files remain unchanged.
 - [x] regressions cover saved settings surviving delayed responses and later edits;
   a boot refetch retains the original deadline and ignores its late response
 
+- [x] five-agent review: keep logout/confirmed guest and account-replacement cleanup
+  active after synchronization is disabled, including quota fallback, failed reads
+  and corrupt fingerprints; preserve disabled request/export guards
+- [x] guard successful PUT acknowledgements against changed shared ownership or
+  fingerprints; refetch superseded acknowledgements without losing queued edits
+- [x] correct the reserve fixture's localized notification expectation, exercise
+  actual 401/409 expiry requests, and fix encryption guidance and the plan reference
+
+Review verification: all 262 Node tests, pinned ES5 parsing, Compose configuration,
+and backend `make test race lint` with `LAMPA_API_REQUIRE_DOCKER=1` pass (94.1%
+coverage, zero lint issues). Upstream frontend files remain unchanged.
+
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*
+
+**Archive**: after orchestration and review finish, move this plan to
+`docs/plans/completed/` and update the design's §14 reference in the same change.
 
 **Deploy**: run `deploy-docker.yaml` (Production) from `svtlvtv`. No new secrets or Compose
 changes; the 4 MiB body limit ships in the embedded config. Check that

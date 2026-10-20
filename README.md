@@ -235,9 +235,10 @@ Secrets**:
 | `LAMPA_API_DATA_KEY` | Base64 of exactly 32 bytes (`openssl rand -base64 32`) |
 | `LAMPA_KEYCLOAK_CLIENT_SECRET` | Secret of the `svtlv-lampa` Keycloak client |
 
-**Back up `LAMPA_API_DATA_KEY` outside GitHub.** It seals every stored TorrServer,
-Jackett and Prowlarr credential; losing or changing it makes them unreadable, and key
-rotation is not implemented. `LAMPA_DB_PASSWORD` applies only when the
+**Back up `LAMPA_API_DATA_KEY` outside GitHub.** It seals values selected by the
+client's `encrypt` list, currently TorrServer login/password. Jackett and Prowlarr
+credentials remain local. Losing or changing the key makes sealed values unreadable;
+key rotation is not implemented. `LAMPA_DB_PASSWORD` applies only when the
 `lampa_db_data` volume is first initialized; see
 [`backend/README.md`](backend/README.md) for rotating it.
 

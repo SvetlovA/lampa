@@ -1712,6 +1712,51 @@ test('delayed polls and pre-save GETs cannot roll back a sibling tab save', () =
   }
 });
 
+for (const queued of [false, true]) test('a delayed PUT acknowledgement preserves shared and remote edits, queued=' + queued, () => {
+  const server = sharedDocument({language: 'en', tmdb_lang: 'en'});
+  const sharedItems = {[USER]: 'Alice'};
+  const a = acceptanceDevice(server, {sharedItems});
+  const b = acceptanceDevice(server, {sharedItems});
+  const remote = acceptanceDevice(server);
+  a.change('language', 'ru'); a.tick(2000);
+  server.respond(a.requests.at(-1));
+  const put = a.requests.at(-1), success = put.config.success;
+  let acknowledge;
+  put.config.success = (...args) => { acknowledge = () => success(...args); };
+  server.respond(put);
+  assert.equal(server.data().language, 'ru', 'the first save commits before its response arrives');
+  b.change('language', 'fr'); b.tick(2000);
+  server.respond(b.requests.at(-1)); server.respond(b.requests.at(-1));
+  const savedBase = sharedItems[BASE];
+  if (queued) a.change('tmdb_lang', 'it');
+  acknowledge();
+  assert.equal(sharedItems[BASE], savedBase, 'a delayed acknowledgement cannot rewind shared fingerprints');
+  assert.equal(a.requests.at(-1).config.type, 'GET', 'reconcile a superseded acknowledgement with the server');
+  server.respond(a.requests.at(-1));
+  if (queued) {
+    assert.equal(a.requests.at(-1).config.type, 'PUT');
+    server.respond(a.requests.at(-1));
+    assert.deepEqual(server.data(), {language: 'fr', tmdb_lang: 'it'}, 'an edit during the delayed response still saves');
+  }
+  remote.change('language', 'de'); remote.tick(2000);
+  server.respond(remote.requests.at(-1)); server.respond(remote.requests.at(-1));
+  a.change('tmdb_lang', 'es'); a.tick(2000);
+  server.respond(a.requests.at(-1)); server.respond(a.requests.at(-1));
+  assert.deepEqual(server.data(), {language: 'de', tmdb_lang: 'es'});
+  assert.deepEqual(a.notices, []); assert.equal(a.reloads.length, 0);
+});
+
+test('a PUT acknowledgement from a previous shared owner cannot modify the new account baseline', () => {
+  const p = savingPage({language: 'en'});
+  startSave(p).success(undefined, 304);
+  const put = p.requests.at(-1);
+  p.items[USER] = 'Bob'; p.items.language = 'fr'; p.syncedBase({language: 'fr'});
+  const before = {...p.items};
+  put.success('', 204, '"old-account"');
+  assert.deepEqual({...p.items}, before);
+  assert.equal(p.reloads.length, 1, 'refresh identity even before the sibling storage event arrives');
+});
+
 test('boot refetches an old document when shared fingerprints advance before scope or data arrives', () => {
   for (const scopeFirst of [false, true]) {
     const server = sharedDocument({language: 'en'});
@@ -1888,7 +1933,43 @@ test('first login detects must-sync reserve values without a local item or saved
     assert.deepEqual(clean(p.window.Lampa.Storage.get(key)), key === 'favorite' ? {book: [1, 2]} : reserveValue);
     p.tick(600000); p.visibility(true);
     assert.equal(p.requests.filter(r => r.config.type === 'PUT').length, 0);
-    assert.deepEqual(p.notices, ['Account sync is unavailable on this device']);
+    assert.deepEqual(p.notices, [otherLocalData ? 'Account sync is unavailable on this device' :
+      'Синхронизация Аккаунта недоступна на этом устройстве']);
+    p.state(guestState);
+    assert.equal(p.items[key], ''); assert.equal(p.items[USER], undefined);
+    assert.equal(p.reloads.length, 1, 'first-login persistence failures still permit logout cleanup');
+  }
+});
+
+test('disabled sync still clears account data on logout, expiry or account replacement', () => {
+  for (const failure of ['reserve', 'quota', 'read', 'base']) for (const next of [guestState, signedIn('Bob')]) {
+    for (const leaving of [false, true]) {
+      const p = savingPage({language: 'en', favorite: '{"book":[1]}'}, {upstreamStorage: true});
+      p.window.Lampa.Storage.get('favorite');
+      if (failure === 'reserve') {
+        p.faults.quota = 'favorite';
+        p.window.Lampa.Storage.set('favorite', {book: [1, 2]});
+      } else if (failure === 'quota') {
+        startSave(p).success(undefined, 304); p.faults.quota = BASE;
+        p.requests.at(-1).success('', 204);
+      } else if (failure === 'read') {
+        p.faults.getItem = true; p.change('language', 'ru');
+      } else {
+        p.items[BASE] = '{'; p.change('language', 'ru');
+      }
+      assert.equal(p.core.disabled(), true);
+      delete p.faults.quota; delete p.faults.getItem;
+      const requests = p.requests.length;
+      // Confirmed expiry uses the same guest event as explicit logout.
+      p.window.svtlv_account_leaving = leaving && next.status === 'guest';
+      p.state(next);
+      assert.equal(p.items.favorite, ''); assert.equal(p.items.language, '');
+      assert.equal(p.items[USER], undefined); assert.equal(p.items[BASE], undefined);
+      assert.equal(p.reloads.length, p.window.svtlv_account_leaving ? 0 : 1);
+      const fresh = page({items: p.items, upstreamStorage: true, reserve: {favorite: {book: ['private']}}});
+      assert.equal(fresh.window.Lampa.Storage.get('favorite', ''), '');
+      p.tick(600000); assert.equal(p.requests.length, requests, 'cleanup never re-enables synchronization');
+    }
   }
 });
 
@@ -2103,7 +2184,8 @@ test('acceptance: logout and confirmed session expiry mask reserve data while re
   for (const status of [null, 401, 409]) {
     const reserve = {favorite: {book: ['private']}, file_view: {private: 1}, torrserver_password: 'private'};
     const local = {player: 'native', jackett_key: 'local-key', plugins: '["local"]', file_view_cub: 'external'};
-    const server = sharedDocument({language: 'en', favorite: '{"book":[42]}'});
+    const server = sharedDocument({language: 'en', favorite: '{"book":[42]}',
+      ...(status ? {torrserver_password: 'private'} : {})});
     const p = acceptanceDevice(server, {items: local, reserve});
     if (status) {
       p.tick(60000); p.requests.at(-1).fail(status);
