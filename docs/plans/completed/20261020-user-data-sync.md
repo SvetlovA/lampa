@@ -489,12 +489,19 @@ are unchanged from `4c76cb6` (before Task 1). Real browser/TV checks remain list
 Post-Completion.
 
 ### Task 10: [Final] Update documentation
-- [ ] `docs/settings-sync-backend-design.md`: §4 any-JSON document v2, `encrypt`, in-place `$sealed`, `etag` column, dropped `encrypted_connections`, limits; §6/§7 boot apply, fingerprints, ETag polling, live apply (also during playback), save with `If-Match`; §8 precondition, `ETag`/`304`/`412`, PUT 204 and the v2 example; §5.3.1 Keycloak calls per poll/save; §10 lists `account-sync.js` (no `account-sync.css`) and how it reads the whitelist; §12 secrets chosen by `encrypt`; §16 resolved (clear on logout); Status → Implemented
-- [ ] §14 Plan 4 deviations: any-JSON document instead of sections; no feature flag; `file_view_*` not synced; §6.3 read-back GET dropped; key-level last-wins with `If-Match`; CUB writers not coordinated (`favorite`/`file_view` unused while CUB sync is active); "Clear cache" and CUB backup restore undone by the next boot GET; sign-in/out notices disappear in the reload; `app.min.js` starts up to 3s later on signed-in boots
-- [ ] keep `docs/tests/ownership-docs.test.cjs` passing after doc edits
-- [ ] `CLAUDE.md`: Svtlv add-ons section gets `account-sync.js`, the seam order, the marker and base keys, and "to sync a key, add it to `user`/`user_optional` in `storage-scope.json`; to encrypt it, also add it to `encrypt`"; lampa-api section replaces the `SensitiveSettings`/`TestSensitiveSettings_matchUI` text with the any-JSON v2 document, in-place sealing and ETag
-- [ ] `backend/README.md`: document v2 shape, precondition, ETag and `If-Match`
-- [ ] move this plan to `docs/plans/completed/`
+- [x] `docs/settings-sync-backend-design.md`: §4 any-JSON document v2, `encrypt`, in-place `$sealed`, `etag` column, dropped `encrypted_connections`, limits; §6/§7 boot apply, fingerprints, ETag polling, live apply (also during playback), save with `If-Match`; §8 precondition, `ETag`/`304`/`412`, PUT 204 and the v2 example; §5.3.1 Keycloak calls per poll/save; §10 lists `account-sync.js` (no `account-sync.css`) and how it reads the whitelist; §12 secrets chosen by `encrypt`; §16 resolved (clear on logout); Status → Implemented
+- [x] §14 Plan 4 deviations: any-JSON document instead of sections; no feature flag; `file_view_*` not synced; §6.3 read-back GET dropped; key-level last-wins with `If-Match`; CUB writers not coordinated (`favorite`/`file_view` unused while CUB sync is active); "Clear cache" and CUB backup restore undone by the next boot GET; sign-in/out notices disappear in the reload; `app.min.js` starts up to 3s later on signed-in boots
+- [x] keep `docs/tests/ownership-docs.test.cjs` passing after doc edits
+- [x] `CLAUDE.md`: Svtlv add-ons section gets `account-sync.js`, the seam order, the marker and base keys, and "to sync a key, add it to `user`/`user_optional` in `storage-scope.json`; to encrypt it, also add it to `encrypt`"; lampa-api section replaces the `SensitiveSettings`/`TestSensitiveSettings_matchUI` text with the any-JSON v2 document, in-place sealing and ETag
+- [x] `backend/README.md`: document v2 shape, precondition, ETag and `If-Match`
+- [x] move this plan to `docs/plans/completed/`
+
+Verification: all 234 Node tests and the pinned ES5 parser pass. Backend
+`make test race lint` passes with `LAMPA_API_REQUIRE_DOCKER=1` (94.1%
+coverage, zero lint issues). Documentation guards validate the published v2
+examples, current user-data DDL, API statuses, body limit and scope inventory.
+The design is marked Implemented; production deployment and real browser/TV
+checks remain in Post-Completion. Protected upstream files are unchanged.
 
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*

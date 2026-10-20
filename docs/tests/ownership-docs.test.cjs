@@ -98,3 +98,66 @@ test('scope guard detects missing best-effort fields and exported CUB profile pr
   /file_view_\* is not classified as user_optional/);
   assert.throws(() => checkScopes(document.replace(/^\| `user_optional`.*\n/m, ''), scopes));
 });
+
+function userDataSQL(document) {
+  const sql = document.match(/create table lampa_user_data\s*\([\s\S]*?\);/);
+  assert.ok(sql, 'current user-data DDL must be documented');
+  return sql[0].replace(/\s+/g, ' ').trim();
+}
+
+function userDataExamples(document) {
+  return [...document.matchAll(/```json\n([\s\S]*?)\n```/g)]
+    .map(match => JSON.parse(match[1])).filter(value => Object.hasOwn(value, 'schema_version'));
+}
+
+test('published user-data examples use the implemented schema and valid raw-storage envelopes', () => {
+  const schema = Number(read('backend/pkg/storage/document.go').match(/const SchemaVersion = (\d+)/)[1]);
+  const scope = JSON.parse(read('svtlv/storage-scope.json'));
+  for (const file of documents) {
+    const examples = userDataExamples(read(file));
+    assert.ok(examples.length, `${file}: a complete user-data example is required`);
+    for (const example of examples) {
+      assert.equal(example.schema_version, schema, file);
+      assert.equal(typeof example.data, 'object', file);
+      assert.ok(example.data && !Array.isArray(example.data), file);
+      assert.ok(Array.isArray(example.encrypt) && example.encrypt.length <= 64, file);
+      for (const key of example.encrypt) assert.match(key, /^[A-Za-z0-9_.:-]{1,128}$/, file);
+      for (const [key, value] of Object.entries(example.data)) {
+        assert.match(key, /^[A-Za-z0-9_.:-]{1,128}$/, file);
+        assert.ok(['user', 'user_connection', 'user_optional'].some(name => scope.scopes[name].includes(key)),
+          `${file}: example key ${key} must be portable`);
+        assert.equal(typeof value, 'string', `${file}: add-on values must be raw storage strings`);
+      }
+      assert.deepEqual(JSON.parse(example.data.favorite), {book: [], history: []}, file);
+    }
+  }
+});
+
+test('design user-data DDL matches the initial schema with the v2 migration applied', () => {
+  const initial = userDataSQL(read('backend/migrations/00001_create_lampa_user_data.sql'));
+  const migration = read('backend/migrations/00003_user_data_v2.sql').split('-- +goose Down')[0];
+  const dropped = migration.match(/drop column (\w+)/)[1];
+  const added = migration.match(/add column ([^;]+);/)[1];
+  const expected = initial.replace(new RegExp(` ${dropped} [^,]+,`), ` ${added},`);
+  assert.equal(userDataSQL(read(documents[1])), expected);
+  assert.notEqual(userDataSQL(read(documents[1]).replace('etag text not null', 'etag text')), expected);
+});
+
+test('both documents publish current user-data response statuses and body limit', () => {
+  const limit = JSON.parse(read('backend/pkg/config/defaults/appsettings.json')).Api.MaxBodyBytes;
+  for (const file of documents) {
+    const document = read(file);
+    assert.ok(document.includes(String(limit)), `${file}: configured body limit must be documented`);
+    for (const [method, statuses] of [['GET', [200, 304]], ['PUT', [204]], ['DELETE', [204]]]) {
+      const row = document.split('\n').find(line => line.startsWith(`| \`${method} /api/v1/user-data\``));
+      assert.ok(row, `${file}: ${method} user-data route must be documented`);
+      for (const status of statuses) assert.match(row, new RegExp(`\\b${status}\\b`), `${file}: ${method} ${status}`);
+      if (method === 'PUT') assert.doesNotMatch(row, /\b200\b/, `${file}: PUT no longer returns a document`);
+    }
+    for (const header of ['X-Lampa-Expected-User', 'If-None-Match', 'If-Match', 'ETag']) {
+      assert.ok(document.includes('`' + header + '`'), `${file}: ${header} must be documented`);
+    }
+    assert.ok(document.includes('412 precondition_failed'), `${file}: stale saves must be documented`);
+    assert.doesNotMatch(document, /500 connections_unreadable|schema_version` 1 is accepted/);
+  }
+});
