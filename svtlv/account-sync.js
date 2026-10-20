@@ -371,9 +371,9 @@
     return data;
   }
 
-  function writeLive(key, value, optional) {
+  function writeLive(key, value, optional, raw) {
     var parsed = value;
-    if (value.charAt(0) == '[' || value.charAt(0) == '{') {
+    if (!raw && (value.charAt(0) == '[' || value.charAt(0) == '{')) {
       try { parsed = JSON.parse(value); } catch (err) { /* Match Storage.get's raw fallback. */ }
     }
     try {
@@ -391,6 +391,12 @@
       disable();
       throw err;
     }
+  }
+
+  function refreshLive(written) {
+    var lampa = window.Lampa;
+    if (written.favorite && lampa.Favorite) lampa.Favorite.read();
+    if (lampa.Timeline && written[lampa.Timeline.filename()]) lampa.Timeline.read();
   }
 
   function applyDoc(data, live) {
@@ -417,21 +423,20 @@
       keys.forEach(function (key) {
         if (dirty(key)) return;
         var value = data[key];
-        if (storage('getItem', key) !== value) {
+        var differs = storage('getItem', key) !== value;
+        // Storage and module caches belong to this tab, unlike localStorage/base.
+        // A sibling may already have persisted a value this tab has never applied.
+        if (differs || (live && (!own(lastDoc, key) || lastDoc[key] !== value))) {
           var optional = classify(key) == 'user_optional';
           if (!(live ? writeLive(key, value, optional) : storage('setItem', key, value, optional))) return;
-          changed = true;
+          if (differs) changed = true;
           written[key] = true;
         }
         if (fp(value) === null) delete previous[key];
         else previous[key] = fp(value);
       });
       writeBase();
-      if (live) {
-        var lampa = window.Lampa;
-        if (written.favorite && lampa.Favorite) lampa.Favorite.read();
-        if (lampa.Timeline && written[lampa.Timeline.filename()]) lampa.Timeline.read();
-      }
+      if (live) refreshLive(written);
       return {changed: changed};
     } finally {
       if (live) {
@@ -591,6 +596,22 @@
     $(window).on('storage', function (event) {
       var change = event.originalEvent || event;
       if (change.key == USER_KEY && change.oldValue !== change.newValue) reloadPage();
+      if (!uploads || disabled || reloading || !synced(change.key)) return;
+      try {
+        if (storage('getItem', USER_KEY) !== accountUser) return;
+        // Events can queue behind later edits. Refresh from the current shared value.
+        var value = storage('getItem', change.key);
+        if (value === null) return;
+        applying = true;
+        // Write the raw string unchanged so JSON normalization cannot bounce
+        // storage events between tabs. Storage.get parses it for module readers.
+        if (writeLive(change.key, value, classify(change.key) == 'user_optional', true)) {
+          var written = Object.create(null);
+          written[change.key] = true;
+          refreshLive(written);
+        }
+      } catch (err) { /* Persistence failures disable sync without breaking the page. */ }
+      finally { applying = false; }
     });
     if (window.Lampa.Storage.listener) window.Lampa.Storage.listener.follow('change', function (event) {
       if (!applying && event && synced(event.name)) {

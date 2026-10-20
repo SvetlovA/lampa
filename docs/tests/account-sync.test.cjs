@@ -1635,6 +1635,62 @@ test('shared tabs refresh saved fingerprints before merging a newer remote edit'
   assert.deepEqual(server.data(), {language: 'de', tmdb_lang: 'fr'});
 });
 
+test('shared tabs refresh their own upstream caches before editing already-persisted remote data', () => {
+  const server = sharedDocument({favorite: '{"book":[1]}', file_view: '{"movie":0.1}'});
+  const sharedItems = {[USER]: 'Alice'};
+  const a = acceptanceDevice(server, {sharedItems});
+  const b = acceptanceDevice(server, {sharedItems});
+  for (const p of [a, b]) {
+    assert.deepEqual(clean(p.window.Lampa.Storage.get('favorite')), {book: [1]});
+    assert.deepEqual(clean(p.window.Lampa.Storage.get('file_view')), {movie: 0.1});
+  }
+  a.window.Lampa.Storage.set('favorite', {book: [1, 2]});
+  a.window.Lampa.Storage.set('file_view', {movie: 0.5});
+  a.tick(2000); server.respond(a.requests.at(-1)); server.respond(a.requests.at(-1));
+  assert.equal(sharedItems.favorite, server.data().favorite, 'raw storage is already up to date');
+  // No storage event is needed: each tab's poll must refresh its independent caches.
+  b.tick(60000); server.respond(b.requests.at(-1));
+  assert.deepEqual(clean(b.window.Lampa.Storage.get('favorite')), {book: [1, 2]});
+  assert.deepEqual(clean(b.window.Lampa.Storage.get('file_view')), {movie: 0.5});
+  assert.deepEqual(b.refreshes, ['favorite', 'timeline']);
+  const favorite = b.window.Lampa.Storage.get('favorite');
+  favorite.book.push(3);
+  b.window.Lampa.Storage.set('favorite', favorite);
+  b.tick(2000); server.respond(b.requests.at(-1)); server.respond(b.requests.at(-1));
+  assert.deepEqual(JSON.parse(server.data().favorite), {book: [1, 2, 3]}, 'a later edit retains the sibling bookmark');
+  assert.equal(b.reloads.length, 0); assert.deepEqual(b.notices, []);
+});
+
+test('synced storage events refresh tab caches without changing raw values or saved fingerprints', () => {
+  const server = sharedDocument({language: 'en', favorite: '{"book":[1]}', file_view: '{"movie":0.1}'});
+  const sharedItems = {[USER]: 'Alice'};
+  const a = acceptanceDevice(server, {sharedItems});
+  const b = acceptanceDevice(server, {sharedItems});
+  b.window.Lampa.Storage.get('favorite'); b.window.Lampa.Storage.get('file_view');
+  const savedBase = sharedItems[BASE];
+  // A sibling edit is still dirty and its storage events can contain superseded values.
+  a.window.Lampa.Storage.set('favorite', '{ "book": [1, 2] }');
+  a.window.Lampa.Storage.set('file_view', '{ "movie": 0.5 }');
+  b.storageEvent({key: 'favorite', oldValue: '{"book":[1]}', newValue: 'superseded'}, false);
+  b.storageEvent({key: 'file_view', oldValue: '{"movie":0.1}', newValue: '{ "movie": 0.5 }'});
+  assert.deepEqual(clean(b.window.Lampa.Storage.get('favorite')), {book: [1, 2]});
+  assert.deepEqual(clean(b.window.Lampa.Storage.get('file_view')), {movie: 0.5});
+  assert.deepEqual(b.refreshes, ['favorite', 'timeline']);
+  assert.equal(sharedItems.favorite, '{ "book": [1, 2] }');
+  assert.equal(sharedItems.file_view, '{ "movie": 0.5 }');
+  assert.deepEqual(b.storageWrites.map(write => write.value), ['{ "book": [1, 2] }', '{ "movie": 0.5 }'],
+    'event refresh writes identical raw strings instead of generating normalization events');
+  assert.equal(sharedItems[BASE], savedBase, 'cache refresh never acknowledges an unsaved edit');
+  b.tick(2000); assert.equal(b.requests.length, 2, 'a sibling cache refresh does not start a save');
+  b.window.Lampa.Storage.set('language', 'ru');
+  b.tick(2000); server.respond(b.requests.at(-1)); server.respond(b.requests.at(-1));
+  assert.equal(server.responses.at(-2), 304, 'this tab can save the shared edit before its sibling');
+  const favorite = b.window.Lampa.Storage.get('favorite');
+  favorite.book.push(3); b.window.Lampa.Storage.set('favorite', favorite);
+  b.tick(2000); server.respond(b.requests.at(-1)); server.respond(b.requests.at(-1));
+  assert.deepEqual(JSON.parse(server.data().favorite), {book: [1, 2, 3]});
+});
+
 test('upstream quota fallback never uploads a must-sync deletion tombstone', () => {
   for (const key of ['favorite', 'mine_reactions']) {
     const p = savingPage(undefined, {hidden: true, upstreamStorage: true});
