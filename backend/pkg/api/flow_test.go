@@ -53,6 +53,17 @@ func (f *fakeStore) Upsert(_ context.Context, rec storage.Record) (storage.Recor
 	return rec, nil
 }
 
+func (f *fakeStore) Update(ctx context.Context, rec storage.Record, expectedETag string) (storage.Record, error) {
+	current, err := f.Get(ctx, rec.UserID)
+	if errors.Is(err, storage.ErrNotFound) || (err == nil && current.ETag != expectedETag) {
+		return storage.Record{}, storage.ErrPreconditionFailed
+	}
+	if err != nil {
+		return storage.Record{}, err
+	}
+	return f.Upsert(ctx, rec)
+}
+
 func (f *fakeStore) Delete(_ context.Context, userID string) error {
 	if f.failing {
 		return errors.New("dial tcp 10.0.0.5:5432: connection refused")
@@ -295,4 +306,51 @@ func TestServer_UserDataOldRow(t *testing.T) {
 	status, body := call(t, srv, http.MethodGet, flowUserA, "")
 	require.Equal(t, http.StatusNotFound, status)
 	assert.Equal(t, "user_data_not_found", errorCode(t, body))
+}
+
+func TestServer_UserDataETagFlow(t *testing.T) {
+	srv, store := newFlowServer(t)
+	request := func(method, body string, headers map[string]string) *httptest.ResponseRecorder {
+		req := newRequest(method, userDataPath, strings.NewReader(body))
+		req.Header.Set("X-Test-User", flowUserA)
+		req.Header.Set("X-Lampa-Expected-User", flowUserA)
+		req.Header.Set("Content-Type", "application/json")
+		for key, value := range headers {
+			req.Header.Set(key, value)
+		}
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		return w
+	}
+	const first = `{"schema_version":2,"data":{"secret":"é","nested":{"z":1,"a":[{"b":true,"a":null}]}},"encrypt":["secret"]}`
+	put := request(http.MethodPut, first, nil)
+	require.Equal(t, http.StatusNoContent, put.Code)
+	tag := put.Header().Get("ETag")
+	require.Len(t, tag, 66, "quoted sha256")
+	get := request(http.MethodGet, "", nil)
+	require.Equal(t, http.StatusOK, get.Code)
+	assert.Equal(t, tag, get.Header().Get("ETag"))
+	unchanged := request(http.MethodGet, "", map[string]string{"If-None-Match": "W/" + tag})
+	assert.Equal(t, http.StatusNotModified, unchanged.Code)
+	assert.Empty(t, unchanged.Body.String())
+
+	// sorting nested keys and decoding unicode escapes leaves the tag unchanged,
+	// including when fresh ciphertext is generated on the next write.
+	const equivalent = `{"schema_version":2,"encrypt":["secret"],"data":{"nested":{"a":[{"a":null,"b":true}],"z":1},"secret":"\u00e9"}}`
+	same := request(http.MethodPut, equivalent, map[string]string{"If-Match": tag})
+	require.Equal(t, http.StatusNoContent, same.Code)
+	assert.Equal(t, tag, same.Header().Get("ETag"))
+	changed := request(http.MethodPut, `{"schema_version":2,"data":{"language":"ru"}}`, map[string]string{"If-Match": "W/" + tag})
+	require.Equal(t, http.StatusNoContent, changed.Code)
+	assert.NotEqual(t, tag, changed.Header().Get("ETag"))
+	stored := store.records[flowUserA]
+	stale := request(http.MethodPut, first, map[string]string{"If-Match": tag})
+	assert.Equal(t, http.StatusPreconditionFailed, stale.Code)
+	assert.Equal(t, "precondition_failed", errorCode(t, stale.Body.String()))
+	assert.Equal(t, stored, store.records[flowUserA])
+
+	require.Equal(t, http.StatusNoContent, request(http.MethodDelete, "", nil).Code)
+	missing := request(http.MethodPut, first, map[string]string{"If-Match": tag})
+	assert.Equal(t, http.StatusPreconditionFailed, missing.Code)
+	assert.Empty(t, store.records, "conditional writes must not insert a missing document")
 }

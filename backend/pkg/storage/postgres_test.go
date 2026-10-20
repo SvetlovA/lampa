@@ -189,3 +189,69 @@ func TestPgStore_UpsertRejectsUnstorableNumber(t *testing.T) {
 	_, err = s.Get(t.Context(), userID)
 	require.ErrorIs(t, err, storage.ErrNotFound, "nothing was stored")
 }
+
+func TestPgStore_Update(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t, pgtest.DB(t))
+	id := newUserID(t)
+	rec := testRecord(id, `{"value":"first"}`)
+	rec.ETag = "first-tag"
+	first, err := s.Upsert(t.Context(), rec)
+	require.NoError(t, err)
+	got, err := s.Get(t.Context(), id)
+	require.NoError(t, err)
+	assert.Equal(t, rec.ETag, got.ETag)
+
+	rec.Data = json.RawMessage(`{"value":"second"}`)
+	rec.ETag = "second-tag"
+	second, err := s.Update(t.Context(), rec, first.ETag)
+	require.NoError(t, err)
+	assert.Equal(t, first.CreatedAt, second.CreatedAt)
+	assert.True(t, second.UpdatedAt.After(first.UpdatedAt))
+
+	rec.Data = json.RawMessage(`{"value":"stale"}`)
+	rec.ETag = "stale-tag"
+	_, err = s.Update(t.Context(), rec, first.ETag)
+	require.ErrorIs(t, err, storage.ErrPreconditionFailed)
+	got, err = s.Get(t.Context(), id)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(second.Data), string(got.Data))
+	assert.Equal(t, second.ETag, got.ETag)
+	assert.Equal(t, second.CreatedAt, got.CreatedAt)
+	assert.Equal(t, second.UpdatedAt, got.UpdatedAt, "a stale update must not bump timestamps")
+
+	// an update for a different/missing user cannot change the original row or insert.
+	rec.UserID = newUserID(t)
+	_, err = s.Update(t.Context(), rec, second.ETag)
+	require.ErrorIs(t, err, storage.ErrPreconditionFailed)
+	_, err = s.Get(t.Context(), rec.UserID)
+	require.ErrorIs(t, err, storage.ErrNotFound)
+	require.NoError(t, s.Delete(t.Context(), id))
+	rec.UserID = id
+	_, err = s.Update(t.Context(), rec, second.ETag)
+	require.ErrorIs(t, err, storage.ErrPreconditionFailed, "a deleted record must not be recreated")
+}
+
+func TestPgStore_UpdateFailures(t *testing.T) {
+	t.Parallel()
+	pool := pgtest.DB(t)
+	s := newTestStore(t, pool)
+	rec := testRecord(newUserID(t), `{}`)
+	rec.ETag = "old"
+	_, err := s.Upsert(t.Context(), rec)
+	require.NoError(t, err)
+	rec.Data = json.RawMessage(`{"n":1` + strings.Repeat("0", 140000) + `}`)
+	_, err = s.Update(t.Context(), rec, "old")
+	require.ErrorIs(t, err, storage.ErrInvalidData)
+	got, err := s.Get(t.Context(), rec.UserID)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{}`, string(got.Data))
+	assert.Equal(t, "old", got.ETag)
+
+	closed, err := pgxpool.NewWithConfig(t.Context(), pool.Config().Copy())
+	require.NoError(t, err)
+	closed.Close()
+	_, err = newTestStore(t, closed).Update(t.Context(), rec, "old")
+	require.Error(t, err)
+	require.NotErrorIs(t, err, storage.ErrPreconditionFailed)
+}

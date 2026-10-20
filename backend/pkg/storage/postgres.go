@@ -14,6 +14,8 @@ import (
 )
 
 var (
+	// ErrPreconditionFailed means an atomic update found no row with the expected ETag.
+	ErrPreconditionFailed = errors.New("user data precondition failed")
 	// ErrNotFound is returned when a user has no stored document.
 	ErrNotFound = errors.New("user data not found")
 	// ErrInvalidData is returned by Upsert when postgres rejects the document content itself,
@@ -29,6 +31,7 @@ type Record struct {
 	UserID        string          // canonical uuid of the owner
 	SchemaVersion int             // document schema version
 	Data          json.RawMessage // json object with selected values sealed in place
+	ETag          string          // sha256 of canonical plaintext data, without quotes
 	CreatedAt     time.Time       // set on first insert, never changed
 	UpdatedAt     time.Time       // set on every upsert
 }
@@ -51,9 +54,9 @@ func (s *PgStore) Get(ctx context.Context, userID string) (Record, error) {
 	rec := Record{UserID: userID}
 	var data []byte
 	err := s.pool.QueryRow(ctx,
-		`select schema_version, data, created_at, updated_at
+		`select schema_version, data, etag, created_at, updated_at
 		from lampa_user_data where user_id = $1`, userID).
-		Scan(&rec.SchemaVersion, &data, &rec.CreatedAt, &rec.UpdatedAt)
+		Scan(&rec.SchemaVersion, &data, &rec.ETag, &rec.CreatedAt, &rec.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Record{}, ErrNotFound
 	}
@@ -68,14 +71,15 @@ func (s *PgStore) Get(ctx context.Context, userID string) (Record, error) {
 // the CreatedAt and UpdatedAt fields of rec are ignored.
 func (s *PgStore) Upsert(ctx context.Context, rec Record) (Record, error) {
 	err := s.pool.QueryRow(ctx,
-		`insert into lampa_user_data (user_id, schema_version, data)
-		values ($1, $2, $3)
+		`insert into lampa_user_data (user_id, schema_version, data, etag)
+		values ($1, $2, $3, $4)
 		on conflict (user_id) do update set
 			schema_version = excluded.schema_version,
 			data = excluded.data,
+			etag = excluded.etag,
 			updated_at = now()
 		returning created_at, updated_at`,
-		rec.UserID, rec.SchemaVersion, []byte(rec.Data)).
+		rec.UserID, rec.SchemaVersion, []byte(rec.Data), rec.ETag).
 		Scan(&rec.CreatedAt, &rec.UpdatedAt)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && strings.HasPrefix(pgErr.Code, dataExceptionClass) {
@@ -83,6 +87,28 @@ func (s *PgStore) Upsert(ctx context.Context, rec Record) (Record, error) {
 	}
 	if err != nil {
 		return Record{}, fmt.Errorf("upsert user data: %w", err)
+	}
+	return rec, nil
+}
+
+// Update replaces an existing record only if its ETag still matches expectedETag.
+// the predicate and write run in one statement, so competing updates cannot both win.
+func (s *PgStore) Update(ctx context.Context, rec Record, expectedETag string) (Record, error) {
+	err := s.pool.QueryRow(ctx,
+		`update lampa_user_data set schema_version = $2, data = $3, etag = $4, updated_at = now()
+		where user_id = $1 and etag = $5
+		returning created_at, updated_at`,
+		rec.UserID, rec.SchemaVersion, []byte(rec.Data), rec.ETag, expectedETag).
+		Scan(&rec.CreatedAt, &rec.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Record{}, ErrPreconditionFailed
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && strings.HasPrefix(pgErr.Code, dataExceptionClass) {
+		return Record{}, fmt.Errorf("update user data: %w: %w", ErrInvalidData, err)
+	}
+	if err != nil {
+		return Record{}, fmt.Errorf("update user data: %w", err)
 	}
 	return rec, nil
 }

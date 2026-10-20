@@ -368,15 +368,16 @@ only. Nothing is defined on non-HTTP(S) origins (`^https?:$` guard).
 **Files:**
 - Modify: `backend/pkg/api/torrents.go` (move helper), `identity.go`
 - Modify: `backend/pkg/api/userdata.go`, `userdata_test.go`
-- Modify: `backend/pkg/storage/service.go`, `postgres.go` and their tests
+- Modify: `backend/pkg/storage/document.go`, `service.go`, `postgres.go` and their tests
+- Modify: `backend/pkg/api/server.go`, generated API/storage mocks and dependent test fixtures
 
-- [ ] move `torrentIdentityMatches` to `identity.go` as `identityMatches`; call it in GET, PUT and DELETE `/user-data` before storage access
-- [ ] compute the ETag on PUT (sha256 of canonical `data`, sorted keys, compacted values, before sealing) and store it in `etag`
-- [ ] GET: `ETag` header from the row; `304` without body when `If-None-Match` matches (ignore `W/`); keep `Cache-Control: no-store`
-- [ ] PUT: with `If-Match` → conditional update, no row → `412 precondition_failed`; without → upsert; `204` with the new `ETag`
-- [ ] write tests: precondition absent/equal passes, different → `409` with no storage call (all three methods)
-- [ ] write tests: same data → same ETag (also with nested objects and `é` escapes); changed data → new ETag; PUT ETag equals next GET ETag; `If-None-Match` match → 304, `W/` match → 304, other → 200; `If-Match` stale → 412 and nothing written; concurrent conditional PUTs → exactly one succeeds
-- [ ] run `make fmt test race lint` in `backend/` - must pass before task 3
+- [x] move `torrentIdentityMatches` to `identity.go` as `identityMatches`; call it in GET, PUT and DELETE `/user-data` before storage access
+- [x] compute the ETag on PUT (sha256 of canonical `data`, sorted keys, compacted values, before sealing) and store it in `etag`
+- [x] GET: `ETag` header from the row; `304` without body when `If-None-Match` matches (ignore `W/`); keep `Cache-Control: no-store`
+- [x] PUT: with `If-Match` → conditional update, no row → `412 precondition_failed`; without → upsert; `204` with the new `ETag`
+- [x] write tests: precondition absent/equal passes, different → `409` with no storage call (all three methods)
+- [x] write tests: same data → same ETag (also with nested objects and `é` escapes); changed data → new ETag; PUT ETag equals next GET ETag; `If-None-Match` match → 304, `W/` match → 304, other → 200; `If-Match` stale → 412 and nothing written; concurrent conditional PUTs → exactly one succeeds
+- [x] run `make fmt test race lint` in `backend/` - must pass before task 3
 
 ### Task 3: Whitelist in storage-scope.json
 

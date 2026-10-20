@@ -56,6 +56,7 @@ type Limits struct {
 type Document struct {
 	SchemaVersion int
 	Data          map[string]json.RawMessage
+	ETag          string   // sha256 of canonical plaintext data, without quotes
 	Encrypt       []string // keys selected by the client for encryption at rest
 	UpdatedAt     time.Time
 }

@@ -6,6 +6,8 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/SvetlovA/lampa/backend/pkg/storage"
@@ -20,15 +22,28 @@ type documentResponse struct {
 
 func (s *Server) getUserData(w http.ResponseWriter, r *http.Request) {
 	id, _ := UserID(r.Context())
+	if !identityMatches(w, r, id) {
+		return
+	}
 	doc, err := s.svc.Get(r.Context(), id)
 	if err != nil {
 		s.writeServiceError(w, r, err)
+		return
+	}
+	w.Header().Set("ETag", strconv.Quote(doc.ETag))
+	if stripWeakETag(r.Header.Get("If-None-Match")) == strconv.Quote(doc.ETag) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusNotModified)
 		return
 	}
 	writeDocument(w, doc)
 }
 
 func (s *Server) putUserData(w http.ResponseWriter, r *http.Request) {
+	id, _ := UserID(r.Context())
+	if !identityMatches(w, r, id) {
+		return
+	}
 	if !isJSON(r.Header.Get("Content-Type")) {
 		WriteError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "content type must be application/json")
 		return
@@ -43,17 +58,29 @@ func (s *Server) putUserData(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, storage.CodeInvalidJSON, "body could not be read")
 		return
 	}
-	id, _ := UserID(r.Context())
-	_, err = s.svc.Replace(r.Context(), id, raw)
+	var expectedETag *string
+	if values, present := r.Header["If-Match"]; present {
+		// even an empty or malformed header is a precondition, never an upsert.
+		tag := stripWeakETag(strings.Join(values, ","))
+		if len(tag) >= 2 && tag[0] == '"' && tag[len(tag)-1] == '"' {
+			tag = tag[1 : len(tag)-1]
+		}
+		expectedETag = &tag
+	}
+	doc, err := s.svc.Replace(r.Context(), id, raw, expectedETag)
 	if err != nil {
 		s.writeServiceError(w, r, err)
 		return
 	}
+	w.Header().Set("ETag", strconv.Quote(doc.ETag))
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) deleteUserData(w http.ResponseWriter, r *http.Request) {
 	id, _ := UserID(r.Context())
+	if !identityMatches(w, r, id) {
+		return
+	}
 	if err := s.svc.Delete(r.Context(), id); err != nil {
 		s.writeServiceError(w, r, err)
 		return
@@ -72,6 +99,8 @@ func (s *Server) writeServiceError(w http.ResponseWriter, r *http.Request, err e
 			status = http.StatusRequestEntityTooLarge
 		}
 		WriteError(w, status, verr.Code, verr.Reason)
+	case errors.Is(err, storage.ErrPreconditionFailed):
+		WriteError(w, http.StatusPreconditionFailed, "precondition_failed", "user data changed; fetch it again")
 	case errors.Is(err, storage.ErrNotFound):
 		WriteError(w, http.StatusNotFound, "user_data_not_found", "user data not found")
 	case errors.Is(err, storage.ErrUnavailable):
@@ -94,4 +123,9 @@ func writeDocument(w http.ResponseWriter, doc storage.Document) {
 func isJSON(contentType string) bool {
 	mediaType, _, err := mime.ParseMediaType(contentType)
 	return err == nil && mediaType == "application/json"
+}
+
+// stripWeakETag compares tags without the optional weak validator prefix.
+func stripWeakETag(tag string) string {
+	return strings.TrimPrefix(strings.TrimSpace(tag), "W/")
 }

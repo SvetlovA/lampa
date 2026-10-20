@@ -192,7 +192,7 @@ func TestServer_DenyAllRoutes(t *testing.T) {
 func TestServer_UserIDFromRequestIgnored(t *testing.T) {
 	const otherID = "11111111-2222-4333-8444-555555555555"
 	svc := &mocks.UserDataMock{
-		ReplaceFunc: func(_ context.Context, userID string, raw []byte) (storage.Document, error) {
+		ReplaceFunc: func(_ context.Context, userID string, raw []byte, expectedETag *string) (storage.Document, error) {
 			return storage.Document{SchemaVersion: 2}, nil
 		},
 	}

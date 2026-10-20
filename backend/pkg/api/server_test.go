@@ -141,7 +141,7 @@ func TestServer_PanicAbortHandler(t *testing.T) {
 func TestServer_AccessLog(t *testing.T) {
 	const secretBody, secretCookie, secretQuery = "body-secret-value", "cookie-secret-value", "query-secret-value"
 	svc := &mocks.UserDataMock{
-		ReplaceFunc: func(context.Context, string, []byte) (storage.Document, error) {
+		ReplaceFunc: func(context.Context, string, []byte, *string) (storage.Document, error) {
 			return storage.Document{SchemaVersion: 2}, nil
 		},
 	}

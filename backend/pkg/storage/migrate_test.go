@@ -217,7 +217,7 @@ func TestMigrate_userDataV2(t *testing.T) {
 	svc, _ := newTestService(t, newTestStore(t, p), newTestSealer(t, 1))
 	_, err = svc.Get(t.Context(), id)
 	require.ErrorIs(t, err, storage.ErrNotFound)
-	_, err = svc.Replace(t.Context(), id, testBody)
+	_, err = svc.Replace(t.Context(), id, testBody, nil)
 	require.NoError(t, err, "a v2 save replaces the old document")
 	got, err := svc.Get(t.Context(), id)
 	require.NoError(t, err)

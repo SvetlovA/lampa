@@ -548,7 +548,7 @@ func TestNewAPI_sessionRevalidation(t *testing.T) {
 			}
 			return stored, nil
 		},
-		ReplaceFunc: func(_ context.Context, userID string, raw []byte) (storage.Document, error) {
+		ReplaceFunc: func(_ context.Context, userID string, raw []byte, expectedETag *string) (storage.Document, error) {
 			assert.Equal(t, testUserID, userID)
 			assert.Contains(t, string(raw), `"language":"ru"`)
 			stored = storage.Document{SchemaVersion: 2, Data: map[string]json.RawMessage{"settings": json.RawMessage(`{"language":"ru"}`)}}

@@ -22,7 +22,7 @@ type Torrents interface {
 
 func (s *Server) getTorrentHashes(w http.ResponseWriter, r *http.Request) {
 	id, _ := UserID(r.Context())
-	if !torrentIdentityMatches(w, r, id) {
+	if !identityMatches(w, r, id) {
 		return
 	}
 	hashes, err := s.torrents.List(r.Context(), id, r.PathValue("server_id"))
@@ -40,7 +40,7 @@ func (s *Server) getTorrentHashes(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) putTorrentHash(w http.ResponseWriter, r *http.Request) {
 	id, _ := UserID(r.Context())
-	if !torrentIdentityMatches(w, r, id) {
+	if !identityMatches(w, r, id) {
 		return
 	}
 	if err := s.torrents.Claim(r.Context(), id, r.PathValue("server_id"), r.PathValue("hash")); err != nil {
@@ -52,7 +52,7 @@ func (s *Server) putTorrentHash(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) deleteTorrentHash(w http.ResponseWriter, r *http.Request) {
 	id, _ := UserID(r.Context())
-	if !torrentIdentityMatches(w, r, id) {
+	if !identityMatches(w, r, id) {
 		return
 	}
 	if err := s.torrents.Release(r.Context(), id, r.PathValue("server_id"), r.PathValue("hash")); err != nil {
@@ -60,14 +60,4 @@ func (s *Server) deleteTorrentHash(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// torrentIdentityMatches is an optional precondition, never a source of identity.
-// it prevents a stale tab from using another tab's newly authenticated cookie.
-func torrentIdentityMatches(w http.ResponseWriter, r *http.Request, id string) bool {
-	if expected := r.Header.Get("X-Lampa-Expected-User"); expected != "" && expected != id {
-		WriteError(w, http.StatusConflict, "account_changed", "account changed; recheck session")
-		return false
-	}
-	return true
 }

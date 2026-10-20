@@ -1,7 +1,10 @@
 package storage
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -16,6 +19,7 @@ var ErrUnavailable = errors.New("storage unavailable")
 type Store interface {
 	Get(ctx context.Context, userID string) (Record, error)
 	Upsert(ctx context.Context, rec Record) (Record, error)
+	Update(ctx context.Context, rec Record, expectedETag string) (Record, error)
 	Delete(ctx context.Context, userID string) error
 }
 
@@ -70,13 +74,14 @@ func (s *Service) Get(ctx context.Context, userID string) (Document, error) {
 	if err != nil {
 		return Document{}, fmt.Errorf("open stored data: %w", err)
 	}
-	return Document{SchemaVersion: rec.SchemaVersion, Data: opened, UpdatedAt: rec.UpdatedAt}, nil
+	return Document{SchemaVersion: rec.SchemaVersion, Data: opened, UpdatedAt: rec.UpdatedAt, ETag: rec.ETag}, nil
 }
 
 // Replace validates raw as a PUT body and stores it as the whole document of userID.
 // validation failures are returned as the *ValidationError from ParseDocument, unwrapped.
+// a non-nil expectedETag requires an existing row with that tag, updated atomically.
 // the returned document is the one stored, credentials included, with the stored UpdatedAt.
-func (s *Service) Replace(ctx context.Context, userID string, raw []byte) (Document, error) {
+func (s *Service) Replace(ctx context.Context, userID string, raw []byte, expectedETag *string) (Document, error) {
 	id, err := canonicalUserID(userID)
 	if err != nil {
 		return Document{}, err
@@ -84,6 +89,11 @@ func (s *Service) Replace(ctx context.Context, userID string, raw []byte) (Docum
 	doc, err := ParseDocument(raw, s.limits)
 	if err != nil {
 		return Document{}, err
+	}
+
+	doc.ETag, err = documentETag(doc.Data)
+	if err != nil {
+		return Document{}, fmt.Errorf("hash data: %w", err)
 	}
 
 	sealed, err := s.sealer.sealListed(id, doc.Data, doc.Encrypt)
@@ -95,7 +105,12 @@ func (s *Service) Replace(ctx context.Context, userID string, raw []byte) (Docum
 		return Document{}, fmt.Errorf("encode data: %w", err)
 	}
 
-	rec, err := s.store.Upsert(ctx, Record{UserID: id, SchemaVersion: doc.SchemaVersion, Data: data})
+	rec := Record{UserID: id, SchemaVersion: doc.SchemaVersion, Data: data, ETag: doc.ETag}
+	if expectedETag == nil {
+		rec, err = s.store.Upsert(ctx, rec)
+	} else {
+		rec, err = s.store.Update(ctx, rec, *expectedETag)
+	}
 	if errors.Is(err, ErrInvalidData) {
 		// the driver error carries only the sqlstate message, never document content
 		s.logger.Printf("[WARN] upsert user data: %v", err)
@@ -126,6 +141,9 @@ func (s *Service) storeError(op string, err error) error {
 	if errors.Is(err, ErrNotFound) {
 		return ErrNotFound
 	}
+	if errors.Is(err, ErrPreconditionFailed) {
+		return ErrPreconditionFailed
+	}
 	s.logger.Printf("[WARN] %s: %v", op, err)
 	return fmt.Errorf("%s: %w: %w", op, ErrUnavailable, err)
 }
@@ -136,4 +154,24 @@ func canonicalUserID(userID string) (string, error) {
 		return "", err
 	}
 	return strings.ToLower(userID), nil
+}
+
+// documentETag normalizes nested objects and escaped strings before hashing.
+// UseNumber preserves numbers that would lose precision in a float64.
+func documentETag(data map[string]json.RawMessage) (string, error) {
+	canonical := make(map[string]any, len(data))
+	for key, raw := range data {
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		var value any
+		if err := dec.Decode(&value); err != nil {
+			return "", fmt.Errorf("decode value: %w", err)
+		}
+		canonical[key] = value
+	}
+	raw, err := json.Marshal(canonical)
+	if err != nil {
+		return "", fmt.Errorf("encode canonical data: %w", err)
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(raw)), nil
 }

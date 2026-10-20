@@ -25,6 +25,7 @@ var testUpdatedAt = time.Date(2026, 9, 18, 21, 30, 0, 123000000, time.FixedZone(
 func testDocument() storage.Document {
 	return storage.Document{
 		SchemaVersion: 2,
+		ETag:          "test-etag",
 		Data: map[string]json.RawMessage{
 			"custom.key:1": json.RawMessage(`[null,true,42,"x"]`),
 			"settings":     json.RawMessage(`{"torrserver_url":"http://a/?x=1&y=<2>"}`),
@@ -132,7 +133,7 @@ func TestServer_PutUserData(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			svc := &mocks.UserDataMock{
-				ReplaceFunc: func(_ context.Context, userID string, raw []byte) (storage.Document, error) {
+				ReplaceFunc: func(_ context.Context, userID string, raw []byte, expectedETag *string) (storage.Document, error) {
 					if tc.err != nil {
 						return storage.Document{}, tc.err
 					}
@@ -263,4 +264,113 @@ func TestServer_RequestContextHasDeadline(t *testing.T) {
 	require.True(t, hasDeadline, "the store must not run on a context without a deadline")
 	assert.WithinDuration(t, start.Add(requestTimeout), deadline, time.Second)
 	assert.Less(t, requestTimeout, writeTimeout, "a stalled store has to answer 503 before the write timeout drops the connection")
+}
+
+func TestServer_UserDataExpectedUser(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
+		for _, expected := range []string{"", testUserID, flowUserB} {
+			t.Run(method+"/"+expected, func(t *testing.T) {
+				svc := &mocks.UserDataMock{
+					GetFunc: func(context.Context, string) (storage.Document, error) { return testDocument(), nil },
+					ReplaceFunc: func(context.Context, string, []byte, *string) (storage.Document, error) {
+						return testDocument(), nil
+					},
+					DeleteFunc: func(context.Context, string) error { return nil },
+				}
+				srv, _ := newTestServer(t, svc, allowAll(testUserID))
+				req := newRequest(method, userDataPath, strings.NewReader(`{"schema_version":2,"data":{}}`))
+				req.Header.Set("Content-Type", "application/json")
+				if expected != "" {
+					req.Header.Set("X-Lampa-Expected-User", expected)
+				}
+				w := httptest.NewRecorder()
+				srv.Handler().ServeHTTP(w, req)
+				calls := len(svc.GetCalls()) + len(svc.ReplaceCalls()) + len(svc.DeleteCalls())
+				if expected == flowUserB {
+					assert.Equal(t, http.StatusConflict, w.Code)
+					assert.Equal(t, "account_changed", errorCode(t, w.Body.String()))
+					assert.Zero(t, calls, "identity mismatch must not access storage")
+					return
+				}
+				assert.Equal(t, 1, calls)
+				if method == http.MethodGet {
+					assert.Equal(t, http.StatusOK, w.Code)
+				} else {
+					assert.Equal(t, http.StatusNoContent, w.Code)
+				}
+			})
+		}
+	}
+}
+
+func TestServer_GetUserDataETag(t *testing.T) {
+	for _, tc := range []struct {
+		name, tag string
+		status    int
+	}{
+		{name: "absent", status: http.StatusOK},
+		{name: "match", tag: `"test-etag"`, status: http.StatusNotModified},
+		{name: "weak", tag: `W/"test-etag"`, status: http.StatusNotModified},
+		{name: "different", tag: `"other"`, status: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &mocks.UserDataMock{GetFunc: func(context.Context, string) (storage.Document, error) {
+				return testDocument(), nil
+			}}
+			srv, _ := newTestServer(t, svc, allowAll(testUserID))
+			req := newRequest(http.MethodGet, userDataPath, http.NoBody)
+			req.Header.Set("If-None-Match", tc.tag)
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+			assert.Equal(t, tc.status, w.Code)
+			assert.Equal(t, `"test-etag"`, w.Header().Get("ETag"))
+			assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
+			if tc.status == http.StatusNotModified {
+				assert.Empty(t, w.Body.String())
+			} else {
+				assertDocumentJSON(t, w.Body.Bytes())
+			}
+		})
+	}
+}
+
+func TestServer_PutUserDataIfMatch(t *testing.T) {
+	for _, tc := range []struct {
+		name, tag string
+		present   bool
+		want      *string
+		err       error
+	}{
+		{name: "absent"},
+		{name: "match", present: true, tag: `"old"`, want: new("old")},
+		{name: "weak", present: true, tag: `W/"old"`, want: new("old")},
+		{name: "empty", present: true, want: new("")},
+		{name: "quoted empty", present: true, tag: `""`, want: new("")},
+		{name: "stale", present: true, tag: `"stale"`, want: new("stale"), err: storage.ErrPreconditionFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &mocks.UserDataMock{ReplaceFunc: func(context.Context, string, []byte, *string) (storage.Document, error) {
+				return testDocument(), tc.err
+			}}
+			srv, _ := newTestServer(t, svc, allowAll(testUserID))
+			req := newRequest(http.MethodPut, userDataPath, strings.NewReader(`{"schema_version":2,"data":{}}`))
+			req.Header.Set("Content-Type", "application/json")
+			if tc.present {
+				req.Header.Set("If-Match", tc.tag)
+			}
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+			require.Len(t, svc.ReplaceCalls(), 1)
+			assert.Equal(t, tc.want, svc.ReplaceCalls()[0].ExpectedETag)
+			if tc.err != nil {
+				assert.Equal(t, http.StatusPreconditionFailed, w.Code)
+				assert.Equal(t, "precondition_failed", errorCode(t, w.Body.String()))
+				assert.Empty(t, w.Header().Get("ETag"))
+				return
+			}
+			assert.Equal(t, http.StatusNoContent, w.Code)
+			assert.Empty(t, w.Body.String())
+			assert.Equal(t, `"test-etag"`, w.Header().Get("ETag"))
+		})
+	}
 }
