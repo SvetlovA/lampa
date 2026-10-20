@@ -74,6 +74,9 @@ jobs:
       - name: Test account state transitions
         run: node --test docs/tests/account-state.test.cjs
 
+      - name: Test account sync
+        run: node --test docs/tests/account-sync.test.cjs
+
       - name: Test TorrServer ownership
         run: node --test docs/tests/torrserver-ownership.test.cjs docs/tests/ownership-docs.test.cjs backend/pkg/storage/testdata/torrserver-one-link.test.cjs
 

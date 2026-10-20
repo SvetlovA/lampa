@@ -400,15 +400,15 @@ only. Nothing is defined on non-HTTP(S) origins (`^https?:$` guard).
 - Create: `docs/tests/account-sync.test.cjs`
 - Modify: `.github/workflows/tests.yaml`
 
-- [ ] create `svtlv/account-sync.js` IIFE with the protocol guard, inline `{en, ru}` strings and a `$.ajax` helper (JSON, timeout, `Content-Type`, `If-Match`/`If-None-Match`)
-- [ ] `loadScope()` fetches `svtlv/storage-scope.json?v=<cache_version>` and validates it; `classify(key)` with exact → longest-prefix precedence; `synced(key)` for `user`, `user_connection`, `user_optional` plus the backend key pattern
-- [ ] `fp()`, `svtlv_sync_base` read/write, `dirty(key)`; `exportLocal()` walks `localStorage` (raw strings, `''`/null skipped); `overlay(lastDoc)`; the size rule on the encoded body
-- [ ] `applyDoc(data)` (raw `setItem`, pre-boot): must-sync first, only synced keys with string values, skip dirty keys, update base; returns `{changed}`; must-sync failure throws, optional failure skips; `clearSynced()` writes `''` for synced keys and drops base and marker, returning whether it removed anything
-- [ ] wrap every storage access in try/catch; failures turn sync off for the page and never block boot
-- [ ] write tests: `classify` against a copy of the Go guard's case table on the real JSON; export/apply round trip exact; apply ignores non-synced keys and non-string values and never overwrites dirty keys; base updated on apply
-- [ ] write tests: `fp`/dirty for '' vs null vs value; clear writes `''` so a `reserve` fallback is hidden; must-sync before optional and optional failure skipped; size rule with escapes (encoded size) drops largest optional first, must-sync overflow blocks, lone surrogate; invalid scope JSON disables sync
-- [ ] add `node --test docs/tests/account-sync.test.cjs` to `tests.yaml`; confirm `acorn --ecma5` passes
-- [ ] run node tests - must pass before task 5
+- [x] create `svtlv/account-sync.js` IIFE with the protocol guard, inline `{en, ru}` strings and a `$.ajax` helper (JSON, timeout, `Content-Type`, `If-Match`/`If-None-Match`)
+- [x] `loadScope()` fetches `svtlv/storage-scope.json?v=<cache_version>` and validates it; `classify(key)` with exact → longest-prefix precedence; `synced(key)` for `user`, `user_connection`, `user_optional` plus the backend key pattern
+- [x] `fp()`, `svtlv_sync_base` read/write, `dirty(key)`; `exportLocal()` walks `localStorage` (raw strings, `''`/null skipped); `overlay(lastDoc)`; the size rule on the encoded body
+- [x] `applyDoc(data)` (raw `setItem`, pre-boot): must-sync first, only synced keys with string values, skip dirty keys, update base; returns `{changed}`; must-sync failure throws, optional failure skips; `clearSynced()` writes `''` for synced keys and drops base and marker, returning whether it removed anything
+- [x] wrap every storage access in try/catch; failures turn sync off for the page and never block boot
+- [x] write tests: `classify` against a copy of the Go guard's case table on the real JSON; export/apply round trip exact; apply ignores non-synced keys and non-string values and never overwrites dirty keys; base updated on apply
+- [x] write tests: `fp`/dirty for '' vs null vs value; clear writes `''` so a `reserve` fallback is hidden; must-sync before optional and optional failure skipped; size rule with escapes (encoded size) drops largest optional first, must-sync overflow blocks, lone surrogate; invalid scope JSON disables sync
+- [x] add `node --test docs/tests/account-sync.test.cjs` to `tests.yaml`; confirm `acorn --ecma5` passes
+- [x] run node tests - must pass before task 5
 
 ### Task 5: Pre-boot apply and loader seam
 
