@@ -17,13 +17,15 @@ const inspected = source.replace(/\}\)\(\);\s*$/, `window.core = {
   clearSynced: clearSynced, fitBody: fitBody,
   bootState: function () { return {ready: ready, lastDoc: lastDoc, lastEtag: lastEtag, scope: !!scope}; },
   accountState: function () { return {uploads: uploads, handledUser: handledUser}; },
+  whileApplying: function (fn) { applying = true; try { fn(); } finally { applying = false; } },
   disabled: function () { return disabled; }, failure: function () { return failure; }
 }; })();`);
 
 function page(options = {}) {
   const items = Object.assign(Object.create(null), options.items);
   const faults = {}, calls = [], requests = [], notices = [], trace = [];
-  const listeners = {}, windowEvents = {}, reloads = [], events = [];
+  const listeners = {}, windowEvents = {}, documentEvents = {}, storageListeners = {}, reloads = [], events = [];
+  const document = {hidden: false};
   const timers = new Map();
   let clock = 0, timerID = 0;
   function setTimeout(fn, delay) {
@@ -61,8 +63,11 @@ function page(options = {}) {
     location: {protocol: options.protocol || 'https:', reload() { reloads.push({...items}); }},
     svtlv_account_state: options.state,
     Lampa: {
-      Storage: {get: (key, fallback) => key === 'language' && fallback !== '' ? options.language || 'en' :
-        items[key] ?? options.reserve?.[key] ?? fallback},
+      Storage: {
+        get: (key, fallback) => key === 'language' && fallback !== '' ? options.language || 'en' :
+          items[key] ?? options.reserve?.[key] ?? fallback,
+        listener: {follow(name, fn) { (storageListeners[name] ||= []).push(fn); }}
+      },
       Noty: {show: text => notices.push(text)},
       Listener: {
         follow(name, fn) { (listeners[name] ||= []).push(fn); },
@@ -76,16 +81,20 @@ function page(options = {}) {
     get() { if (faults.property) throw new Error('localStorage getter'); return store; }
   });
   function $(target) {
-    assert.equal(target, window);
-    return {on(name, fn) { (windowEvents[name] ||= []).push(fn); }};
+    assert.ok(target === window || target === document);
+    const handlers = target === window ? windowEvents : documentEvents;
+    return {on(name, fn) { (handlers[name] ||= []).push(fn); }};
   }
   $.ajax = function (config) {
     trace.push({url: config.url});
     if (faults.ajax) throw new Error('ajax');
-    const xhr = {status: 200, getResponseHeader: name => name === 'ETag' ? '"etag"' : null};
+    let etag = '"etag"';
+    const xhr = {status: 200, getResponseHeader: name => name === 'ETag' ? etag : null};
     const request = {
       config,
-      success(data, status = 200) { xhr.status = status; config.success(data, 'success', xhr); },
+      success(data, status = 200, responseEtag = '"etag"') {
+        etag = responseEtag; xhr.status = status; config.success(data, 'success', xhr);
+      },
       fail(status = 503, body, textOnly = false) {
         config.error({...xhr, status, responseJSON: textOnly ? undefined : body,
           responseText: typeof body === 'string' ? body : JSON.stringify(body)});
@@ -94,10 +103,18 @@ function page(options = {}) {
     requests.push(request);
     return request;
   };
-  const context = vm.createContext({window, $, cache_version: 42, setTimeout, clearTimeout: id => timers.delete(id)});
+  const context = vm.createContext({window, document, $, cache_version: 42, setTimeout, clearTimeout: id => timers.delete(id)});
   vm.runInContext(options.uninspected ? source : inspected, context);
   return {
     window, core: window.core, items, faults, calls, requests, notices, timers, trace, tick, reloads, events,
+    change(key, value) {
+      if (value === null) delete items[key]; else items[key] = String(value);
+      for (const fn of storageListeners.change || []) fn({name: key, value});
+    },
+    visibility(hidden) {
+      document.hidden = hidden;
+      for (const fn of documentEvents.visibilitychange || []) fn();
+    },
     install() { window.Lampa = Lampa; },
     state(state) {
       window.svtlv_account_state = state;
@@ -851,4 +868,277 @@ test('post-boot storage failure never escapes the account listener or enables up
   assert.doesNotThrow(() => p.dataRequest.success(documentV2({language: 'en'})));
   assert.equal(p.core.disabled(), true); assert.equal(p.core.accountState().uploads, false);
   assert.equal(p.items[USER], undefined); assert.equal(p.reloads.length, 0);
+});
+
+function savingPage(data = {language: 'en', favorite: '{"book":[1]}'}) {
+  const p = loginPage({items: data});
+  p.dataRequest.success(documentV2(data), 200, '"initial"');
+  assert.equal(p.reloads.length, 0);
+  p.initialRequests = p.requests.length;
+  return p;
+}
+const putBody = request => JSON.parse(request.config.data);
+const expireCount = p => p.events.filter(e => e.event.type === 'expired').length;
+
+function startSave(p, key = 'language', value = 'ru') {
+  p.change(key, value);
+  p.tick(key === 'file_view' ? 300000 : 2000);
+  assert.equal(p.requests.at(-1).config.type, 'GET');
+  return p.requests.at(-1);
+}
+
+test('several synced changes batch into one conditional GET and PUT containing server plus dirty keys', () => {
+  const p = savingPage({language: 'en', tmdb_lang: 'en', favorite: '{"old":1}'});
+  p.change('language', 'ru'); p.tick(500);
+  p.change('language', 'de'); p.change('torrserver_password', 'secret');
+  p.tick(1499); assert.equal(p.requests.length, p.initialRequests);
+  p.tick(1);
+  const get = p.requests.at(-1);
+  assert.equal(get.config.type, 'GET');
+  assert.deepEqual(clean(get.config.headers), {'X-Lampa-Expected-User': 'Alice', 'If-None-Match': '"initial"'});
+  get.success(documentV2({language: 'fr', tmdb_lang: 'fr', favorite: '{"new":2}', plugins: 'remote'}), 200, '"latest"');
+  const put = p.requests.at(-1);
+  assert.equal(put.config.type, 'PUT');
+  assert.equal(put.config.contentType, 'application/json; charset=UTF-8');
+  assert.equal(put.config.processData, false); assert.equal(put.config.timeout, 15000);
+  assert.deepEqual(clean(put.config.headers), {
+    'X-Lampa-Expected-User': 'Alice', 'X-Lampa-Csrf': '1', 'If-Match': '"latest"'
+  });
+  assert.deepEqual(putBody(put), {schema_version: 2,
+    data: {language: 'de', tmdb_lang: 'fr', favorite: '{"new":2}', torrserver_password: 'secret'},
+    encrypt: realScope.encrypt});
+  put.success('', 204, '"saved"');
+  assert.equal(p.core.dirty('language'), false);
+  assert.equal(JSON.parse(p.items[BASE]).tmdb_lang, p.core.fp('fr'));
+  assert.equal(p.core.bootState().lastEtag, '"saved"');
+  assert.deepEqual(clean(p.core.bootState().lastDoc), putBody(put).data);
+  assert.equal(p.requests.length, p.initialRequests + 2); assert.deepEqual(p.notices, []);
+});
+
+test('change events only schedule: device keys, applying events, and clean writes do not save', () => {
+  const p = savingPage();
+  p.change('plugins', 'code'); p.change('language', 'en');
+  p.core.whileApplying(() => p.change('language', 'ru'));
+  p.tick(300000); assert.equal(p.requests.length, p.initialRequests);
+  p.change('favorite', p.items.favorite); p.tick(2000);
+  assert.equal(p.requests.length, p.initialRequests + 1, 'dirty is derived from storage, not the event payload');
+});
+
+test('an edit during an in-flight PUT stays dirty and multiple triggers queue just one more save', () => {
+  const p = savingPage({language: 'en'});
+  const get = startSave(p); get.success(documentV2({language: 'en'}), 200, '"before"');
+  const first = p.requests.at(-1);
+  assert.equal(putBody(first).data.language, 'ru');
+  p.change('language', 'de'); p.change('language', 'fr'); p.visibility(true); p.visibility(true);
+  p.tick(20000); assert.equal(p.requests.length, p.initialRequests + 2);
+  first.success('', 204, '"first"');
+  assert.equal(p.core.dirty('language'), true);
+  assert.equal(JSON.parse(p.items[BASE]).language, p.core.fp('ru'));
+  assert.equal(p.items.language, 'fr');
+  const secondGet = p.requests.at(-1);
+  assert.equal(p.requests.length, p.initialRequests + 3);
+  assert.equal(secondGet.config.headers['If-None-Match'], '"first"');
+  secondGet.success(documentV2({language: 'ru'}), 200, '"first"');
+  assert.equal(p.items.language, 'fr', 'the save poll must not revert the new edit');
+  const second = p.requests.at(-1);
+  assert.equal(putBody(second).data.language, 'fr');
+  second.success('', 204, '"second"');
+  assert.equal(p.core.dirty('language'), false);
+  p.tick(300000); assert.equal(p.requests.length, p.initialRequests + 4);
+});
+
+test('edits made during the pre-save GET are included in its PUT without parallel requests', () => {
+  const p = savingPage({language: 'en'});
+  const get = startSave(p);
+  p.change('language', 'de'); p.change('torrserver_url', 'http://ts');
+  p.tick(10000); assert.equal(p.requests.length, p.initialRequests + 1);
+  get.success(undefined, 304);
+  const put = p.requests.at(-1);
+  assert.deepEqual(putBody(put).data, {language: 'de', torrserver_url: 'http://ts'});
+  put.success('', 204);
+  p.tick(10000); assert.equal(p.requests.length, p.initialRequests + 2, 'queued work already included needs no extra PUT');
+});
+
+test('optional changes wait five minutes without playback writes postponing the save', () => {
+  const p = savingPage({file_view: '{}'});
+  p.change('file_view', '{"one":1}'); p.tick(120000);
+  p.change('file_view', '{"two":2}'); p.tick(120000);
+  p.change('file_view', '{"three":3}'); p.tick(59999);
+  assert.equal(p.requests.length, p.initialRequests);
+  p.tick(1); p.requests.at(-1).success(undefined, 304);
+  assert.deepEqual(putBody(p.requests.at(-1)).data, {file_view: '{"three":3}'});
+  p.requests.at(-1).success('', 204);
+  p.tick(300000); assert.equal(p.requests.length, p.initialRequests + 2);
+});
+
+test('must-sync dirtiness promotes an optional timer to two seconds', () => {
+  const p = savingPage({file_view: '{}', language: 'en'});
+  p.change('file_view', '{"x":1}'); p.tick(10000);
+  p.change('language', 'ru'); p.tick(1999); assert.equal(p.requests.length, p.initialRequests);
+  p.tick(1); assert.equal(p.requests.length, p.initialRequests + 1);
+});
+
+test('hiding flushes optional edits immediately and further changes can save while hidden', () => {
+  const p = savingPage({file_view: '{}'});
+  p.change('file_view', '{"x":1}'); p.tick(1000); p.visibility(true);
+  assert.equal(p.requests.length, p.initialRequests + 1);
+  p.requests.at(-1).success(undefined, 304); p.requests.at(-1).success('', 204);
+  p.change('file_view', '{"x":2}'); p.tick(300000);
+  p.requests.at(-1).success(undefined, 304);
+  assert.deepEqual(putBody(p.requests.at(-1)).data, {file_view: '{"x":2}'});
+  p.requests.at(-1).success('', 204); p.tick(300000);
+  assert.equal(p.requests.length, p.initialRequests + 4);
+});
+
+test('412 polls the new document and retries once, retaining the other device changes', () => {
+  const p = savingPage({language: 'en'});
+  startSave(p).success(documentV2({language: 'en'}), 200, '"v1"');
+  p.requests.at(-1).fail(412);
+  const retryGet = p.requests.at(-1);
+  assert.equal(retryGet.config.type, 'GET');
+  assert.equal(retryGet.config.headers['If-None-Match'], '"v1"');
+  retryGet.success(documentV2({language: 'en', favorite: '{"remote":1}'}), 200, '"v2"');
+  const retry = p.requests.at(-1);
+  assert.equal(retry.config.headers['If-Match'], '"v2"');
+  assert.deepEqual(putBody(retry).data, {language: 'ru', favorite: '{"remote":1}'});
+  retry.success('', 204, '"v3"');
+  assert.equal(p.core.dirty('language'), false); assert.deepEqual(p.notices, []);
+  assert.equal(p.requests.length, p.initialRequests + 4);
+});
+
+test('a second 412 stops retrying, leaves the edit dirty and waits for the next trigger', () => {
+  const p = savingPage({language: 'en'});
+  startSave(p).success(undefined, 304); p.requests.at(-1).fail(412);
+  p.requests.at(-1).success(documentV2({language: 'de'}), 200, '"v2"');
+  p.requests.at(-1).fail(412); p.tick(600000);
+  assert.equal(p.requests.length, p.initialRequests + 4); assert.equal(p.core.dirty('language'), true);
+  assert.deepEqual(p.notices, ['Not saved to Account']);
+  p.change('language', 'fr'); p.tick(2000);
+  assert.equal(p.requests.length, p.initialRequests + 5);
+});
+
+test('404 before PUT exports all local synced values without If-Match', () => {
+  const p = savingPage({language: 'en', favorite: '{"book":[1]}'});
+  startSave(p).fail(404, missingDocument);
+  const put = p.requests.at(-1);
+  assert.equal(put.config.type, 'PUT'); assert.equal(put.config.headers['If-Match'], undefined);
+  assert.deepEqual(putBody(put).data, {language: 'ru', favorite: '{"book":[1]}'});
+  put.success('', 204); assert.equal(p.core.dirty('language'), false);
+});
+
+test('first login with no document schedules guest data for upload without another storage event', () => {
+  const p = loginPage({items: {language: 'ru', favorite: '{"guest":1}'}});
+  p.dataRequest.fail(404, missingDocument); const before = p.requests.length;
+  p.tick(1999); assert.equal(p.requests.length, before);
+  p.tick(1); p.requests.at(-1).fail(404, missingDocument);
+  const put = p.requests.at(-1);
+  assert.deepEqual(putBody(put).data, {language: 'ru', favorite: '{"guest":1}'});
+  assert.equal(put.config.headers['If-Match'], undefined);
+  put.success('', 204); assert.equal(p.core.dirty('favorite'), false);
+});
+
+test('invalid GET 200 bodies, unexpected 404, and unexpected PUT success do not mark edits clean', () => {
+  for (const body of [null, {}, {schema_version: 1, data: {}}, documentV2([]), documentV2(null)]) {
+    const p = savingPage({language: 'en'});
+    startSave(p).success(body);
+    assert.equal(p.requests.length, p.initialRequests + 1); assert.equal(p.core.dirty('language'), true);
+    assert.deepEqual(p.notices, ['Not saved to Account']);
+  }
+  const p = savingPage({language: 'en'});
+  startSave(p).fail(404, {error: {code: 'other'}});
+  assert.equal(p.requests.length, p.initialRequests + 1);
+  p.change('language', 'de'); p.tick(2000); p.requests.at(-1).success(undefined, 304);
+  p.requests.at(-1).success(documentV2({language: 'de'}), 200);
+  assert.equal(p.core.dirty('language'), true); assert.equal(p.notices.length, 1);
+});
+
+for (const stage of ['GET', 'PUT']) {
+  for (const status of [401, 409]) test(stage + ' ' + status + ' stops saves and sends expired once', () => {
+    const p = savingPage({language: 'en'});
+    const get = startSave(p);
+    if (stage === 'PUT') get.success(undefined, 304);
+    p.requests.at(-1).fail(status); const before = p.requests.length;
+    assert.equal(p.core.accountState().uploads, false); assert.equal(expireCount(p), 1);
+    assert.equal(p.core.dirty('language'), true); assert.equal(p.items[USER], 'Alice', 'account confirmation owns clearing');
+    p.change('language', 'de'); p.visibility(true); p.tick(600000);
+    assert.equal(p.requests.length, before); assert.deepEqual(p.notices, []);
+    p.state(signedIn('Alice'));
+    assert.equal(p.requests.length, before + 1, 'a confirmed session can recover');
+  });
+}
+
+test('network and 5xx errors notify once per failure streak and retry on a later trigger', () => {
+  for (const stage of ['GET', 'PUT']) for (const status of [0, 500, 503]) {
+    const p = savingPage({language: 'en'});
+    const get = startSave(p);
+    if (stage === 'PUT') get.success(undefined, 304);
+    p.requests.at(-1).fail(status);
+    const before = p.requests.length;
+    p.tick(600000); assert.equal(p.requests.length, before);
+    assert.deepEqual(p.notices, ['Not saved to Account']); assert.equal(p.core.dirty('language'), true);
+    p.change('language', 'de'); p.tick(2000); p.requests.at(-1).fail(status);
+    assert.equal(p.notices.length, 1);
+    p.visibility(true); p.requests.at(-1).success(undefined, 304); p.requests.at(-1).success('', 204);
+    assert.equal(p.core.dirty('language'), false);
+    p.change('language', 'fr'); p.tick(2000); p.requests.at(-1).fail(status);
+    assert.equal(p.notices.length, 2, 'successful PUT ends the failure streak');
+  }
+});
+
+test('client errors notify and leave local edits without a retry loop, including queued triggers', () => {
+  for (const stage of ['GET', 'PUT']) for (const status of [400, 403, 413, 415]) {
+    const p = savingPage({language: 'en'}); const get = startSave(p);
+    if (stage === 'PUT') get.success(undefined, 304);
+    p.change('language', 'de');
+    p.requests.at(-1).fail(status); const before = p.requests.length;
+    p.tick(600000); assert.equal(p.requests.length, before);
+    assert.deepEqual(p.notices, ['Not saved to Account']); assert.equal(p.core.dirty('language'), true);
+  }
+});
+
+test('failed saves survive a fresh page and the nolisten edit is uploaded automatically', () => {
+  const p = savingPage({language: 'en'});
+  startSave(p).success(undefined, 304); p.requests.at(-1).fail(503);
+  const restarted = bootPage({...p.items});
+  restarted.scopeRequest.success(clean(realScope));
+  restarted.dataRequest.success(documentV2({language: 'en'}), 200, '"old"');
+  restarted.window.svtlv_account_state = signedIn('Alice'); restarted.install(); restarted.tick(100);
+  assert.equal(restarted.items.language, 'ru'); assert.equal(restarted.core.dirty('language'), true);
+  restarted.tick(2000); restarted.requests.at(-1).success(undefined, 304);
+  const put = restarted.requests.at(-1);
+  assert.equal(putBody(put).data.language, 'ru'); put.success('', 204);
+  assert.equal(restarted.core.dirty('language'), false);
+});
+
+test('logout, identity switch, cross-tab reload and storage failure cancel timers and ignore late PUTs', () => {
+  for (const action of ['logout', 'switch', 'tab', 'storage']) {
+    const p = savingPage({language: 'en'});
+    startSave(p).success(undefined, 304); const put = p.requests.at(-1);
+    p.change('language', 'de');
+    if (action === 'logout') p.state(guestState);
+    if (action === 'switch') p.state(signedIn('Bob'));
+    if (action === 'tab') p.storageEvent({key: USER, oldValue: 'Alice', newValue: 'Bob'});
+    if (action === 'storage') { p.faults.getItem = true; p.change('language', 'fr'); }
+    const before = {...p.items}, requests = p.requests.length;
+    put.success('', 204, '"late"'); put.fail(401); p.tick(600000);
+    assert.deepEqual({...p.items}, before); assert.equal(p.requests.length, requests); assert.equal(expireCount(p), 0);
+  }
+  const p = savingPage({language: 'en'});
+  p.change('language', 'ru'); p.state(guestState); const before = p.requests.length;
+  p.tick(600000); assert.equal(p.requests.length, before);
+});
+
+test('size failures block PUTs and storage failures after PUT disable further uploads', () => {
+  for (const value of ['x'.repeat(LIMIT), '\ud800']) {
+    const p = savingPage({language: 'en'});
+    startSave(p, 'language', value).success(undefined, 304);
+    assert.equal(p.requests.length, p.initialRequests + 1); assert.equal(p.core.dirty('language'), true);
+    assert.deepEqual(p.notices, ['Not saved to Account']);
+  }
+  const p = savingPage({language: 'en'});
+  startSave(p).success(undefined, 304); p.faults.quota = BASE;
+  p.requests.at(-1).success('', 204);
+  assert.equal(p.core.disabled(), true); assert.equal(p.core.accountState().uploads, false);
+  const before = p.requests.length; p.change('language', 'de'); p.tick(600000);
+  assert.equal(p.requests.length, before); assert.deepEqual(p.notices, ['Account sync is unavailable on this device']);
 });

@@ -448,12 +448,12 @@ only. Nothing is defined on non-HTTP(S) origins (`^https?:$` guard).
 - Modify: `svtlv/account-sync.js`
 - Modify: `docs/tests/account-sync.test.cjs`
 
-- [ ] follow `Lampa.Storage.listener` `change` for synced keys (ignored while `applying`) only to start the timer; dirty state always comes from `dirty(key)`
-- [ ] timers: 2s when a must-sync key is dirty, 5 min when only optional keys are; flush on `visibilitychange` to hidden; one save at a time, a trigger during a save → exactly one more
-- [ ] save flow per the diagram with `If-Match`, 412 retry once, base updated from the sent values, error handling per the table (`expired` on 401/409, one Noty per failure streak)
-- [ ] write tests: several changes → one poll + one PUT; PUT body = server doc + dirty keys only; headers (`Content-Type`, CSRF, expected user, `If-Match`); a second edit of the same key during an in-flight PUT stays dirty and is sent next, and the next poll does not revert it
-- [ ] write tests: optional-only change waits 5 min and flushes on hide; save while hidden works; 412 → poll + one retry; 404 before PUT sends the full export without `If-Match`; invalid 200 → no PUT; 401/409 stop and send `expired`; 5xx Noty then retry; 403/415 Noty without retry; a failed save is retried after a reload (dirty from base)
-- [ ] run node tests - must pass before task 8
+- [x] follow `Lampa.Storage.listener` `change` for synced keys (ignored while `applying`) only to start the timer; dirty state always comes from `dirty(key)`
+- [x] timers: 2s when a must-sync key is dirty, 5 min when only optional keys are; flush on `visibilitychange` to hidden; one save at a time, a trigger during a save → exactly one more
+- [x] save flow per the diagram with `If-Match`, 412 retry once, base updated from the sent values, error handling per the table (`expired` on 401/409, one Noty per failure streak)
+- [x] write tests: several changes → one poll + one PUT; PUT body = server doc + dirty keys only; headers (`Content-Type`, CSRF, expected user, `If-Match`); a second edit of the same key during an in-flight PUT stays dirty and is sent next, and the next poll does not revert it
+- [x] write tests: optional-only change waits 5 min and flushes on hide; save while hidden works; 412 → poll + one retry; 404 before PUT sends the full export without `If-Match`; invalid 200 → no PUT; 401/409 stop and send `expired`; 5xx Noty then retry; 403/415 Noty without retry; a failed save is retried after a reload (dirty from base)
+- [x] run node tests - must pass before task 8
 
 ### Task 8: Live refresh by polling
 

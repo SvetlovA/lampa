@@ -29,6 +29,12 @@
   var accountRevision = 0;
   var uploads = false;
   var reloading = false;
+  var applying = false;
+  var saveTimer = null;
+  var saveDelay = 0;
+  var saving = false;
+  var saveAgain = false;
+  var saveFailure = false;
   var strings = {
     en: {save: 'Not saved to Account', storage: 'Account sync is unavailable on this device'},
     ru: {save: 'Не сохранено в Аккаунт', storage: 'Синхронизация Аккаунта недоступна на этом устройстве'}
@@ -67,6 +73,7 @@
     if (disabled) return;
     disabled = true;
     uploads = false;
+    stopSave();
     notify('storage');
   }
 
@@ -374,6 +381,7 @@
     if (reloading) return;
     reloading = true;
     uploads = false;
+    stopSave();
     window.location.reload();
   }
 
@@ -406,6 +414,7 @@
     accountUser = user;
     handledUser = '';
     uploads = false;
+    stopSave();
     function active() { return !disabled && !reloading && revision == accountRevision; }
     function failed() {
       accountUser = '';
@@ -427,7 +436,7 @@
         }
         if (marker == user && ready) {
           handledUser = user;
-          uploads = true;
+          enableUploads();
           return;
         }
         request('GET', '/api/v1/user-data', {user: user}, function (ok, data, xhr) {
@@ -459,7 +468,7 @@
             ready = true;
             handledUser = user;
             if (changed) reloadPage();
-            else uploads = true;
+            else enableUploads();
           } catch (err) { failed(); }
         });
       } catch (err) { failed(); }
@@ -494,7 +503,145 @@
       var change = event.originalEvent || event;
       if (change.key == USER_KEY && change.oldValue !== change.newValue) reloadPage();
     });
+    if (window.Lampa.Storage.listener) window.Lampa.Storage.listener.follow('change', function (event) {
+      if (!applying && event && synced(event.name)) scheduleSave();
+    });
+    $(document).on('visibilitychange', function () {
+      if (document.hidden) save();
+    });
     handleAccount(window.svtlv_account_state);
+  }
+
+  function stopSave() {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    saveDelay = 0;
+    saving = false;
+    saveAgain = false;
+  }
+
+  function dirtyKeys() {
+    var keys = Object.create(null);
+    localKeys().forEach(function (key) { keys[key] = true; });
+    Object.keys(readBase()).forEach(function (key) { if (synced(key)) keys[key] = true; });
+    return Object.keys(keys).filter(dirty);
+  }
+
+  function enableUploads() {
+    uploads = true;
+    saveFailure = false;
+    // Includes edits made with nolisten before a reload and first-login guest data.
+    scheduleSave();
+  }
+
+  function scheduleSave() {
+    if (!uploads || disabled || reloading || applying) return;
+    try {
+      var keys = dirtyKeys();
+      if (!keys.length) return;
+      if (saving) { saveAgain = true; return; }
+      var delay = keys.some(function (key) { return classify(key) != 'user_optional'; }) ? 2000 : 300000;
+      // Frequent playback writes must not keep postponing an optional save.
+      if (saveTimer !== null && saveDelay <= delay) return;
+      clearTimeout(saveTimer);
+      saveDelay = delay;
+      saveTimer = setTimeout(function () {
+        saveTimer = null;
+        saveDelay = 0;
+        save();
+      }, delay);
+    } catch (err) { /* Storage failures already disable sync. */ }
+  }
+
+  function saveError(xhr) {
+    if (xhr.status == 401 || xhr.status == 409) {
+      uploads = false;
+      ready = false;
+      accountUser = '';
+      handledUser = '';
+      ++accountRevision;
+      stopSave();
+      window.Lampa.Listener.send('svtlv_account', {type: 'expired'});
+      return;
+    }
+    if (!saveFailure && !disabled) notify('save');
+    saveFailure = true;
+  }
+
+  // Fetch the latest document before overlaying this page's dirty keys.
+  function refreshForSave(done) {
+    var revision = accountRevision;
+    request('GET', '/api/v1/user-data', {user: accountUser, etag: lastEtag}, function (ok, data, xhr) {
+      if (revision != accountRevision || !uploads || disabled || reloading) return;
+      if (xhr.status == 304 && lastEtag) { done(true, false); return; }
+      if (ok && xhr.status == 200 && record(data) && data.schema_version === 2 && record(data.data)) {
+        lastDoc = data.data;
+        lastEtag = xhr.getResponseHeader('ETag') || '';
+        done(true, false);
+      } else if (xhr.status == 404 && errorCode(xhr) == 'user_data_not_found') {
+        lastDoc = {};
+        lastEtag = '';
+        done(true, true);
+      } else {
+        saveError(xhr);
+        done(false);
+      }
+    });
+  }
+
+  function save() {
+    if (!uploads || disabled || reloading || applying) return;
+    if (saving) { saveAgain = true; return; }
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    saveDelay = 0;
+    try { if (!dirtyKeys().length) return; }
+    catch (err) { return; }
+    saving = true;
+    var revision = accountRevision;
+    function active() { return revision == accountRevision && uploads && !disabled && !reloading; }
+    function finish(ok) {
+      if (!active()) return;
+      saving = false;
+      var again = saveAgain;
+      saveAgain = false;
+      if (ok) {
+        saveFailure = false;
+        if (again) save();
+      }
+    }
+    function attempt(retry) {
+      refreshForSave(function (ok, missing) {
+        if (!active()) return;
+        if (!ok) { finish(false); return; }
+        try {
+          // A missing server document needs every local value, even clean ones.
+          var body = fitBody(missing ? exportLocal() : overlay(lastDoc));
+          if (!body) { finish(false); return; }
+          request('PUT', '/api/v1/user-data', {user: accountUser, etag: lastEtag, body: body}, function (ok, data, xhr) {
+            if (!active()) return;
+            if (xhr.status == 412 && !retry) { attempt(true); return; }
+            if (!ok || xhr.status != 204) {
+              saveError(xhr);
+              finish(false);
+              return;
+            }
+            try {
+              var previous = readBase();
+              Object.keys(body.data).forEach(function (key) { previous[key] = fp(body.data[key]); });
+              writeBase();
+              lastDoc = body.data;
+              lastEtag = xhr.getResponseHeader('ETag') || '';
+              finish(true);
+            } catch (err) { finish(false); }
+          });
+        } catch (err) {
+          saveError({status: 0});
+          finish(false);
+        }
+      });
+    }
+    attempt(false);
   }
 
   function encodedBytes(value) {
