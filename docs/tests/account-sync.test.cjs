@@ -5,6 +5,15 @@ const path = require('node:path');
 const vm = require('node:vm');
 const {test} = require('node:test');
 const source = fs.readFileSync(path.join(__dirname, '../../svtlv/account-sync.js'), 'utf8');
+const bundle = fs.readFileSync(path.join(__dirname, '../../app.min.js'), 'utf8');
+// Resolve methods through the public export: Rollup's internal suffixes drift.
+function upstreamStorageMethod(method) {
+  const exports = bundle.match(/  var Storage = \{([\s\S]*?)\n  \};/)[1];
+  const name = exports.match(new RegExp('\\b' + method + ': ([\\w$]+)'))[1];
+  const start = bundle.indexOf('\n  function ' + name + '(') + 1;
+  const end = bundle.indexOf('\n  }', start) + 4;
+  return '(' + bundle.slice(start, end) + ')';
+}
 const realScope = JSON.parse(fs.readFileSync(path.join(__dirname, '../../svtlv/storage-scope.json'), 'utf8'));
 const BASE = 'svtlv_sync_base', USER = 'svtlv_sync_user';
 const LIMIT = 4 * 1024 * 1024;
@@ -25,7 +34,8 @@ function page(options = {}) {
   const items = Object.assign(Object.create(null), options.items);
   const faults = {}, calls = [], requests = [], notices = [], trace = [];
   const listeners = {}, windowEvents = {}, documentEvents = {}, storageListeners = {}, reloads = [], events = [];
-  const document = {hidden: false};
+  const document = {hidden: !!options.hidden};
+  const storageWrites = [], refreshes = [], memory = Object.create(null);
   const timers = new Map();
   let clock = 0, timerID = 0;
   function setTimeout(fn, delay) {
@@ -66,8 +76,17 @@ function page(options = {}) {
       Storage: {
         get: (key, fallback) => key === 'language' && fallback !== '' ? options.language || 'en' :
           items[key] ?? options.reserve?.[key] ?? fallback,
+        set(key, value, nolisten, callerror) {
+          storageWrites.push({key, value});
+          memory[key] = value;
+          try { store.setItem(key, value && typeof value === 'object' ? JSON.stringify(value) : value); }
+          catch (err) { if (callerror) callerror(err); }
+          if (!nolisten) for (const fn of storageListeners.change || []) fn({name: key, value});
+        },
         listener: {follow(name, fn) { (storageListeners[name] ||= []).push(fn); }}
       },
+      Favorite: {read() { refreshes.push('favorite'); }},
+      Timeline: {filename() { return options.timelineKey || 'file_view'; }, read() { refreshes.push('timeline'); }},
       Noty: {show: text => notices.push(text)},
       Listener: {
         follow(name, fn) { (listeners[name] ||= []).push(fn); },
@@ -76,6 +95,20 @@ function page(options = {}) {
     }
   };
   const Lampa = window.Lampa;
+  if (options.upstreamStorage) {
+    const upstream = vm.createContext({window, readed: memory, reserve: options.reserve || {},
+      Arrays: {isObject: value => value !== null && typeof value === 'object' && !Array.isArray(value),
+        isArray: Array.isArray},
+      listener: {send(name, event) { for (const fn of storageListeners[name] || []) fn(event); }},
+      Cache: {rewriteData() { return Promise.resolve(); }}, console: {log() {}}
+    });
+    Lampa.Storage.get = vm.runInContext(upstreamStorageMethod('get'), upstream);
+    const set = vm.runInContext(upstreamStorageMethod('set'), upstream);
+    Lampa.Storage.set = function (key, value, nolisten, callerror) {
+      storageWrites.push({key, value});
+      return set(key, value, nolisten, callerror);
+    };
+  }
   if (options.preboot) delete window.Lampa;
   Object.defineProperty(window, 'localStorage', {
     get() { if (faults.property) throw new Error('localStorage getter'); return store; }
@@ -107,6 +140,7 @@ function page(options = {}) {
   vm.runInContext(options.uninspected ? source : inspected, context);
   return {
     window, core: window.core, items, faults, calls, requests, notices, timers, trace, tick, reloads, events,
+    storageWrites, refreshes, memory,
     change(key, value) {
       if (value === null) delete items[key]; else items[key] = String(value);
       for (const fn of storageListeners.change || []) fn({name: key, value});
@@ -870,8 +904,9 @@ test('post-boot storage failure never escapes the account listener or enables up
   assert.equal(p.items[USER], undefined); assert.equal(p.reloads.length, 0);
 });
 
-function savingPage(data = {language: 'en', favorite: '{"book":[1]}'}) {
-  const p = loginPage({items: data});
+// Save-only tests stay hidden to isolate save timers from periodic polling.
+function savingPage(data = {language: 'en', favorite: '{"book":[1]}'}, options = {hidden: true}) {
+  const p = loginPage({...options, items: data});
   p.dataRequest.success(documentV2(data), 200, '"initial"');
   assert.equal(p.reloads.length, 0);
   p.initialRequests = p.requests.length;
@@ -1141,4 +1176,211 @@ test('size failures block PUTs and storage failures after PUT disable further up
   assert.equal(p.core.disabled(), true); assert.equal(p.core.accountState().uploads, false);
   const before = p.requests.length; p.change('language', 'de'); p.tick(600000);
   assert.equal(p.requests.length, before); assert.deepEqual(p.notices, ['Account sync is unavailable on this device']);
+});
+
+function pollingPage(data = {}, options = {}) {
+  return savingPage(data, {hidden: false, ...options});
+}
+
+test('visible pages poll every 60s with ETag; 304 leaves storage, base and caches untouched', () => {
+  const p = pollingPage({language: 'en', favorite: '{"book":[1]}'});
+  const before = {...p.items};
+  const writes = p.calls.length;
+  p.tick(59999); assert.equal(p.requests.length, p.initialRequests);
+  p.tick(1);
+  const get = p.requests.at(-1);
+  assert.equal(get.config.type, 'GET');
+  assert.deepEqual(clean(get.config.headers), {'X-Lampa-Expected-User': 'Alice', 'If-None-Match': '"initial"'});
+  get.success(undefined, 304);
+  assert.deepEqual({...p.items}, before); assert.equal(p.calls.length, writes);
+  assert.deepEqual(p.storageWrites, []); assert.deepEqual(p.refreshes, []);
+  p.tick(60000); assert.equal(p.requests.length, p.initialRequests + 2);
+  p.requests.at(-1).success(undefined, 304);
+  assert.deepEqual(p.notices, []); assert.equal(p.reloads.length, 0);
+});
+
+test('live apply updates only differing non-dirty strings, must-sync first, without scheduling saves', () => {
+  const p = pollingPage({language: 'en', favorite: '{"book":[1]}', file_view: '{}', tmdb_lang: 'en'});
+  // A nolisten edit must be preserved without any event or save timer.
+  p.items.language = 'ru';
+  p.tick(60000);
+  p.requests.at(-1).success(documentV2({file_view: '{ "progress": 0.5 }', language: 'de',
+    favorite: '{ "book": [2] }', tmdb_lang: 'en', torrserver_url: 'http://remote',
+    plugins: '["remote-code"]', file_view_123: 'cub', online_view: {invalid: true}, mine_reactions: true}), 200, '"remote"');
+  assert.equal(p.items.language, 'ru'); assert.equal(p.core.dirty('language'), true);
+  assert.equal(p.items.favorite, '{ "book": [2] }');
+  assert.equal(p.items.file_view, '{ "progress": 0.5 }');
+  assert.equal(p.items.torrserver_url, 'http://remote');
+  assert.equal(p.items.plugins, undefined); assert.equal(p.items.file_view_123, undefined);
+  assert.equal(p.items.online_view, ''); assert.equal(p.items.mine_reactions, '');
+  const keys = p.storageWrites.map(w => w.key);
+  assert.deepEqual(keys, ['favorite', 'torrserver_url', 'file_view']);
+  assert.deepEqual(clean(p.storageWrites[0].value), {book: [2]});
+  assert.deepEqual(p.refreshes, ['favorite', 'timeline']);
+  assert.equal(p.core.dirty('favorite'), false); assert.equal(p.core.dirty('file_view'), false);
+  assert.equal(JSON.parse(p.items[BASE]).favorite, p.core.fp(p.items.favorite));
+  assert.equal(p.core.bootState().lastEtag, '"remote"');
+  assert.equal(p.reloads.length, 0);
+  p.tick(59999); assert.equal(p.requests.length, p.initialRequests + 1, 'apply change events must not schedule a PUT');
+});
+
+test('bookmark/progress memory refreshes only for successful writes of their active key', () => {
+  const p = pollingPage({favorite: '{}', file_view: '{}'}, {timelineKey: 'online_view'});
+  p.tick(60000);
+  p.requests.at(-1).success(documentV2({favorite: '{}', file_view: '{"x":1}'}));
+  assert.deepEqual(p.refreshes, []);
+  p.visibility(false);
+  p.requests.at(-1).success(documentV2({favorite: '{"x":1}', online_view: '{"time":2}'}));
+  assert.deepEqual(p.refreshes, ['favorite', 'timeline']);
+  p.visibility(false);
+  p.requests.at(-1).success(documentV2({favorite: '{"x":1}', online_view: '{"time":2}'}));
+  assert.deepEqual(p.refreshes, ['favorite', 'timeline']);
+  p.items.favorite = '{"local":1}';
+  p.visibility(false); p.requests.at(-1).success(documentV2({favorite: '{"remote":2}'}));
+  assert.deepEqual(p.refreshes, ['favorite', 'timeline'], 'dirty favorite is not refreshed');
+});
+
+test('hidden pages stop periodic polls; screen return polls once and restarts the timer', () => {
+  const p = pollingPage({language: 'en'}, {hidden: true});
+  p.tick(180000); assert.equal(p.requests.length, p.initialRequests);
+  p.visibility(false); assert.equal(p.requests.length, p.initialRequests + 1);
+  // Repeated visible events join the existing request.
+  p.visibility(false); assert.equal(p.requests.length, p.initialRequests + 1);
+  p.requests.at(-1).success(undefined, 304);
+  p.tick(59999); assert.equal(p.requests.length, p.initialRequests + 1);
+  p.tick(1); assert.equal(p.requests.length, p.initialRequests + 2);
+  p.requests.at(-1).success(undefined, 304);
+  p.visibility(true); p.tick(180000);
+  assert.equal(p.requests.length, p.initialRequests + 2);
+  p.visibility(false); assert.equal(p.requests.length, p.initialRequests + 3);
+});
+
+test('saves join a running poll and polling never overlaps a PUT', () => {
+  const p = pollingPage({language: 'en', favorite: '{}'});
+  p.tick(60000); const get = p.requests.at(-1);
+  p.change('language', 'ru'); p.tick(2000); p.visibility(false);
+  assert.equal(p.requests.length, p.initialRequests + 1);
+  get.success(documentV2({language: 'en', favorite: '{"remote":1}'}), 200, '"v2"');
+  assert.equal(p.items.favorite, '{"remote":1}', 'pre-save poll also applies remote data live');
+  const put = p.requests.at(-1);
+  assert.equal(put.config.type, 'PUT'); assert.equal(put.config.headers['If-Match'], '"v2"');
+  assert.deepEqual(putBody(put).data, {language: 'ru', favorite: '{"remote":1}'});
+  p.visibility(false); p.tick(180000);
+  assert.equal(p.requests.length, p.initialRequests + 2, 'timer skips while the PUT is active');
+  put.success('', 204, '"written"');
+  p.visibility(false);
+  assert.equal(p.requests.at(-1).config.headers['If-None-Match'], '"written"');
+  p.requests.at(-1).success(undefined, 304);
+  assert.equal(p.core.dirty('language'), false);
+  assert.deepEqual(p.refreshes, ['favorite']);
+});
+
+test('an idle poll remains single-flight across several timer ticks and visibility events', () => {
+  const p = pollingPage(); p.tick(60000);
+  const get = p.requests.at(-1);
+  p.tick(180000); p.visibility(false); p.visibility(false);
+  assert.equal(p.requests.length, p.initialRequests + 1);
+  get.success(documentV2({language: 'ru'}), 200, '"remote"');
+  p.tick(60000); assert.equal(p.requests.length, p.initialRequests + 2);
+  assert.equal(p.requests.at(-1).config.headers['If-None-Match'], '"remote"');
+});
+
+test('invalid poll responses do not change local values, base, document or ETag', () => {
+  for (const invalid of [null, {}, {schema_version: 1, data: {}}, documentV2([]), documentV2(null)]) {
+    const p = pollingPage({language: 'en'});
+    const before = {...p.items}; const doc = clean(p.core.bootState());
+    p.tick(60000); p.requests.at(-1).success(invalid, 200, '"invalid"');
+    assert.deepEqual({...p.items}, before); assert.deepEqual(clean(p.core.bootState()), doc);
+    assert.deepEqual(p.storageWrites, []); assert.deepEqual(p.refreshes, []);
+    assert.deepEqual(p.notices, ['Not saved to Account']);
+    p.tick(60000); assert.equal(p.requests.at(-1).config.headers['If-None-Match'], '"initial"');
+    p.requests.at(-1).success(documentV2({language: 'de'}), 200, '"valid"');
+    assert.equal(p.items.language, 'de');
+  }
+});
+
+test('poll auth failures stop all timers and ignore late data until a confirmed account recheck', () => {
+  for (const status of [401, 409]) {
+    const p = pollingPage({language: 'en'});
+    p.tick(60000); const get = p.requests.at(-1); get.fail(status);
+    assert.equal(expireCount(p), 1); assert.equal(p.core.accountState().uploads, false);
+    const before = p.requests.length;
+    p.visibility(false); p.change('language', 'ru'); p.tick(600000);
+    get.success(documentV2({favorite: '{}'}));
+    assert.equal(p.requests.length, before); assert.equal(p.items.favorite, '');
+    assert.deepEqual(p.refreshes, []); assert.deepEqual(p.notices, []);
+    p.state(signedIn('Alice'));
+    assert.equal(p.requests.length, before + 1);
+  }
+});
+
+test('logout, identity changes, reload and storage failure cancel polling and discard obsolete responses', () => {
+  for (const action of ['logout', 'switch', 'tab', 'storage']) {
+    const p = pollingPage({language: 'en'}); p.tick(60000); const get = p.requests.at(-1);
+    if (action === 'logout') p.state(guestState);
+    if (action === 'switch') p.state(signedIn('Bob'));
+    if (action === 'tab') p.storageEvent({key: USER, oldValue: 'Alice', newValue: 'Bob'});
+    if (action === 'storage') { p.faults.getItem = true; p.change('language', 'ru'); }
+    const before = {...p.items}, count = p.requests.length;
+    get.success(documentV2({language: 'old-account'})); get.fail(401);
+    p.tick(600000); p.visibility(false);
+    assert.deepEqual({...p.items}, before); assert.equal(p.requests.length, count);
+    assert.equal(expireCount(p), 0);
+  }
+});
+
+test('live quota handling skips optional writes and disables sync on must-sync failures', () => {
+  const p = pollingPage({language: 'en', file_view: '{}'}, {upstreamStorage: true});
+  p.faults.quota = 'file_view'; p.tick(60000);
+  p.requests.at(-1).success(documentV2({file_view: '{"x":1}', language: 'ru'}));
+  assert.equal(p.items.language, 'ru'); assert.equal(p.core.disabled(), false);
+  assert.equal(JSON.parse(p.items[BASE]).file_view, p.core.fp('{}'));
+  assert.deepEqual(p.refreshes, [], 'failed optional write does not refresh its cache');
+  const q = pollingPage({language: 'en'}, {upstreamStorage: true});
+  q.faults.quota = 'language'; q.tick(60000);
+  q.requests.at(-1).success(documentV2({language: 'ru', file_view: '{}'}));
+  assert.equal(q.core.disabled(), true); assert.equal(q.core.accountState().uploads, false);
+  assert.deepEqual(q.storageWrites.map(w => w.key), ['language']);
+  const count = q.requests.length; q.tick(600000); q.visibility(false);
+  assert.equal(q.requests.length, count);
+  assert.deepEqual(q.notices, ['Синхронизация Аккаунта недоступна на этом устройстве']);
+});
+
+test('live values round-trip through the actual upstream Storage cache just like fresh reads', () => {
+  const data = {language: 'true', tmdb_lang: 'false', torrserver_auth: '0', torrserver_login: '0042',
+    torrserver_password: '-2', favorite: '{ "book": [1, true, null] }',
+    mine_reactions: '[ 1, "2" ]', file_view: '{"time": 1.5}', online_view: '[malformed',
+    person_subscribes_id: 'null', user_clarifys: '1.5', search_history: ''};
+  const p = pollingPage({}, {upstreamStorage: true});
+  // Populate old in-memory values to ensure Storage.set actually invalidates them.
+  for (const key of Object.keys(data)) p.window.Lampa.Storage.get(key);
+  p.tick(60000); p.requests.at(-1).success(documentV2(data));
+  const fresh = page({items: data, upstreamStorage: true});
+  for (const [key, raw] of Object.entries(data)) {
+    assert.equal(p.items[key], raw, key + ' preserves the exact raw string');
+    assert.equal(p.core.dirty(key), false, key + ' remains clean despite JSON formatting');
+    const actual = p.window.Lampa.Storage.get(key), expected = fresh.window.Lampa.Storage.get(key);
+    assert.equal(typeof actual, typeof expected, key);
+    assert.deepEqual(clean(actual), clean(expected), key);
+  }
+  assert.equal(p.window.Lampa.Storage.get('language'), true);
+  assert.equal(p.window.Lampa.Storage.get('tmdb_lang'), false);
+  assert.equal(p.window.Lampa.Storage.get('torrserver_auth'), 0);
+  assert.equal(p.window.Lampa.Storage.get('torrserver_login'), 42);
+  assert.deepEqual(clean(p.window.Lampa.Storage.get('favorite')), {book: [1, true, null]});
+  assert.equal(p.window.Lampa.Storage.get('online_view'), '[malformed');
+  assert.equal(p.reloads.length, 0);
+});
+
+test('idle polling recovers from network failures and starts a new notification streak after success', () => {
+  const p = pollingPage({language: 'en'});
+  p.tick(60000); p.requests.at(-1).fail(503);
+  p.tick(60000); p.requests.at(-1).fail(0);
+  assert.deepEqual(p.notices, ['Not saved to Account']);
+  assert.equal(p.items.language, 'en'); assert.equal(p.core.bootState().lastEtag, '"initial"');
+  p.tick(60000); p.requests.at(-1).success(documentV2({language: 'de'}), 200, '"recovered"');
+  assert.equal(p.items.language, 'de'); assert.equal(p.core.accountState().uploads, true);
+  p.tick(60000); p.requests.at(-1).fail(503);
+  assert.deepEqual(p.notices, ['Not saved to Account', 'Not saved to Account']);
+  assert.equal(p.reloads.length, 0);
 });

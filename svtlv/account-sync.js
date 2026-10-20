@@ -35,6 +35,8 @@
   var saving = false;
   var saveAgain = false;
   var saveFailure = false;
+  var pollTimer = null;
+  var pollFlight = null;
   var strings = {
     en: {save: 'Not saved to Account', storage: 'Account sync is unavailable on this device'},
     ru: {save: 'Не сохранено в Аккаунт', storage: 'Синхронизация Аккаунта недоступна на этом устройстве'}
@@ -74,6 +76,7 @@
     disabled = true;
     uploads = false;
     stopSave();
+    stopPolling();
     notify('storage');
   }
 
@@ -335,27 +338,62 @@
     return data;
   }
 
-  function applyDoc(data) {
+  function writeLive(key, value, optional) {
+    var parsed = value;
+    if (value.charAt(0) == '[' || value.charAt(0) == '{') {
+      try { parsed = JSON.parse(value); } catch (err) { /* Match Storage.get's raw fallback. */ }
+    }
+    try {
+      var writeError;
+      window.Lampa.Storage.set(key, parsed, false, function (err) { writeError = err; });
+      if (writeError) throw writeError;
+      var encoded = record(parsed) || Array.isArray(parsed) ? JSON.stringify(parsed) : value;
+      if (storage('getItem', key) !== encoded) throw new Error('Storage write failed');
+      // Storage.set refreshes the memory cache but normalizes JSON whitespace.
+      // Keep the server's exact raw string for export and fingerprint comparison.
+      if (encoded !== value) return storage('setItem', key, value, optional);
+      return true;
+    } catch (err) {
+      if (optional && quota(err)) return false;
+      disable();
+      throw err;
+    }
+  }
+
+  function applyDoc(data, live) {
     var previous = readBase();
     var changed = false;
+    var written = Object.create(null);
     var keys = Object.keys(data).filter(function (key) {
       return synced(key) && typeof data[key] == 'string';
     });
     keys.sort(function (a, b) {
       return (classify(a) == 'user_optional' ? 1 : 0) - (classify(b) == 'user_optional' ? 1 : 0);
     });
-    keys.forEach(function (key) {
-      if (dirty(key)) return;
-      var value = data[key];
-      if (storage('getItem', key) !== value) {
-        if (!storage('setItem', key, value, classify(key) == 'user_optional')) return;
-        changed = true;
+    if (live) applying = true;
+    try {
+      keys.forEach(function (key) {
+        if (dirty(key)) return;
+        var value = data[key];
+        if (storage('getItem', key) !== value) {
+          var optional = classify(key) == 'user_optional';
+          if (!(live ? writeLive(key, value, optional) : storage('setItem', key, value, optional))) return;
+          changed = true;
+          written[key] = true;
+        }
+        if (fp(value) === null) delete previous[key];
+        else previous[key] = fp(value);
+      });
+      writeBase();
+      if (live) {
+        var lampa = window.Lampa;
+        if (written.favorite && lampa.Favorite) lampa.Favorite.read();
+        if (lampa.Timeline && written[lampa.Timeline.filename()]) lampa.Timeline.read();
       }
-      if (fp(value) === null) delete previous[key];
-      else previous[key] = fp(value);
-    });
-    writeBase();
-    return {changed: changed};
+      return {changed: changed};
+    } finally {
+      if (live) applying = false;
+    }
   }
 
   function clearSynced() {
@@ -382,6 +420,7 @@
     reloading = true;
     uploads = false;
     stopSave();
+    stopPolling();
     window.location.reload();
   }
 
@@ -415,6 +454,7 @@
     handledUser = '';
     uploads = false;
     stopSave();
+    stopPolling();
     function active() { return !disabled && !reloading && revision == accountRevision; }
     function failed() {
       accountUser = '';
@@ -507,7 +547,14 @@
       if (!applying && event && synced(event.name)) scheduleSave();
     });
     $(document).on('visibilitychange', function () {
-      if (document.hidden) save();
+      if (document.hidden) {
+        clearTimeout(pollTimer);
+        pollTimer = null;
+        save();
+      } else {
+        poll();
+        schedulePoll();
+      }
     });
     handleAccount(window.svtlv_account_state);
   }
@@ -532,6 +579,7 @@
     saveFailure = false;
     // Includes edits made with nolisten before a reload and first-login guest data.
     scheduleSave();
+    schedulePoll();
   }
 
   function scheduleSave() {
@@ -561,6 +609,7 @@
       handledUser = '';
       ++accountRevision;
       stopSave();
+      stopPolling();
       window.Lampa.Listener.send('svtlv_account', {type: 'expired'});
       return;
     }
@@ -568,24 +617,55 @@
     saveFailure = true;
   }
 
-  // Fetch the latest document before overlaying this page's dirty keys.
-  function refreshForSave(done) {
-    var revision = accountRevision;
+  function stopPolling() {
+    clearTimeout(pollTimer);
+    pollTimer = null;
+    pollFlight = null;
+  }
+
+  function schedulePoll() {
+    if (pollTimer !== null || document.hidden || !uploads || disabled || reloading) return;
+    pollTimer = setTimeout(function () {
+      pollTimer = null;
+      if (document.hidden || !uploads || disabled || reloading) return;
+      poll();
+      schedulePoll();
+    }, 60000);
+  }
+
+  // Saves join an in-flight poll; timer/visibility polls never overlap a PUT.
+  function poll(done) {
+    if (!uploads || disabled || reloading || (saving && !done)) return;
+    if (pollFlight) {
+      if (done) pollFlight.callbacks.push(done);
+      return;
+    }
+    var flight = {revision: accountRevision, callbacks: done ? [done] : []};
+    pollFlight = flight;
     request('GET', '/api/v1/user-data', {user: accountUser, etag: lastEtag}, function (ok, data, xhr) {
-      if (revision != accountRevision || !uploads || disabled || reloading) return;
-      if (xhr.status == 304 && lastEtag) { done(true, false); return; }
-      if (ok && xhr.status == 200 && record(data) && data.schema_version === 2 && record(data.data)) {
-        lastDoc = data.data;
-        lastEtag = xhr.getResponseHeader('ETag') || '';
-        done(true, false);
-      } else if (xhr.status == 404 && errorCode(xhr) == 'user_data_not_found') {
-        lastDoc = {};
-        lastEtag = '';
-        done(true, true);
-      } else {
-        saveError(xhr);
-        done(false);
-      }
+      if (pollFlight !== flight || flight.revision != accountRevision || !uploads || disabled || reloading) return;
+      var success = false, missing = false;
+      try {
+        if (xhr.status == 304 && lastEtag) {
+          success = true;
+        } else if (ok && xhr.status == 200 && record(data) && data.schema_version === 2 && record(data.data)) {
+          applyDoc(data.data, true);
+          lastDoc = data.data;
+          lastEtag = xhr.getResponseHeader('ETag') || '';
+          success = true;
+        } else if (xhr.status == 404 && errorCode(xhr) == 'user_data_not_found') {
+          lastDoc = {};
+          lastEtag = '';
+          success = true;
+          missing = true;
+        } else {
+          saveError(xhr);
+        }
+      } catch (err) { saveError({status: 0}); }
+      if (pollFlight !== flight) return;
+      pollFlight = null;
+      if (success && !saving) saveFailure = false;
+      flight.callbacks.forEach(function (callback) { callback(success, missing); });
     });
   }
 
@@ -611,7 +691,7 @@
       }
     }
     function attempt(retry) {
-      refreshForSave(function (ok, missing) {
+      poll(function (ok, missing) {
         if (!active()) return;
         if (!ok) { finish(false); return; }
         try {

@@ -461,12 +461,12 @@ only. Nothing is defined on non-HTTP(S) origins (`^https?:$` guard).
 - Modify: `svtlv/account-sync.js`
 - Modify: `docs/tests/account-sync.test.cjs`
 
-- [ ] implement `poll()` per the poll diagram with `lastDoc`/`lastEtag`; one request at a time; the save flow starts with `poll()`
-- [ ] triggers: `visibilitychange` to visible and a 60s timer while visible and uploads are on; stop on logout or 401/409
-- [ ] live apply through `Lampa.Storage.set` (`[`/`{` JSON rule, `applying` guard, must-sync first, skip dirty keys); `Lampa.Favorite.read()` after `favorite`; `Lampa.Timeline.read()` after `Lampa.Timeline.filename()`
-- [ ] write tests: 304 changes nothing; 200 writes only differing non-dirty synced keys and updates base; `Favorite.read`/`Timeline.read` called only when their key changed; applied keys do not trigger a save; invalid 200 ignored
-- [ ] write tests: hidden page does not run the timer; becoming visible polls once; PUT ETag prevents downloading the page's own write; booleans/numbers/JSON round-trip through `Storage.get` like a fresh read
-- [ ] run node tests - must pass before task 9
+- [x] implement `poll()` per the poll diagram with `lastDoc`/`lastEtag`; one request at a time; the save flow starts with `poll()`
+- [x] triggers: `visibilitychange` to visible and a 60s timer while visible and uploads are on; stop on logout or 401/409
+- [x] live apply through `Lampa.Storage.set` (`[`/`{` JSON rule, `applying` guard, must-sync first, skip dirty keys); `Lampa.Favorite.read()` after `favorite`; `Lampa.Timeline.read()` after `Lampa.Timeline.filename()`
+- [x] write tests: 304 changes nothing; 200 writes only differing non-dirty synced keys and updates base; `Favorite.read`/`Timeline.read` called only when their key changed; applied keys do not trigger a save; invalid 200 ignored
+- [x] write tests: hidden page does not run the timer; becoming visible polls once; PUT ETag prevents downloading the page's own write; booleans/numbers/JSON round-trip through `Storage.get` like a fresh read
+- [x] run node tests - must pass before task 9
 
 ### Task 9: Verify acceptance criteria
 - [ ] anonymous (no marker): no `/user-data` request at all
