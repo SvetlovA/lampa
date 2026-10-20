@@ -143,7 +143,7 @@ func TestService_ReplaceThenGet(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, stored.UpdatedAt, got.UpdatedAt)
 	assert.Equal(t, 2, got.SchemaVersion)
-	assert.False(t, got.UnreadableValues)
+	assert.Empty(t, got.UnreadableKeys)
 	assert.Len(t, got.Data, 4)
 	assert.Equal(t, secretPassword, stringValue(t, got, "secret.password"))
 	assert.Equal(t, secretKey, stringValue(t, got, "secret:key"))
@@ -321,7 +321,7 @@ func TestService_GetConnectionsUnreadable(t *testing.T) {
 
 	got, err := reader.Get(t.Context(), userID)
 	require.NoError(t, err)
-	assert.True(t, got.UnreadableValues)
+	assert.Equal(t, []string{"secret.password", "secret:key"}, got.UnreadableKeys)
 	assert.Equal(t, stored.ETag, got.ETag, "retain the stored tag for a conditional repair")
 	assert.NotContains(t, got.Data, "secret.password")
 	assert.NotContains(t, got.Data, "secret:key")

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -74,12 +75,19 @@ func (s *Service) Get(ctx context.Context, userID string) (Document, error) {
 	if err != nil {
 		return Document{}, fmt.Errorf("open stored data: %w", err)
 	}
+	var unreadable []string
+	for key := range data {
+		if _, found := opened[key]; !found {
+			unreadable = append(unreadable, key)
+		}
+	}
+	slices.Sort(unreadable)
 	return Document{
-		SchemaVersion:    rec.SchemaVersion,
-		Data:             opened,
-		UnreadableValues: len(opened) != len(data),
-		UpdatedAt:        rec.UpdatedAt,
-		ETag:             rec.ETag,
+		SchemaVersion:  rec.SchemaVersion,
+		Data:           opened,
+		UnreadableKeys: unreadable,
+		UpdatedAt:      rec.UpdatedAt,
+		ETag:           rec.ETag,
 	}, nil
 }
 

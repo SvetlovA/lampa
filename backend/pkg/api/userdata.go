@@ -15,9 +15,10 @@ import (
 
 // documentResponse is the wire shape of a stored document, returned by GET.
 type documentResponse struct {
-	SchemaVersion int                        `json:"schema_version"`
-	Data          map[string]json.RawMessage `json:"data"`
-	UpdatedAt     time.Time                  `json:"updated_at"`
+	SchemaVersion  int                        `json:"schema_version"`
+	Data           map[string]json.RawMessage `json:"data"`
+	UpdatedAt      time.Time                  `json:"updated_at"`
+	UnreadableKeys []string                   `json:"unreadable_keys,omitempty"`
 }
 
 func (s *Server) getUserData(w http.ResponseWriter, r *http.Request) {
@@ -32,7 +33,7 @@ func (s *Server) getUserData(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("ETag", strconv.Quote(doc.ETag))
 	// clients must see omitted values so a surviving local copy can repair them with this ETag.
-	if !doc.UnreadableValues && stripWeakETag(r.Header.Get("If-None-Match")) == strconv.Quote(doc.ETag) {
+	if len(doc.UnreadableKeys) == 0 && stripWeakETag(r.Header.Get("If-None-Match")) == strconv.Quote(doc.ETag) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusNotModified)
 		return
@@ -114,9 +115,10 @@ func (s *Server) writeServiceError(w http.ResponseWriter, r *http.Request, err e
 
 func writeDocument(w http.ResponseWriter, doc storage.Document) {
 	WriteJSON(w, http.StatusOK, documentResponse{
-		SchemaVersion: doc.SchemaVersion,
-		Data:          doc.Data,
-		UpdatedAt:     doc.UpdatedAt.UTC(),
+		SchemaVersion:  doc.SchemaVersion,
+		Data:           doc.Data,
+		UpdatedAt:      doc.UpdatedAt.UTC(),
+		UnreadableKeys: doc.UnreadableKeys,
 	})
 }
 

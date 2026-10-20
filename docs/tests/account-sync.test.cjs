@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const {createHash} = require('node:crypto');
 const {test} = require('node:test');
 const source = fs.readFileSync(path.join(__dirname, '../../svtlv/account-sync.js'), 'utf8');
 const bundle = fs.readFileSync(path.join(__dirname, '../../app.min.js'), 'utf8');
@@ -31,7 +32,7 @@ const inspected = source.replace(/\}\)\(\);\s*$/, `window.core = {
 }; })();`);
 
 function page(options = {}) {
-  const items = Object.assign(Object.create(null), options.items);
+  const items = options.sharedItems || Object.assign(Object.create(null), options.items);
   const faults = {}, calls = [], requests = [], notices = [], trace = [];
   const listeners = {}, windowEvents = {}, documentEvents = {}, storageListeners = {}, reloads = [], events = [];
   const document = {hidden: !!options.hidden};
@@ -1554,10 +1555,13 @@ test('idle polling recovers from network failures and starts a new notification 
 // A shared document lets two independent copies of the unmodified add-on race.
 // Go tests cover the real API/storage; this fixture only supplies its HTTP contract.
 function sharedDocument(initial = null) {
-  let data = initial === null ? null : clean(initial), revision = 1;
+  let data = initial === null ? null : clean(initial);
   const answered = new WeakSet(), responses = [];
   const unreadable = new Set();
-  const etag = () => '"revision-' + revision + '"';
+  // Match the backend: repairing unchanged plaintext must preserve its ETag.
+  const etag = () => '"' + createHash('sha256').update(JSON.stringify(
+    Object.fromEntries(Object.entries(data || {}).sort(([a], [b]) => a.localeCompare(b)))
+  )).digest('hex') + '"';
   return {
     responses,
     data: () => clean(data),
@@ -1577,7 +1581,9 @@ function sharedDocument(initial = null) {
         else {
           const readable = clean(data);
           for (const key of unreadable) delete readable[key];
-          request.success(status === 200 ? documentV2(readable) : undefined, status, etag());
+          const body = documentV2(readable);
+          if (unreadable.size) body.unreadable_keys = [...unreadable];
+          request.success(status === 200 ? body : undefined, status, etag());
         }
       } else {
         assert.equal(config.type, 'PUT');
@@ -1589,7 +1595,7 @@ function sharedDocument(initial = null) {
         } else {
           const body = putBody(request);
           assert.equal(body.schema_version, 2);
-          data = clean(body.data); revision++; unreadable.clear();
+          data = clean(body.data); unreadable.clear();
           responses.push(204);
           request.success('', 204, etag());
         }
@@ -1611,6 +1617,76 @@ function acceptanceDevice(server, options = {}, scope = realScope) {
   assert.equal(p.requests.length, 2, 'successful boot needs no post-boot document fetch');
   return p;
 }
+
+test('shared tabs refresh saved fingerprints before merging a newer remote edit', () => {
+  const server = sharedDocument({language: 'en', tmdb_lang: 'en'});
+  const sharedItems = {[USER]: 'Alice'};
+  const a = acceptanceDevice(server, {sharedItems});
+  const b = acceptanceDevice(server, {sharedItems});
+  a.change('language', 'ru'); a.tick(2000);
+  server.respond(a.requests.at(-1)); server.respond(a.requests.at(-1));
+  const remote = acceptanceDevice(server);
+  remote.change('language', 'de'); remote.tick(2000);
+  server.respond(remote.requests.at(-1)); server.respond(remote.requests.at(-1));
+  b.change('tmdb_lang', 'fr'); b.tick(2000);
+  server.respond(b.requests.at(-1));
+  assert.deepEqual(putBody(b.requests.at(-1)).data, {language: 'de', tmdb_lang: 'fr'});
+  server.respond(b.requests.at(-1));
+  assert.deepEqual(server.data(), {language: 'de', tmdb_lang: 'fr'});
+});
+
+test('upstream quota fallback never uploads a must-sync deletion tombstone', () => {
+  for (const key of ['favorite', 'mine_reactions']) {
+    const p = savingPage(undefined, {hidden: true, upstreamStorage: true});
+    p.faults.quota = key;
+    p.window.Lampa.Storage.set(key, {book: [1, 2]});
+    assert.equal(p.items[key], undefined);
+    assert.deepEqual(clean(p.window.Lampa.Storage.get(key)), {book: [1, 2]});
+    p.tick(2000);
+    assert.equal(p.core.disabled(), true);
+    assert.equal(p.core.accountState().uploads, false);
+    assert.equal(p.requests.length, p.initialRequests, 'preserve the server document on persistence failure');
+  }
+});
+
+test('a restarted device with a must-sync reserve value cannot upload a false deletion', () => {
+  const server = sharedDocument({language: 'en', favorite: '{"book":[1]}'});
+  const saved = acceptanceDevice(server);
+  delete saved.items.favorite;
+  const restarted = acceptanceDevice(server, {items: saved.items, hidden: true,
+    reserve: {favorite: '{"book":[1,2]}'}});
+  assert.deepEqual(clean(restarted.window.Lampa.Storage.get('favorite')), {book: [1, 2]});
+  restarted.tick(600000);
+  assert.equal(restarted.requests.length, 2);
+  assert.deepEqual(server.data(), {language: 'en', favorite: '{"book":[1]}'});
+  assert.ok(restarted.notices.includes('Account sync is unavailable on this device'));
+});
+
+test('an incomplete device refreshes after same-ETag repair without deleting the repaired credential', () => {
+  for (const repairDuringSave of [false, true]) {
+    const server = sharedDocument({language: 'en', torrserver_password: 'secret'});
+    const a = acceptanceDevice(server);
+    const originalTag = server.etag();
+    server.omitEncrypted('torrserver_password');
+    const b = acceptanceDevice(server);
+    b.change('language', 'ru'); b.tick(2000);
+    if (repairDuringSave) server.respond(b.requests.at(-1));
+    a.tick(60000); server.respond(a.requests.at(-1));
+    a.tick(2000); server.respond(a.requests.at(-1)); server.respond(a.requests.at(-1));
+    assert.equal(server.etag(), originalTag, 'identical-plaintext repair keeps the canonical ETag');
+    if (!repairDuringSave) server.respond(b.requests.at(-1));
+    else {
+      assert.equal(b.requests.at(-1).config.type, 'GET', 'incomplete overlay cannot issue a replacement PUT');
+      b.tick(60000); server.respond(b.requests.at(-1));
+      b.tick(2000); server.respond(b.requests.at(-1));
+    }
+    const put = b.requests.at(-1);
+    assert.equal(put.config.type, 'PUT');
+    assert.equal(putBody(put).data.torrserver_password, 'secret');
+    server.respond(put);
+    assert.deepEqual(server.data(), {language: 'ru', torrserver_password: 'secret'});
+  }
+});
 
 test('acceptance: guest stays local through edits and visibility changes; first login handles both document states', () => {
   for (const existing of [false, true]) {

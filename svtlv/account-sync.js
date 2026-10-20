@@ -17,6 +17,7 @@
   var SCOPE_NAMES = ['user', 'user_connection', 'user_optional', 'device', 'connection', 'external', 'cache'];
   var scope;
   var base;
+  var baseRaw;
   var disabled = false;
   var failure = '';
   var pendingNotice = false;
@@ -24,6 +25,7 @@
   var ready = false;
   var lastDoc = {};
   var lastEtag = '';
+  var unreadableKeys = [];
   var accountUser = '';
   var handledUser = '';
   var accountRevision = 0;
@@ -175,6 +177,16 @@
     } catch (err) { return ''; }
   }
 
+  function rememberDoc(data, xhr) {
+    var missing = data.unreadable_keys === undefined ? [] : data.unreadable_keys;
+    if (!Array.isArray(missing) || missing.some(function (key) {
+      return typeof key != 'string' || !KEY_PATTERN.test(key) || own(data.data, key);
+    })) throw new Error('Invalid unreadable keys');
+    lastDoc = data.data;
+    lastEtag = xhr.getResponseHeader('ETag') || '';
+    unreadableKeys = missing.slice();
+  }
+
   // Run before the bundle: no Lampa API or account event is available yet.
   window.svtlv_sync_boot = function (done) {
     if (bootCalled) return;
@@ -209,12 +221,12 @@
         } else if (result.ok && result.xhr.status == 200 && record(result.data) &&
           result.data.schema_version === 2 && record(result.data.data)) {
           applyDoc(result.data.data);
-          lastDoc = result.data.data;
-          lastEtag = result.xhr.getResponseHeader('ETag') || '';
+          rememberDoc(result.data, result.xhr);
           ready = true;
         } else if (result.xhr.status == 404 && errorCode(result.xhr) == 'user_data_not_found') {
           lastDoc = {};
           lastEtag = '';
+          unreadableKeys = [];
           ready = true;
         } else {
           notify('save');
@@ -279,9 +291,10 @@
   }
 
   function readBase() {
-    if (base) return base;
     try {
       var raw = storage('getItem', BASE_KEY);
+      // Other tabs save into the same storage even before their storage event arrives.
+      if (base && raw === baseRaw) return base;
       var parsed = raw ? JSON.parse(raw) : {};
       if (!record(parsed)) throw new Error('Invalid sync base');
       base = Object.create(null);
@@ -291,6 +304,7 @@
         }
         base[key] = parsed[key];
       });
+      baseRaw = raw;
       return base;
     } catch (err) {
       disable();
@@ -299,12 +313,30 @@
   }
 
   function writeBase() {
-    storage('setItem', BASE_KEY, JSON.stringify(readBase()));
+    var raw = JSON.stringify(base || readBase());
+    storage('setItem', BASE_KEY, raw);
+    baseRaw = raw;
+  }
+
+  function localValue(key) {
+    var value = storage('getItem', key);
+    // Upstream removes quota-failed items and retains their value in memory/reserve.
+    // A must-sync value there is a persistence failure, not a user deletion.
+    if (value === null && classify(key) != 'user_optional' && window.Lampa && window.Lampa.Storage) {
+      var fallback;
+      try { fallback = window.Lampa.Storage.get(key, ''); }
+      catch (err) { disable(); throw err; }
+      if (fallback !== '' && fallback !== null && fallback !== undefined) {
+        disable();
+        throw new Error('Synced value only exists in storage fallback');
+      }
+    }
+    return value;
   }
 
   function dirty(key) {
     var previous = readBase();
-    return fp(storage('getItem', key)) !== (own(previous, key) ? previous[key] : null);
+    return fp(localValue(key)) !== (own(previous, key) ? previous[key] : null);
   }
 
   function localKeys() {
@@ -320,7 +352,7 @@
   function exportLocal() {
     var data = Object.create(null);
     localKeys().forEach(function (key) {
-      var value = storage('getItem', key);
+      var value = localValue(key);
       if (value !== null && value !== '') data[key] = value;
     });
     return data;
@@ -332,7 +364,7 @@
       if (synced(key) && typeof lastDoc[key] == 'string') data[key] = lastDoc[key];
     });
     dirtyKeys().forEach(function (key) {
-      var value = storage('getItem', key);
+      var value = localValue(key);
       // A missing local item also needs a tombstone to clear other devices.
       data[key] = value === null ? '' : value;
     });
@@ -426,6 +458,7 @@
     storage('removeItem', BASE_KEY);
     storage('removeItem', USER_KEY);
     base = Object.create(null);
+    baseRaw = null;
     return changed;
   }
 
@@ -482,6 +515,7 @@
           ready = false;
           lastDoc = {};
           lastEtag = '';
+          unreadableKeys = [];
           if (marker) {
             clearSynced();
             if (!window.svtlv_account_leaving) reloadPage();
@@ -499,8 +533,7 @@
             var changed = false;
             if (ok && xhr.status == 200 && record(data) && data.schema_version === 2 && record(data.data)) {
               changed = marker == user ? applyDoc(data.data).changed : replaceDoc(data.data);
-              lastDoc = data.data;
-              lastEtag = xhr.getResponseHeader('ETag') || '';
+              rememberDoc(data, xhr);
             } else if (xhr.status == 404 && errorCode(xhr) == 'user_data_not_found') {
               if (marker && marker != user) changed = clearSynced();
               if (marker != user) {
@@ -509,6 +542,7 @@
               }
               lastDoc = {};
               lastEtag = '';
+              unreadableKeys = [];
             } else if (xhr.status == 401 || xhr.status == 409) {
               accountUser = '';
               window.Lampa.Listener.send('svtlv_account', {type: 'expired'});
@@ -534,6 +568,7 @@
         ready = false;
         lastDoc = {};
         lastEtag = '';
+        unreadableKeys = [];
         return;
       }
       if (scope) complete();
@@ -558,7 +593,10 @@
       if (change.key == USER_KEY && change.oldValue !== change.newValue) reloadPage();
     });
     if (window.Lampa.Storage.listener) window.Lampa.Storage.listener.follow('change', function (event) {
-      if (!applying && event && synced(event.name)) scheduleSave();
+      if (!applying && event && synced(event.name)) {
+        try { localValue(event.name); scheduleSave(); }
+        catch (err) { /* A persistence failure disables sync without disrupting the writer. */ }
+      }
     });
     $(document).on('visibilitychange', function () {
       if (document.hidden) {
@@ -656,7 +694,8 @@
     }
     var flight = {revision: accountRevision, callbacks: done ? [done] : []};
     pollFlight = flight;
-    request('GET', '/api/v1/user-data', {user: accountUser, etag: lastEtag}, function (ok, data, xhr) {
+    var incomplete = unreadableKeys.length > 0;
+    request('GET', '/api/v1/user-data', {user: accountUser, etag: incomplete ? '' : lastEtag}, function (ok, data, xhr) {
       if (pollFlight !== flight || flight.revision != accountRevision || !uploads || disabled || reloading) return;
       var success = false, missing = false;
       try {
@@ -664,12 +703,12 @@
           success = true;
         } else if (ok && xhr.status == 200 && record(data) && data.schema_version === 2 && record(data.data)) {
           applyDoc(data.data, true);
-          lastDoc = data.data;
-          lastEtag = xhr.getResponseHeader('ETag') || '';
+          rememberDoc(data, xhr);
           success = true;
         } else if (xhr.status == 404 && errorCode(xhr) == 'user_data_not_found') {
           lastDoc = {};
           lastEtag = '';
+          unreadableKeys = [];
           success = true;
           missing = true;
         } else {
@@ -678,7 +717,10 @@
       } catch (err) { saveError({status: 0}); }
       if (pollFlight !== flight) return;
       pollFlight = null;
-      if (success && !saving) saveFailure = false;
+      if (success && !saving) {
+        saveFailure = false;
+        if (incomplete && !unreadableKeys.length) scheduleSave();
+      }
       flight.callbacks.forEach(function (callback) { callback(success, missing); });
     });
   }
@@ -712,6 +754,13 @@
           // A missing server document needs every local value, even clean ones.
           var body = fitBody(overlay(missing ? exportLocal() : lastDoc));
           if (!body) { finish(false); return; }
+          // A repair can preserve the plaintext ETag. Never replace an incomplete
+          // document unless this device can supply every omitted synced value.
+          if (unreadableKeys.some(function (key) { return synced(key) && !own(body.data, key); })) {
+            saveError({status: 0});
+            finish(false);
+            return;
+          }
           request('PUT', '/api/v1/user-data', {user: accountUser, etag: lastEtag, body: body}, function (ok, data, xhr) {
             if (!active()) return;
             if (xhr.status == 412 && !retry) { attempt(true); return; }
@@ -730,6 +779,7 @@
               writeBase();
               lastDoc = body.data;
               lastEtag = xhr.getResponseHeader('ETag') || '';
+              unreadableKeys = [];
               finish(true);
             } catch (err) { finish(false); }
           });

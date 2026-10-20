@@ -395,6 +395,7 @@ func TestServer_UserDataUnreadableRepairFlow(t *testing.T) {
 	var got documentResponse
 	require.NoError(t, json.Unmarshal(get.Body.Bytes(), &got))
 	assert.NotContains(t, got.Data, "secret")
+	assert.Equal(t, []string{"secret"}, got.UnreadableKeys)
 	assert.JSONEq(t, `"ru"`, string(got.Data["language"]))
 
 	repair := request(http.MethodPut, body, get.Header().Get("ETag"))
@@ -403,7 +404,9 @@ func TestServer_UserDataUnreadableRepairFlow(t *testing.T) {
 	assert.NotContains(t, string(store.records[flowUserA].Data), "local-credential")
 	get = request(http.MethodGet, "", "")
 	require.Equal(t, http.StatusOK, get.Code)
+	got = documentResponse{}
 	require.NoError(t, json.Unmarshal(get.Body.Bytes(), &got))
+	assert.Empty(t, got.UnreadableKeys)
 	assert.JSONEq(t, `"local-credential"`, string(got.Data["secret"]))
 	unchanged := request(http.MethodGet, "", tag)
 	assert.Equal(t, http.StatusNotModified, unchanged.Code)

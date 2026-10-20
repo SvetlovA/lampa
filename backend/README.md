@@ -87,11 +87,15 @@ Schema v2 stores arbitrary JSON values under top-level `data` keys. Each PUT may
 an `encrypt` array of at most 64 keys. Present values on that list are sealed in place as
 `{"$sealed":"base64(nonce+ciphertext)"}` with AES-256-GCM and `LAMPA_API_DATA_KEY`, bound
 to the user ID; missing keys are ignored. GET decrypts them and omits unreadable values
-with a `[WARN]` log while returning the rest. Such a response is `200` even when
+with a `[WARN]` log and lists their names in `unreadable_keys` while returning the rest.
+The field is omitted when all values are readable. Such a response is `200` even when
 `If-None-Match` matches; it keeps the stored ETag so a client can restore surviving
 local plaintext with a conditional PUT. Previously synchronized local values in the
 frontend's `encrypt` list become dirty when omitted, and a live refresh schedules
-their recovery save. Client input containing `$sealed` objects is
+their recovery save. While a cached response has unreadable keys, the client omits
+`If-None-Match` on refresh and blocks replacement PUTs unless it can supply every
+omitted synced value. This also detects repairs that preserve the plaintext ETag.
+Client input containing `$sealed` objects is
 reserved and rejected. There is no backend list of secret setting names or UI-input guard.
 
 The frontend reads [`svtlv/storage-scope.json`](../svtlv/storage-scope.json) at runtime.
@@ -105,6 +109,9 @@ if it should be sealed. No JS or Go change is required.
 Clearing or removing a synchronized setting sends an empty-string tombstone. Other
 devices apply that empty value, hiding any IndexedDB reserve copy; a successful save
 removes its dirty fingerprint. An explicit tombstone never triggers credential recovery.
+Fingerprints are refreshed from shared localStorage before dirty checks so other tabs'
+saves cannot make clean values appear dirty. A missing must-sync item still available
+through Lampa's memory/IndexedDB fallback disables uploads instead of sending a deletion.
 
 `TestStorageScope_matchBundle` checks extracted bundle storage keys against that inventory.
 New unclassified keys, missing/invalid scope data and stale rules fail CI; only a

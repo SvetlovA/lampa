@@ -227,8 +227,9 @@ objects. For example, a stored JSONB `data` object can contain:
 
 Each listed value is sealed in place with AES-256-GCM and `LAMPA_API_DATA_KEY`,
 bound to the user ID. GET opens values before returning them; an unreadable
-sealed value is omitted with a `[WARN]` log while the rest of the document is
-returned. The backend has no secret-key list: `encrypt` is the client's choice.
+sealed value is omitted with a `[WARN]` log and its name listed in the optional
+GET `unreadable_keys` array while the rest of the document is returned.
+The backend has no secret-key list: `encrypt` is the client's choice.
 The shipped whitelist selects only `torrserver_login` and `torrserver_password`.
 Other connection credentials stay local (§10.3).
 
@@ -571,6 +572,10 @@ progress writes do not postpone an existing timer. Hiding the page flushes a
 save, including on a page already hidden. Only one save runs at a time; a
 trigger during that save requests one more pass.
 
+If a missing must-sync localStorage item still has a value in Lampa's memory or
+IndexedDB reserve, disable uploads for the page and notify. Upstream's quota
+fallback removes that item; it must never become a deletion tombstone.
+
 Before saving, poll the latest document and apply clean remote changes. Overlay
 only dirty local keys, including `''` tombstones for cleared or removed values,
 enforce the encoded size rule (§4), and PUT with the
@@ -598,6 +603,11 @@ An explicit `''` tombstone is a clear instruction and does not trigger recovery.
 Omitted optional values outside the encryption list retain best-effort behavior.
 When decryption omits a value, the API returns `200` even for a matching
 `If-None-Match`, retaining the stored ETag for the recovery PUT's `If-Match`.
+The response lists omitted fields in `unreadable_keys`. Until a complete response
+arrives, refreshes omit `If-None-Match`, and replacement PUTs require every omitted
+synced key to be present in the outgoing document. A device lacking a surviving
+copy waits for another device to repair it, then retries its pending edits. This
+prevents an incomplete cached copy from deleting a repair with the same plaintext ETag.
 
 ### 6.5 Later startup or refresh
 
@@ -623,6 +633,8 @@ latest server copy plus dirty local values. Persistent
 of their last synchronized raw string. Empty string and null both mean no value.
 A key is dirty whenever its local fingerprint differs from that base, including
 changes written with `nolisten` (the language picker), after reload or failed saves.
+Each dirty check refreshes the cached base if the shared localStorage value changed,
+including saves from other tabs before their storage event is delivered.
 
 Server apply skips dirty keys and updates the base for values it applies.
 Successful PUT records fingerprints of the values actually sent, so another
@@ -678,7 +690,8 @@ Example PUT body (`Content-Type: application/json`, `X-Lampa-Csrf: 1`):
 
 A successful GET returns `{schema_version: 2, data: {...}, updated_at: ...}`
 with decrypted values and a quoted `ETag` header. `encrypt` is a PUT instruction,
-not a GET field. GET keeps `Cache-Control: no-store`, including on `304`.
+not a GET field. If values could not be decrypted, GET includes an optional
+`unreadable_keys` array naming the omitted fields. GET keeps `Cache-Control: no-store`, including on `304`.
 `If-None-Match` compares the tag ignoring a `W/` prefix. PUT with `If-Match`
 compares likewise and returns `412 precondition_failed` if the row is absent
 or changed; no storage write occurs. PUT without the header upserts. A successful

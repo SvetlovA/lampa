@@ -256,6 +256,9 @@ Backend rules (no key names anywhere):
   stored ETag retained for conditional PUT. Previously synced local values in the
   current `encrypt` list become dirty and are scheduled for recovery; explicit empty
   tombstones remain clear instructions.
+  GET lists omitted names in `unreadable_keys`. While incomplete, the client refreshes
+  without `If-None-Match` and blocks PUT unless all omitted synced values are supplied.
+  Thus a repair with the same plaintext ETag cannot be deleted by an incomplete device.
 - Migration `00003`: drop `encrypted_connections`, add `etag text not null default ''`.
   A row with `schema_version` 1 reads as "not found" (`404`); no real client wrote v1.
 
@@ -270,6 +273,9 @@ after PUT 204 of sent value V for K:   base[K] = fp(V)
 **Note:** if the user changes K again while a PUT is in flight, the local value no longer
 matches `fp(V)`, so K stays dirty and goes out with the next save instead of being reverted
 by the next poll. `svtlv_sync_base` is plain `localStorage`, outside `Lampa.Storage`.
+Its cached copy is refreshed when the shared raw value changes, including another tab's save.
+Missing must-sync local items still present in Lampa's memory/IndexedDB fallback disable
+uploads for the page instead of becoming false deletion tombstones after quota failures.
 
 ### Poll, live apply and save
 
@@ -524,6 +530,17 @@ Verification: all 244 Node tests, pinned ES5 parsing, Compose configuration,
 and backend `make test race lint` with `LAMPA_API_REQUIRE_DOCKER=1` pass. Backend
 coverage remains 94.1%, with zero lint issues. The documented unconditional
 first-creation policy remains unchanged.
+
+- [x] second review: refresh fingerprints after another tab saves; distinguish
+  must-sync quota fallback from deletion, including after restart; expose omitted
+  sealed-key metadata, refresh incomplete copies without conditional GET, and block
+  incomplete replacement uploads until omitted synced values can be supplied
+- [x] use canonical-data ETags in the shared-server fixture and add regressions for
+  cross-tab lost updates, quota fallback, and same-ETag repairs racing another save
+
+Second-review verification: all 248 Node tests, ES5 parsing, Compose configuration,
+and backend `make test race lint` with `LAMPA_API_REQUIRE_DOCKER=1` pass (94.1%
+coverage, zero lint issues). Protected upstream frontend files remain unchanged.
 
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*

@@ -318,7 +318,9 @@ func TestServer_GetUserDataETag(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			svc := &mocks.UserDataMock{GetFunc: func(context.Context, string) (storage.Document, error) {
 				doc := testDocument()
-				doc.UnreadableValues = tc.unreadable
+				if tc.unreadable {
+					doc.UnreadableKeys = []string{"secret"}
+				}
 				return doc, nil
 			}}
 			srv, _ := newTestServer(t, svc, allowAll(testUserID))
@@ -329,9 +331,14 @@ func TestServer_GetUserDataETag(t *testing.T) {
 			assert.Equal(t, tc.status, w.Code)
 			assert.Equal(t, `"test-etag"`, w.Header().Get("ETag"))
 			assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
-			if tc.status == http.StatusNotModified {
+			switch {
+			case tc.status == http.StatusNotModified:
 				assert.Empty(t, w.Body.String())
-			} else {
+			case tc.unreadable:
+				var doc documentResponse
+				require.NoError(t, json.Unmarshal(w.Body.Bytes(), &doc))
+				assert.Equal(t, []string{"secret"}, doc.UnreadableKeys)
+			default:
 				assertDocumentJSON(t, w.Body.Bytes())
 			}
 		})
