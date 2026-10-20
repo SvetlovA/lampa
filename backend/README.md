@@ -111,7 +111,8 @@ devices apply that empty value, hiding any IndexedDB reserve copy; a successful 
 removes its dirty fingerprint. An explicit tombstone never triggers credential recovery.
 Fingerprints are refreshed from shared localStorage before dirty checks so other tabs'
 saves cannot make clean values appear dirty. A missing must-sync item still available
-through Lampa's memory/IndexedDB fallback disables uploads instead of sending a deletion.
+through Lampa's memory/IndexedDB fallback is persisted before export. This also handles
+normal cached defaults. Only a failed write disables uploads, preventing false deletions.
 
 `TestStorageScope_matchBundle` checks extracted bundle storage keys against that inventory.
 New unclassified keys, missing/invalid scope data and stale rules fail CI; only a
@@ -476,8 +477,9 @@ and torrent membership need the database. The critical database check probes bot
   remote changes live, including during playback. A normal save costs a poll GET plus a PUT;
   each authenticates against Keycloak, even a 304 (no cache). Dirty fingerprints in
   `svtlv_sync_base` survive reload and network failures; `svtlv_sync_user` identifies their
-  owner. Logout/confirmed expiry clears synced keys with empty strings to mask IndexedDB
-  reserve copies and drops both keys; device settings and cloud data remain. Boot with a
+  owner. Imports persist that owner before writing account values, so partial failures
+  still permit cleanup. Logout/confirmed expiry clears synced keys with empty strings to
+  mask IndexedDB reserve copies and drops both keys; device settings and cloud data remain. Boot with a
   marker waits at most 3 seconds before starting Lampa; no marker sends no user-data request.
 - Optional history/progress values are dropped largest-first when the encoded request would
   exceed 4 MiB. CUB writers, Clear cache and manual backup restore are not coordinated with

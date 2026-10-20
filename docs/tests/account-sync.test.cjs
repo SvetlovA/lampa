@@ -54,11 +54,12 @@ function page(options = {}) {
     }
     clock = end;
   }
-  function check(method, key) {
+  function check(method, key, value) {
     calls.push({method, key});
     trace.push({method, key});
     if (faults[method]) throw new Error(method);
-    if (method === 'setItem' && faults.quota === key) {
+    if (method === 'setItem' && faults.quota === key &&
+      (faults.quotaValue === undefined || faults.quotaValue === String(value))) {
       const error = new Error('quota'); error.name = 'QuotaExceededError'; throw error;
     }
     if (method === 'getItem' && faults.read === key) throw new Error('read');
@@ -67,7 +68,7 @@ function page(options = {}) {
     get length() { check('length'); return Object.keys(items).length; },
     key(index) { check('key'); return Object.keys(items)[index] ?? null; },
     getItem(key) { check('getItem', key); return items[key] ?? null; },
-    setItem(key, value) { check('setItem', key); if (!faults.silent) items[key] = String(value); },
+    setItem(key, value) { check('setItem', key, value); if (!faults.silent) items[key] = String(value); },
     removeItem(key) { check('removeItem', key); if (!faults.silentRemove) delete items[key]; }
   };
   const window = {
@@ -793,6 +794,49 @@ test('a different account replaces previous synced data instead of preserving it
   assert.equal(p.reloads[0][USER], 'Alice'); assert.equal(p.core.dirty('language'), false);
 });
 
+test('partial account imports retain ownership for logout and account replacement cleanup', () => {
+  for (const priorOwner of ['', 'Previous']) for (const failure of [BASE, 'torrserver_password']) {
+    for (const restart of [false, true]) for (const next of [guestState, signedIn('Bob')]) {
+      const p = loginPage({items: {plugins: 'device', ...(priorOwner ? {[USER]: priorOwner} : {})}});
+      p.faults.quota = failure;
+      if (failure === 'torrserver_password') p.faults.quotaValue = 'Alice secret';
+      p.dataRequest.success(documentV2({favorite: '{"book":["Alice private"]}', torrserver_password: 'Alice secret'}));
+      assert.equal(p.core.disabled(), true);
+      assert.equal(p.items.favorite, '{"book":["Alice private"]}');
+      assert.equal(p.items[USER], 'Alice', 'private imported values always have a persisted owner');
+      delete p.faults.quota;
+      const q = restart ? page({items: p.items}) : p;
+      q.state(next);
+      if (restart) {
+        q.requests[0].success(clean(realScope));
+        if (next.status === 'signed_in') q.requests.at(-1).fail(404, missingDocument);
+      }
+      assert.equal(q.items.favorite, ''); assert.equal(q.items.torrserver_password, '');
+      assert.equal(q.items.plugins, 'device');
+      assert.equal(q.reloads.length, 1);
+      const fresh = page({items: q.items, upstreamStorage: true,
+        reserve: {favorite: '{"book":["Alice private"]}', torrserver_password: 'Alice secret'}});
+      assert.equal(fresh.window.Lampa.Storage.get('favorite', ''), '');
+      assert.equal(fresh.window.Lampa.Storage.get('torrserver_password', ''), '');
+      assert.equal(q.requests.filter(r => r.config.type === 'PUT').length, 0);
+    }
+  }
+});
+
+test('an ownership write failure aborts account import before any private value is written', () => {
+  for (const priorOwner of ['', 'Previous']) {
+    const p = loginPage({items: priorOwner ? {[USER]: priorOwner, favorite: 'old private'} : {}});
+    p.faults.quota = USER;
+    p.dataRequest.success(documentV2({favorite: 'new private', torrserver_password: 'new secret'}));
+    assert.equal(p.core.disabled(), true);
+    assert.equal(p.items[USER], undefined);
+    assert.equal(p.items.favorite, ''); assert.equal(p.items.torrserver_password, '');
+    assert.equal(p.calls.some(call => call.method === 'setItem' && call.key === BASE), false,
+      'no imported fingerprints are written without an owner');
+    assert.equal(p.core.accountState().uploads, false);
+  }
+});
+
 test('404 on first login retains guest data, resets base, and enables its upload', () => {
   const p = loginPage({items: {favorite: '{"guest":1}', language: 'ru', [BASE]: '{"language":"2:123"}'}});
   p.dataRequest.fail(404, missingDocument);
@@ -1291,6 +1335,28 @@ test('first login with no document schedules guest data for upload without anoth
   assert.deepEqual(putBody(put).data, {language: 'ru', favorite: '{"guest":1}'});
   assert.equal(put.config.headers['If-Match'], undefined);
   put.success('', 204); assert.equal(p.core.dirty('favorite'), false);
+});
+
+test('normal upstream cached defaults are persisted and synced on first login', () => {
+  for (const initialized of [false, true]) {
+    const p = page({items: {language: 'en'}, upstreamStorage: true});
+    const favorite = p.window.Lampa.Storage.get('favorite', '{}');
+    if (initialized) {
+      favorite.card = []; favorite.book = []; favorite.history = [];
+    }
+    const rawFavorite = JSON.stringify(favorite);
+    assert.equal(p.items.favorite, undefined, 'upstream caches defaults without persisting them');
+    p.state(signedIn('Alice')); p.requests[0].success(clean(realScope));
+    p.requests.at(-1).fail(404, missingDocument);
+    assert.equal(p.core.disabled(), false);
+    assert.equal(p.core.accountState().uploads, true);
+    assert.equal(p.items.favorite, rawFavorite);
+    p.tick(2000); p.requests.at(-1).fail(404, missingDocument);
+    const put = p.requests.at(-1);
+    assert.deepEqual(putBody(put).data, {language: 'en', favorite: rawFavorite});
+    put.success('', 204);
+    assert.equal(p.core.dirty('favorite'), false); assert.deepEqual(p.notices, []);
+  }
 });
 
 test('invalid GET 200 bodies, unexpected 404, and unexpected PUT success do not mark edits clean', () => {
@@ -1908,24 +1974,40 @@ test('upstream quota fallback never uploads a must-sync deletion tombstone', () 
   }
 });
 
-test('a restarted device with a must-sync reserve value cannot upload a false deletion', () => {
+test('a restarted device persists a recovered must-sync reserve value before uploading it', () => {
   const server = sharedDocument({language: 'en', favorite: '{"book":[1]}'});
   const saved = acceptanceDevice(server);
   delete saved.items.favorite;
   const restarted = acceptanceDevice(server, {items: saved.items, hidden: true,
     reserve: {favorite: '{"book":[1,2]}'}});
   assert.deepEqual(clean(restarted.window.Lampa.Storage.get('favorite')), {book: [1, 2]});
-  restarted.tick(600000);
-  assert.equal(restarted.requests.length, 2);
-  assert.deepEqual(server.data(), {language: 'en', favorite: '{"book":[1]}'});
-  assert.ok(restarted.notices.includes('Account sync is unavailable on this device'));
+  assert.equal(restarted.items.favorite, '{"book":[1,2]}');
+  restarted.tick(2000); server.respond(restarted.requests.at(-1));
+  assert.equal(putBody(restarted.requests.at(-1)).data.favorite, '{"book":[1,2]}');
+  server.respond(restarted.requests.at(-1));
+  assert.deepEqual(server.data(), {language: 'en', favorite: '{"book":[1,2]}'});
+  assert.deepEqual(restarted.notices, []);
 });
 
-test('first login detects must-sync reserve values without a local item or saved fingerprint', () => {
+test('first login recovers writable must-sync reserve values without omitting them', () => {
+  for (const key of ['favorite', 'torrserver_password']) {
+    const raw = key === 'favorite' ? '{"book":[1,2]}' : 'private credential';
+    const p = loginPage({items: {language: 'en'}, reserve: {[key]: raw}, upstreamStorage: true});
+    p.dataRequest.fail(404, missingDocument);
+    assert.equal(p.items[key], raw); assert.equal(p.core.disabled(), false);
+    p.tick(2000); p.requests.at(-1).fail(404, missingDocument);
+    assert.deepEqual(putBody(p.requests.at(-1)).data, {language: 'en', [key]: raw});
+    p.requests.at(-1).success('', 204);
+    assert.equal(p.core.dirty(key), false); assert.deepEqual(p.notices, []);
+  }
+});
+
+test('first login disables uploads if must-sync reserve values still cannot be persisted', () => {
   for (const key of ['favorite', 'torrserver_password']) for (const otherLocalData of [false, true]) {
     const reserveValue = key === 'favorite' ? '{"book":[1,2]}' : 'private credential';
     const p = loginPage({items: otherLocalData ? {language: 'en'} : {},
       reserve: {[key]: reserveValue}, upstreamStorage: true});
+    p.faults.quota = key;
     p.dataRequest.fail(404, missingDocument);
     assert.equal(p.items[key], undefined);
     assert.equal(p.core.disabled(), true, 'a must-sync fallback cannot be silently omitted on first upload');
@@ -1935,6 +2017,7 @@ test('first login detects must-sync reserve values without a local item or saved
     assert.equal(p.requests.filter(r => r.config.type === 'PUT').length, 0);
     assert.deepEqual(p.notices, [otherLocalData ? 'Account sync is unavailable on this device' :
       'Синхронизация Аккаунта недоступна на этом устройстве']);
+    delete p.faults.quota;
     p.state(guestState);
     assert.equal(p.items[key], ''); assert.equal(p.items[USER], undefined);
     assert.equal(p.reloads.length, 1, 'first-login persistence failures still permit logout cleanup');

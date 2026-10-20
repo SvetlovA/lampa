@@ -545,6 +545,10 @@ synchronized keys and fingerprints before applying the document, including guest
 keys absent from it. Apply only whitelisted string values; device keys stay local.
 For the same user's marker, preserve dirty keys (§7).
 
+After clearing previous data, persist the incoming user's marker before writing any
+account values. If the marker cannot be written, abort the import. A later value or
+fingerprint write failure leaves the marker available for logout/account cleanup.
+
 Write marker and base before reloading, and reload only if anything was cleared
 or changed. A login needs at most one reload; equal data enables uploads and
 polling immediately. Repeated `signed_in` for the handled user does nothing.
@@ -573,8 +577,10 @@ save, including on a page already hidden. Only one save runs at a time; a
 trigger during that save requests one more pass.
 
 If a missing must-sync localStorage item still has a value in Lampa's memory or
-IndexedDB reserve, disable uploads for the page and notify. Upstream's quota
-fallback removes that item; it must never become a deletion tombstone.
+IndexedDB reserve, persist it before exporting it. Upstream caches normal caller
+defaults there too, so their presence alone does not indicate a storage failure.
+A failed write disables uploads for the page and notifies; a recovered value must
+never become a deletion tombstone.
 
 Before saving, poll the latest document and apply clean remote changes. Overlay
 only dirty local keys, including `''` tombstones for cleared or removed values,

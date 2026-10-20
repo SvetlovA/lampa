@@ -157,7 +157,7 @@ status signed_in(U):
    marker = U and ready      → uploads and polling on
    marker = U, not ready     → GET → apply non-dirty keys → reload if anything changed
    marker ≠ U (other or none) → GET:
-        200 → clear synced keys + base → apply → marker = U
+        200 → clear synced keys + base → marker = U → apply
               → reload if anything was cleared or written
         404 → marker none: keep local (guest data), base = {} → marker = U → save
               marker = W:  clear synced keys + base → marker = U → reload if cleared
@@ -276,8 +276,9 @@ by the next poll. `svtlv_sync_base` is plain `localStorage`, outside `Lampa.Stor
 Its cached copy is refreshed when the shared raw value changes, including another tab's save.
 Document GETs snapshot the shared base and refetch if it advances before apply,
 including while boot waits for the scope file. Boot keeps its original deadline.
-Missing must-sync local items still present in Lampa's memory/IndexedDB fallback disable
-uploads for the page instead of becoming false deletion tombstones after quota failures.
+Missing must-sync local items still present in Lampa's memory/IndexedDB fallback are
+persisted before export, including normal cached defaults. A failed write disables
+uploads for the page instead of sending a false deletion tombstone.
 
 ### Poll, live apply and save
 
@@ -562,6 +563,19 @@ coverage, zero lint issues). Protected upstream frontend files remain unchanged.
 Review verification: all 262 Node tests, pinned ES5 parsing, Compose configuration,
 and backend `make test race lint` with `LAMPA_API_REQUIRE_DOCKER=1` pass (94.1%
 coverage, zero lint issues). Upstream frontend files remain unchanged.
+
+- [x] second-pass review: persist missing must-sync cached values before export;
+  ordinary upstream defaults no longer disable first-login sync, while actual
+  quota failures still block uploads and recovered reserve values never become deletions
+- [x] persist the incoming owner before importing account data; abort if ownership
+  cannot be written and retain it after value/base failures for logout or another login
+- [x] regressions cover upstream Favorite defaults, writable reserve recovery,
+  persistent quota failures, partial imports, ownership write failures, logout,
+  account replacement and restart cleanup
+
+Second-pass verification: all 266 Node tests, pinned ES5 parsing, Compose validation,
+and backend `make test race lint` with `LAMPA_API_REQUIRE_DOCKER=1` pass (94.1%
+coverage, zero lint issues). Protected upstream frontend files remain unchanged.
 
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*

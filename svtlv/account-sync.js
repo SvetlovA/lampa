@@ -364,16 +364,18 @@
 
   function localValue(key) {
     var value = storage('getItem', key);
-    // Upstream removes quota-failed items and retains their value in memory/reserve.
-    // A must-sync value there is a persistence failure, not a user deletion.
+    // Upstream caches both caller defaults and quota-failed values in memory.
+    // Persist a missing must-sync value before exporting it; only an actual
+    // write failure disables sync, and a reserve value never becomes a deletion.
     if (value === null && classify(key) != 'user_optional' && window.Lampa && window.Lampa.Storage) {
       var fallback;
-      try { fallback = window.Lampa.Storage.get(key, ''); }
-      catch (err) { disable(); throw err; }
-      if (fallback !== '' && fallback !== null && fallback !== undefined) {
-        disable();
-        throw new Error('Synced value only exists in storage fallback');
-      }
+      try {
+        fallback = window.Lampa.Storage.get(key, '');
+        if (fallback !== '' && fallback !== null && fallback !== undefined) {
+          value = record(fallback) || Array.isArray(fallback) ? JSON.stringify(fallback) : String(fallback);
+          storage('setItem', key, value);
+        }
+      } catch (err) { disable(); throw err; }
     }
     return value;
   }
@@ -529,7 +531,7 @@
 
   // Clear guest/previous-account data even when the server omits a key. Compare
   // final values so a temporary clear + identical apply does not reload the TV.
-  function replaceDoc(data) {
+  function replaceDoc(data, user) {
     var before = exportLocal();
     var reserve = false;
     Object.keys(scope.entries).forEach(function (key) {
@@ -539,6 +541,9 @@
       }
     });
     clearSynced();
+    // A failed import must retain an owner so logout/account replacement can
+    // clear partial plaintext, including when writing its fingerprints fails.
+    storage('setItem', USER_KEY, user);
     applyDoc(data);
     var after = exportLocal();
     return reserve || Object.keys(before).some(function (key) { return before[key] !== after[key]; }) ||
@@ -601,7 +606,7 @@
           try {
             var changed = false;
             if (ok && xhr.status == 200 && record(data) && data.schema_version === 2 && record(data.data)) {
-              changed = marker == user ? applyDoc(data.data).changed : replaceDoc(data.data);
+              changed = marker == user ? applyDoc(data.data).changed : replaceDoc(data.data, user);
               rememberDoc(data, xhr);
             } else if (xhr.status == 404 && errorCode(xhr) == 'user_data_not_found') {
               if (marker && marker != user) changed = clearSynced();
@@ -711,7 +716,7 @@
     localKeys().forEach(function (key) { keys[key] = true; });
     Object.keys(readBase()).forEach(function (key) { if (synced(key)) keys[key] = true; });
     // First-login reserve values have neither a local item nor a fingerprint.
-    // Inspect exact must-sync rules so localValue can detect persistence failures.
+    // Inspect exact must-sync rules so localValue can persist them or detect failure.
     Object.keys(scope.entries).forEach(function (key) {
       if (synced(key) && classify(key) != 'user_optional') keys[key] = true;
     });
