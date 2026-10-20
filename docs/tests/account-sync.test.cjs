@@ -18,6 +18,7 @@ function upstreamStorageMethod(method) {
 const realScope = JSON.parse(fs.readFileSync(path.join(__dirname, '../../svtlv/storage-scope.json'), 'utf8'));
 const BASE = 'svtlv_sync_base', USER = 'svtlv_sync_user';
 const REVISION = 'svtlv_sync_revision';
+const SCOPE = 'svtlv_sync_scope';
 const LIMIT = 4 * 1024 * 1024;
 const clean = value => JSON.parse(JSON.stringify(value));
 // Inspect private core functions without adding a production debug/public API.
@@ -146,6 +147,11 @@ function page(options = {}) {
     storageWrites, refreshes, memory,
     change(key, value) {
       if (value === null) delete items[key]; else items[key] = String(value);
+      // A local Storage change comes from a writer that updates/invalidates its
+      // own cache too; raw sibling writes are modeled through sharedItems instead.
+      if (options.upstreamStorage) {
+        if (value === null) delete memory[key]; else memory[key] = value;
+      }
       for (const fn of storageListeners.change || []) fn({name: key, value});
     },
     visibility(hidden) {
@@ -881,6 +887,31 @@ test('successful pre-boot data enables same-account uploads without a second req
   assert.equal(p.core.accountState().uploads, true);
 });
 
+test('boot-to-session sibling saves refresh upstream caches before the first local edit', () => {
+  const server = sharedDocument({favorite: '{"book":[1]}', file_view: '{"movie":0.1}'});
+  const sharedItems = {[USER]: 'Alice'};
+  const p = page({preboot: true, sharedItems, upstreamStorage: true, uninspected: true});
+  p.window.svtlv_sync_boot(() => p.install());
+  p.requests[0].success(clean(realScope)); server.respond(p.requests[1]);
+  p.tick(100);
+  p.window.Lampa.Storage.get('favorite'); p.window.Lampa.Storage.get('file_view');
+  const sibling = acceptanceDevice(server, {sharedItems});
+  sibling.window.Lampa.Storage.set('favorite', {book: [1, 2]});
+  sibling.window.Lampa.Storage.set('file_view', {movie: 0.5});
+  sibling.tick(2000); server.respond(sibling.requests.at(-1)); server.respond(sibling.requests.at(-1));
+  for (const key of ['favorite', 'file_view']) p.storageEvent({key, newValue: sharedItems[key]});
+  assert.deepEqual(clean(p.window.Lampa.Storage.get('favorite')), {book: [1]}, 'session is still pending');
+  p.state(signedIn('Alice'));
+  const favorite = p.window.Lampa.Storage.get('favorite');
+  assert.deepEqual(clean(favorite), {book: [1, 2]});
+  assert.deepEqual(clean(p.window.Lampa.Storage.get('file_view')), {movie: 0.5});
+  assert.ok(p.refreshes.includes('favorite')); assert.ok(p.refreshes.includes('timeline'));
+  favorite.book.push(3); p.window.Lampa.Storage.set('favorite', favorite);
+  p.tick(2000); server.respond(p.requests.at(-1)); server.respond(p.requests.at(-1));
+  assert.deepEqual(JSON.parse(server.data().favorite), {book: [1, 2, 3]});
+  assert.equal(p.reloads.length, 0);
+});
+
 test('boot discards another account response even when its shared baseline is identical', () => {
   for (const scopeFirst of [false, true]) for (const status of [200, 401, 409, 404]) {
     const p = bootPage({language: 'en', favorite: ''});
@@ -896,7 +927,8 @@ test('boot discards another account response even when its shared baseline is id
     if (scopeFirst) reply();
     else q.scopeRequest.success(clean(realScope));
     assert.equal(q.starts(), 1);
-    assert.deepEqual({...q.items}, bobItems, 'an obsolete success or auth failure cannot change Bob data');
+    assert.deepEqual({...q.items, [SCOPE]: undefined}, {...bobItems, [SCOPE]: undefined},
+      'an obsolete success or auth failure cannot change Bob data');
     assert.equal(q.core.bootState().ready, false);
     q.window.svtlv_account_state = signedIn('Bob'); q.install(); q.tick(100);
     assert.equal(q.requests.length, 3, 'Bob must fetch his own document before enabling uploads');
@@ -967,6 +999,91 @@ test('confirmed guest at startup clears marked data after loading scope without 
   p.requests[0].success(clean(realScope));
   assert.equal(p.requests.length, 1); assert.equal(p.items.favorite, ''); assert.equal(p.items[USER], undefined);
   assert.equal(p.reloads.length, 1);
+});
+
+test('confirmed logout and account replacement use the retained cleanup policy after scope failure', () => {
+  const policy = clean(realScope);
+  policy.scopes.user.push('private_*');
+  for (const invalid of [false, true]) for (const next of [guestState, signedIn('Bob')]) {
+    const saved = page({items: {[USER]: 'Alice', favorite: 'private', torrserver_password: 'secret',
+      private_unsaved: 'unsaved', player: 'native', plugins: 'code', file_view_123: 'cub'}});
+    saved.load(policy); saved.syncedBase({favorite: 'private', torrserver_password: 'secret'});
+    assert.deepEqual(JSON.parse(saved.items[SCOPE]), {version: 1, scopes: policy.scopes});
+    const p = page({items: saved.items, state: next});
+    assert.equal(p.requests.length, 1);
+    if (invalid) p.requests[0].success({}); else p.requests[0].fail(503);
+    for (const key of ['favorite', 'torrserver_password', 'private_unsaved', 'file_view']) {
+      assert.equal(p.items[key], '', key + ' is cleared or masks reserve');
+    }
+    assert.equal(p.items[USER], undefined); assert.equal(p.items[BASE], undefined);
+    assert.equal(p.items.player, 'native'); assert.equal(p.items.plugins, 'code');
+    assert.equal(p.items.file_view_123, 'cub'); assert.equal(p.reloads.length, 1);
+    p.tick(600000); assert.equal(p.requests.length, 1, 'a cached policy never enables data requests');
+  }
+});
+
+test('boot identity failures clear owned data even when scope validation or fetching fails', () => {
+  for (const invalid of [false, true]) for (const status of [401, 409]) for (const scopeFirst of [false, true]) {
+    const saved = page({items: {[USER]: 'Alice', favorite: 'private', torrserver_password: 'secret', player: 'native'}});
+    saved.load(); saved.syncedBase({favorite: 'private', torrserver_password: 'secret'});
+    const p = bootPage(saved.items);
+    const failScope = () => invalid ? p.scopeRequest.success({}) : p.scopeRequest.fail(503);
+    if (scopeFirst) failScope();
+    p.dataRequest.fail(status);
+    if (!scopeFirst) failScope();
+    assert.equal(p.starts(), 1);
+    assert.equal(p.items.favorite, ''); assert.equal(p.items.torrserver_password, '');
+    assert.equal(p.items.file_view, ''); assert.equal(p.items.player, 'native');
+    assert.equal(p.items[USER], undefined); assert.equal(p.items[BASE], undefined);
+    assert.equal(p.core.bootState().ready, false);
+  }
+});
+
+test('cleanup without a cached scope still clears the legacy owned fingerprint inventory', () => {
+  const saved = page({items: {[USER]: 'Alice', favorite: 'private', torrserver_password: 'secret', plugins: 'code'}});
+  saved.syncedBase({favorite: 'private', torrserver_password: 'secret'});
+  const p = page({items: saved.items, state: guestState});
+  p.requests[0].success({});
+  assert.equal(p.items.favorite, ''); assert.equal(p.items.torrserver_password, '');
+  assert.equal(p.items.plugins, 'code'); assert.equal(p.items[USER], undefined);
+  assert.equal(p.reloads.length, 1);
+});
+
+test('cached cleanup policy does not apply data or clear an unconfirmed account during an outage', () => {
+  for (const invalid of [false, true]) {
+    const saved = page({items: {[USER]: 'Alice', favorite: 'private'}});
+    saved.load(); saved.syncedBase({favorite: 'private'});
+    const p = bootPage(saved.items);
+    if (invalid) p.scopeRequest.success({}); else p.scopeRequest.fail(503);
+    p.dataRequest.success(documentV2({favorite: 'remote'}));
+    p.install(); p.tick(100); p.state({status: 'unavailable'});
+    assert.equal(p.items.favorite, 'private'); assert.equal(p.items[USER], 'Alice');
+    assert.equal(p.reloads.length, 0); assert.equal(p.core.accountState().uploads, false);
+    assert.equal(p.core.bootState().ready, false);
+  }
+});
+
+test('failed cleanup-policy persistence prevents importing new account data', () => {
+  const p = page({items: {favorite: 'guest'}});
+  p.state(signedIn('Alice')); p.faults.quota = SCOPE;
+  p.requests[0].success(clean(realScope));
+  assert.equal(p.core.disabled(), true); assert.equal(p.core.accountState().uploads, false);
+  assert.equal(p.requests.length, 1); assert.equal(p.items.favorite, 'guest');
+  assert.equal(p.items[USER], undefined);
+});
+
+test('scope failure cannot let a delayed boot identity failure clear another account', () => {
+  for (const invalid of [false, true]) {
+    const saved = page({items: {[USER]: 'Alice', favorite: 'private'}});
+    saved.load(); saved.syncedBase({favorite: 'private'});
+    const p = bootPage(saved.items);
+    if (invalid) p.scopeRequest.success({}); else p.scopeRequest.fail(503);
+    p.items[USER] = 'Bob'; p.items.favorite = 'Bob private';
+    const before = {...p.items};
+    p.dataRequest.fail(401);
+    assert.deepEqual({...p.items}, before);
+    assert.equal(p.starts(), 1);
+  }
 });
 
 test('anonymous startup and checking/unavailable states preserve local data and make no requests', () => {
@@ -1740,6 +1857,9 @@ function acceptanceDevice(server, options = {}, scope = realScope) {
   assert.equal(starts, 1);
   assert.equal(p.reloads.length, 0);
   assert.equal(p.requests.length, 2, 'successful boot needs no post-boot document fetch');
+  // Measure later polling/storage events independently of startup cache refresh.
+  p.storageWrites.length = 0;
+  p.refreshes.length = 0;
   return p;
 }
 
@@ -1815,14 +1935,14 @@ test('a delayed PUT acknowledgement rejects a baseline that returned to its orig
   const server = sharedDocument({favorite: original});
   const sharedItems = {[USER]: 'Alice'};
   const a = acceptanceDevice(server, {sharedItems}), b = acceptanceDevice(server, {sharedItems});
-  a.change('favorite', '{"book":["original","removed"]}'); a.tick(2000);
+  a.window.Lampa.Storage.set('favorite', {book: ['original', 'removed']}); a.tick(2000);
   server.respond(a.requests.at(-1));
   const put = a.requests.at(-1), success = put.config.success, sentBase = sharedItems[BASE];
   let acknowledge;
   put.config.success = (...args) => { acknowledge = () => success(...args); };
   server.respond(put);
   for (const favorite of ['{"book":["original","temporary"]}', original]) {
-    b.change('favorite', favorite); b.tick(2000);
+    b.window.Lampa.Storage.set('favorite', favorite); b.tick(2000);
     server.respond(b.requests.at(-1)); server.respond(b.requests.at(-1));
   }
   assert.equal(sharedItems[BASE], sentBase);

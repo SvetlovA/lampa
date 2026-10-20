@@ -13,6 +13,7 @@
   var BASE_KEY = 'svtlv_sync_base';
   var REVISION_KEY = 'svtlv_sync_revision';
   var USER_KEY = 'svtlv_sync_user';
+  var SCOPE_KEY = 'svtlv_sync_scope';
   var MAX_BYTES = 4 * 1024 * 1024;
   var KEY_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
   var SCOPE_NAMES = ['user', 'user_connection', 'user_optional', 'device', 'connection', 'external', 'cache'];
@@ -156,6 +157,9 @@
     request('GET', '/api/v1/user-data', options, function (ok, data, xhr) {
       if (answered || !active()) return;
       answered = true;
+      // Scope validation can disable synchronization while this boot request is
+      // pending. Preserve identity failures for cleanup without applying data.
+      if (disabled) { done(false, null, xhr, snapshot); return; }
       try {
         if (owner !== storage('getItem', USER_KEY)) {
           done(false, null, {status: 0});
@@ -197,8 +201,16 @@
       if (active && !active()) return;
       if (disabled) { done(false); return; }
       if (!ok) { done(false); return; }
-      try { scope = validateScope(data); }
-      catch (err) { disabled = true; notify('save'); done(false); return; }
+      try {
+        scope = validateScope(data);
+        // Cleanup must survive an unavailable/invalid policy on a later boot.
+        // This cached policy is never used to authorize imports or uploads.
+        storage('setItem', SCOPE_KEY, JSON.stringify({version: 1, scopes: data.scopes}));
+      } catch (err) {
+        if (!disabled) { disabled = true; notify('save'); }
+        done(false);
+        return;
+      }
       done(true);
     });
   }
@@ -247,16 +259,27 @@
     function settle() {
       if (finished || !scopeDone || !dataDone) return;
       try {
-        // The owner may have changed after the response while scope was loading.
-        if (marker !== storage('getItem', USER_KEY)) { finish(); return; }
-        if (!scopeOK) {
-          if (!failure) notify('save');
-        } else if (result.snapshot !== baseSnapshot()) {
+        // Cleanup may be needed after invalid scope disabled ordinary storage
+        // access. Read only its ownership guards with cleanup access enabled.
+        var wasClearing = clearing;
+        var snapshot;
+        clearing = true;
+        try {
+          if (marker !== storage('getItem', USER_KEY)) { finish(); return; }
+          snapshot = baseSnapshot();
+        } finally { clearing = wasClearing; }
+        if (!disabled && result.snapshot !== snapshot) {
           // The document may have arrived before the scope, then become stale.
           loadData();
           return;
-        } else if (result.xhr.status == 401 || result.xhr.status == 409) {
-          clearSynced();
+        }
+        if (result.xhr.status == 401 || result.xhr.status == 409) {
+          clearOwned('', marker, result.snapshot);
+          finish();
+          return;
+        }
+        if (!scopeOK) {
+          if (!failure) notify('save');
         } else if (result.ok && result.xhr.status == 200 && record(result.data) &&
           result.data.schema_version === 2 && record(result.data.data)) {
           applyDoc(result.data.data);
@@ -305,24 +328,25 @@
     }
   };
 
-  function classify(key) {
-    if (!scope || typeof key != 'string') return '';
-    if (own(scope.entries, key)) return scope.entries[key];
+  function classify(key, policy) {
+    policy = policy || scope;
+    if (!policy || typeof key != 'string') return '';
+    if (own(policy.entries, key)) return policy.entries[key];
     var found = '', length = -1;
-    Object.keys(scope.entries).forEach(function (entry) {
+    Object.keys(policy.entries).forEach(function (entry) {
       if (entry.charAt(entry.length - 1) != '*') return;
       var prefix = entry.slice(0, -1);
       if (prefix.length > length && key.indexOf(prefix) === 0) {
-        found = scope.entries[entry];
+        found = policy.entries[entry];
         length = prefix.length;
       }
     });
     return found;
   }
 
-  function synced(key) {
+  function synced(key, policy) {
     if (typeof key != 'string' || !KEY_PATTERN.test(key)) return false;
-    var name = classify(key);
+    var name = classify(key, policy);
     return name == 'user' || name == 'user_connection' || name == 'user_optional';
   }
 
@@ -399,12 +423,12 @@
     return fp(localValue(key)) !== (own(previous, key) ? previous[key] : null);
   }
 
-  function localKeys() {
+  function localKeys(policy) {
     var keys = [];
     var length = storage('length');
     for (var i = 0; i < length; i++) {
       var key = storage('key', i);
-      if (synced(key)) keys.push(key);
+      if (synced(key, policy)) keys.push(key);
     }
     return keys;
   }
@@ -526,13 +550,20 @@
     try {
       var keys = Object.create(null);
       var changed = false;
-      localKeys().forEach(function (key) { keys[key] = true; });
+      var policy = scope;
+      if (!policy) {
+        try { policy = validateScope(JSON.parse(storage('getItem', SCOPE_KEY))); }
+        catch (err) { /* Legacy ownership can still be cleared from its fingerprints. */ }
+      }
+      localKeys(policy).forEach(function (key) { keys[key] = true; });
       var previous = {};
       try { previous = readBase(); }
       catch (err) { /* A corrupt base cannot prevent clearing known account keys. */ }
-      Object.keys(previous).forEach(function (key) { if (synced(key)) keys[key] = true; });
+      Object.keys(previous).forEach(function (key) {
+        if (policy ? synced(key, policy) : KEY_PATTERN.test(key) && key.indexOf('svtlv_sync_') !== 0) keys[key] = true;
+      });
       // Exact rules also mask reserve-only copies with an empty local item.
-      Object.keys(scope.entries).forEach(function (key) { if (synced(key)) keys[key] = true; });
+      if (policy) Object.keys(policy.entries).forEach(function (key) { if (synced(key, policy)) keys[key] = true; });
       Object.keys(keys).forEach(function (key) {
         if (storage('getItem', key) !== '') {
           storage('setItem', key, '');
@@ -547,6 +578,18 @@
       base = Object.create(null);
       baseRaw = null;
       return changed;
+    } finally { clearing = wasClearing; }
+  }
+
+  function clearOwned(user, expected, snapshot) {
+    var wasClearing = clearing;
+    clearing = true;
+    try {
+      var marker = storage('getItem', USER_KEY);
+      if (!marker || marker === user || (expected !== undefined && marker !== expected)) return false;
+      if (snapshot !== undefined && snapshot !== baseSnapshot()) return false;
+      clearSynced();
+      return true;
     } finally { clearing = wasClearing; }
   }
 
@@ -586,15 +629,9 @@
     var user = state.status == 'signed_in' ? state.user_id : '';
     if (state.status == 'signed_in' && (typeof user != 'string' || !user)) return;
     if (disabled) {
-      clearing = true;
       try {
-        var marker = storage('getItem', USER_KEY);
-        if (scope && marker && marker !== user) {
-          clearSynced();
-          if (!window.svtlv_account_leaving) reloadPage();
-        }
+        if (clearOwned(user) && !window.svtlv_account_leaving) reloadPage();
       } catch (err) { /* A storage failure cannot escape the account listener. */ }
-      finally { clearing = false; }
       return;
     }
     if (user && (user == handledUser || user == accountUser)) return;
@@ -628,6 +665,7 @@
         }
         if (marker == user && ready && readyUser == user) {
           handledUser = user;
+          refreshLocal();
           enableUploads();
           return;
         }
@@ -682,9 +720,13 @@
       }
       if (scope) complete();
       else loadScope(function (ok) {
-        if (!active()) return;
+        if (reloading || revision != accountRevision) return;
         if (ok) complete();
-        else failed();
+        else {
+          try { if (clearOwned(user) && !window.svtlv_account_leaving) reloadPage(); }
+          catch (err) { /* A cleanup failure cannot escape the scope callback. */ }
+          failed();
+        }
       }, active);
     } catch (err) { failed(); }
   }
@@ -909,6 +951,7 @@
                 // Another tab may have saved after this PUT committed, before its
                 // acknowledgement arrived. Preserve its base and fetch current data.
                 lastEtag = '';
+                refreshLocal();
                 finish(true);
                 poll(function (ok) { if (ok) scheduleSave(); });
                 return;

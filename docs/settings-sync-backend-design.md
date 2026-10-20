@@ -553,6 +553,8 @@ Write marker and base before reloading, and reload only if anything was cleared
 or changed. A login needs at most one reload; equal data refreshes this tab's
 Storage and Favorite/Timeline caches from the final local values before enabling
 uploads and polling, including dirty values and cleared or omitted keys.
+The successful pre-boot shortcut also refreshes caches when the session confirms
+sign-in: a sibling tab may have saved between boot apply and that confirmation.
 Repeated `signed_in` for the handled user does nothing.
 Another tab's change to `svtlv_sync_user` reloads this page.
 
@@ -654,6 +656,8 @@ baseline cannot repeat an old request's snapshot after account cleanup.
 PUT acknowledgements also check the shared owner, base and revision before recording sent
 fingerprints. A changed owner reloads the page; an advanced base is preserved and
 reconciled with a fresh GET, including any local edits queued during the save.
+That reconciliation first refreshes this tab's caches from shared storage, even
+when the current document matches its earlier copy after intervening sibling saves.
 
 Server apply skips dirty keys and updates the base for values it applies.
 Successful PUT records fingerprints of the values actually sent, so another
@@ -911,6 +915,9 @@ its seven scopes and optional `encrypt` list. It classifies exact keys before
 the longest matching prefix, exports only allowed raw strings, and uses the same
 classification for import. It keeps persistent fingerprints, applies at boot
 and live through public APIs, polls with ETags and saves dirty keys with `If-Match`.
+Before importing values, it retains the validated scopes in `svtlv_sync_scope`
+for cleanup only. A missing or invalid current scope still blocks synchronization;
+the cached copy cannot authorize imports, uploads or document requests.
 
 To sync a key, add it to `user` (must-sync) or `user_optional` (best-effort) in
 `storage-scope.json`; to encrypt it, also add it to `encrypt`. Prefix rules are
@@ -1488,6 +1495,12 @@ An unavailable session check alone never clears data.
 Disabling synchronization after a storage failure does not disable this cleanup:
 confirmed guest state or a different account still clears the previous owner's
 data and reloads when storage is accessible, without re-enabling API requests.
+If the current scope fetch fails or is invalid, cleanup uses the last validated
+scopes retained in `svtlv_sync_scope`, including exact rules that mask reserve-only
+values. This policy contains no user values and stays local across logout. A legacy
+device without that cache can still clear keys recorded in its valid fingerprints.
+Boot identity failures retain the owner and baseline guards before clearing, so a
+delayed response cannot clear another account's data.
 
 TorrServer account hashes never move into guest storage. Logout restores the
 pre-existing device-local guest membership list (§10.4), independently of the

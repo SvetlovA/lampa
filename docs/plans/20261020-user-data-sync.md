@@ -589,6 +589,20 @@ Verification: all 274 Node tests, ES5 parsing, Compose validation and backend
 `make test race lint` with `LAMPA_API_REQUIRE_DOCKER=1` pass (94.1% coverage,
 zero lint issues). Protected upstream frontend files remain unchanged.
 
+- [x] boot/session review: refresh Storage and Favorite/Timeline caches before
+  enabling uploads after successful boot and when reconciling a superseded PUT;
+  sibling saves cannot leave obsolete cached bookmarks behind
+- [x] preserve validated scopes locally for cleanup only; confirmed guest/account
+  replacement and boot identity failures clear owned values even if the current
+  scope cannot load, while owner/baseline guards still reject delayed responses
+- [x] regressions cover the boot-to-session gap, invalid/unavailable scopes,
+  reserve masking, unsaved prefix keys, legacy fingerprints, failed policy writes,
+  account changes during boot and preservation of data during unconfirmed outages
+
+Verification: all 281 Node tests, ES5 parsing, Compose validation and backend
+`make test race lint` with `LAMPA_API_REQUIRE_DOCKER=1` pass (94.1% coverage,
+zero lint issues). Protected upstream frontend files remain unchanged.
+
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*
 

@@ -480,9 +480,12 @@ and torrent membership need the database. The critical database check probes bot
   owner. A local `svtlv_sync_revision` changes on each baseline write or clear to reject
   delayed responses even when fingerprint contents repeat. Imports persist the owner
   before writing account values, so partial failures still permit cleanup. Equal-data
-  login refreshes this tab's caches before enabling uploads. Logout/confirmed expiry
+  login and the successful pre-boot shortcut refresh this tab's caches before enabling
+  uploads. Logout/confirmed expiry
   clears synced keys with empty strings to mask IndexedDB reserve copies and drops
-  the owner and fingerprints, retaining a fresh local revision. Device settings and
+  the owner and fingerprints, retaining a fresh local revision. The last validated
+  scopes in `svtlv_sync_scope` allow cleanup after a scope fetch failure; this cached
+  policy never authorizes synchronization. Device settings and
   cloud data remain. Boot with a marker waits at most 3 seconds before starting Lampa;
   no marker sends no user-data request.
 - Optional history/progress values are dropped largest-first when the encoded request would
