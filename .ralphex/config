@@ -20,7 +20,7 @@ claude_command = agrouter
 # --dangerously-skip-permissions: bypass permission prompts for autonomous execution
 # --output-format stream-json: output JSON events for progress tracking
 # --verbose: enable detailed logging
-claude_args = exec claude --doc=AGENTS.md --doc=backend/README.md --doc=docs/settings-sync-backend-design.md -- --dangerously-skip-permissions --output-format stream-json --verbose
+claude_args = exec claude --doc=AGENTS.md --doc=backend/README.md --doc=README.md --doc=docs/settings-sync-backend-design.md -- --dangerously-skip-permissions --output-format stream-json --verbose
 
 # plan_model: model to use for interactive plan creation
 # syntax: model[:effort] where model is fable/opus/sonnet/haiku (or a full model ID like

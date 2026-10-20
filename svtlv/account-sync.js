@@ -23,6 +23,7 @@
   var pendingNotice = false;
   var bootCalled = false;
   var ready = false;
+  var readyUser = '';
   var lastDoc = {};
   var lastEtag = '';
   var unreadableKeys = [];
@@ -137,17 +138,24 @@
     }
   }
 
-  // A sibling can commit while a GET is in flight. Its newer shared baseline
-  // must never make an older response look safe to apply or use for a save.
+  // A sibling can save or switch accounts while a GET is in flight. Check the
+  // owner before retrying an advanced baseline so old-account data stays isolated.
   function requestDocument(options, active, done) {
-    var snapshot;
-    try { snapshot = storage('getItem', BASE_KEY); }
+    var snapshot, owner;
+    try {
+      snapshot = storage('getItem', BASE_KEY);
+      owner = storage('getItem', USER_KEY);
+    }
     catch (err) { done(false, null, {status: 0}); return; }
     var answered = false;
     request('GET', '/api/v1/user-data', options, function (ok, data, xhr) {
       if (answered || !active()) return;
       answered = true;
       try {
+        if (owner !== storage('getItem', USER_KEY)) {
+          done(false, null, {status: 0});
+          return;
+        }
         if (snapshot !== storage('getItem', BASE_KEY)) {
           requestDocument(options, active, done);
           return;
@@ -234,6 +242,8 @@
     function settle() {
       if (finished || !scopeDone || !dataDone) return;
       try {
+        // The owner may have changed after the response while scope was loading.
+        if (marker !== storage('getItem', USER_KEY)) { finish(); return; }
         if (!scopeOK) {
           if (!failure) notify('save');
         } else if (result.snapshot !== storage('getItem', BASE_KEY)) {
@@ -247,11 +257,13 @@
           applyDoc(result.data.data);
           rememberDoc(result.data, result.xhr);
           ready = true;
+          readyUser = marker;
         } else if (result.xhr.status == 404 && errorCode(result.xhr) == 'user_data_not_found') {
           lastDoc = {};
           lastEtag = '';
           unreadableKeys = [];
           ready = true;
+          readyUser = marker;
         } else {
           notify('save');
         }
@@ -548,6 +560,7 @@
         var marker = storage('getItem', USER_KEY);
         if (!user) {
           ready = false;
+          readyUser = '';
           lastDoc = {};
           lastEtag = '';
           unreadableKeys = [];
@@ -557,7 +570,7 @@
           }
           return;
         }
-        if (marker == user && ready) {
+        if (marker == user && ready && readyUser == user) {
           handledUser = user;
           enableUploads();
           return;
@@ -589,6 +602,7 @@
             // Persist ownership before reload, including an empty document.
             storage('setItem', USER_KEY, user);
             ready = true;
+            readyUser = user;
             handledUser = user;
             if (changed) reloadPage();
             else enableUploads();
@@ -601,6 +615,7 @@
       // Anonymous pages neither load the scope nor request user data.
       if (!user && !storage('getItem', USER_KEY)) {
         ready = false;
+        readyUser = '';
         lastDoc = {};
         lastEtag = '';
         unreadableKeys = [];
@@ -674,6 +689,11 @@
     var keys = Object.create(null);
     localKeys().forEach(function (key) { keys[key] = true; });
     Object.keys(readBase()).forEach(function (key) { if (synced(key)) keys[key] = true; });
+    // First-login reserve values have neither a local item nor a fingerprint.
+    // Inspect exact must-sync rules so localValue can detect persistence failures.
+    Object.keys(scope.entries).forEach(function (key) {
+      if (synced(key) && classify(key) != 'user_optional') keys[key] = true;
+    });
     return Object.keys(keys).filter(dirty);
   }
 
@@ -708,6 +728,7 @@
     if (xhr.status == 401 || xhr.status == 409) {
       uploads = false;
       ready = false;
+      readyUser = '';
       accountUser = '';
       handledUser = '';
       ++accountRevision;

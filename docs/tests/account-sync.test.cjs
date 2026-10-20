@@ -836,6 +836,60 @@ test('successful pre-boot data enables same-account uploads without a second req
   assert.equal(p.core.accountState().uploads, true);
 });
 
+test('boot discards another account response even when its shared baseline is identical', () => {
+  for (const scopeFirst of [false, true]) for (const status of [200, 401, 409, 404]) {
+    const p = bootPage({language: 'en', favorite: ''});
+    p.syncedBase({language: 'en'});
+    // Start a fresh request so its baseline matches both accounts throughout the switch.
+    const q = bootPage({...p.items});
+    const reply = () => status === 200 ? q.dataRequest.success(documentV2({language: 'en', favorite: 'Alice private'})) :
+      q.dataRequest.fail(status, status === 404 ? missingDocument : undefined);
+    if (scopeFirst) q.scopeRequest.success(clean(realScope));
+    else reply();
+    q.items[USER] = 'Bob';
+    const bobItems = {...q.items};
+    if (scopeFirst) reply();
+    else q.scopeRequest.success(clean(realScope));
+    assert.equal(q.starts(), 1);
+    assert.deepEqual({...q.items}, bobItems, 'an obsolete success or auth failure cannot change Bob data');
+    assert.equal(q.core.bootState().ready, false);
+    q.window.svtlv_account_state = signedIn('Bob'); q.install(); q.tick(100);
+    assert.equal(q.requests.length, 3, 'Bob must fetch his own document before enabling uploads');
+    assert.equal(q.requests.at(-1).config.headers['X-Lampa-Expected-User'], 'Bob');
+    assert.equal(q.core.accountState().uploads, false);
+    q.requests.at(-1).success(documentV2({language: 'en', favorite: ''}));
+    assert.equal(q.core.accountState().uploads, true);
+    assert.equal(q.items.favorite, ''); assert.equal(q.items[USER], 'Bob');
+  }
+});
+
+test('boot readiness belongs to the fetched account before account listeners attach', () => {
+  const p = bootPage({language: 'en'});
+  p.scopeRequest.success(clean(realScope));
+  p.dataRequest.success(documentV2({language: 'en', favorite: 'Alice private'}));
+  assert.equal(p.core.bootState().ready, true);
+  p.items[USER] = 'Bob'; p.items.favorite = ''; p.syncedBase({language: 'en'});
+  p.window.svtlv_account_state = signedIn('Bob'); p.install(); p.tick(100);
+  assert.equal(p.requests.length, 3, 'Alice readiness cannot stand in for Bob document');
+  assert.equal(p.requests.at(-1).config.headers['X-Lampa-Expected-User'], 'Bob');
+  assert.equal(p.core.accountState().uploads, false);
+  p.requests.at(-1).success(documentV2({language: 'en', favorite: ''}));
+  assert.equal(p.core.accountState().uploads, true);
+  assert.equal(p.items.favorite, ''); assert.deepEqual(clean(p.core.bootState().lastDoc), {language: 'en', favorite: ''});
+});
+
+test('account recovery rejects a response after the shared owner changes before its storage event', () => {
+  const p = loginPage({items: {[USER]: 'Alice', language: 'en', [BASE]: '{}'}});
+  p.items[USER] = 'Bob'; p.items.favorite = '';
+  const bobItems = {...p.items};
+  p.dataRequest.success(documentV2({language: 'en', favorite: 'Alice private'}));
+  assert.deepEqual({...p.items}, bobItems);
+  assert.equal(p.core.accountState().uploads, false);
+  p.storageEvent({key: USER, oldValue: 'Alice', newValue: 'Bob'});
+  assert.equal(p.reloads.length, 1);
+  assert.equal(p.requests.filter(r => r.config.type === 'PUT').length, 0);
+});
+
 test('404 recovery for the same account preserves its local data and dirty base', () => {
   const p = page({items: {[USER]: 'Alice', language: 'ru'}});
   p.syncedBase({language: 'en'}); const before = p.items[BASE];
@@ -1820,6 +1874,22 @@ test('a restarted device with a must-sync reserve value cannot upload a false de
   assert.equal(restarted.requests.length, 2);
   assert.deepEqual(server.data(), {language: 'en', favorite: '{"book":[1]}'});
   assert.ok(restarted.notices.includes('Account sync is unavailable on this device'));
+});
+
+test('first login detects must-sync reserve values without a local item or saved fingerprint', () => {
+  for (const key of ['favorite', 'torrserver_password']) for (const otherLocalData of [false, true]) {
+    const reserveValue = key === 'favorite' ? '{"book":[1,2]}' : 'private credential';
+    const p = loginPage({items: otherLocalData ? {language: 'en'} : {},
+      reserve: {[key]: reserveValue}, upstreamStorage: true});
+    p.dataRequest.fail(404, missingDocument);
+    assert.equal(p.items[key], undefined);
+    assert.equal(p.core.disabled(), true, 'a must-sync fallback cannot be silently omitted on first upload');
+    assert.equal(p.core.accountState().uploads, false);
+    assert.deepEqual(clean(p.window.Lampa.Storage.get(key)), key === 'favorite' ? {book: [1, 2]} : reserveValue);
+    p.tick(600000); p.visibility(true);
+    assert.equal(p.requests.filter(r => r.config.type === 'PUT').length, 0);
+    assert.deepEqual(p.notices, ['Account sync is unavailable on this device']);
+  }
 });
 
 test('an incomplete device refreshes after same-ETag repair without deleting the repaired credential', () => {

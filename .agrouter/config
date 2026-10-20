@@ -49,7 +49,8 @@ unknown = allow
 transport     = jsonrpc-ratelimits-v1
 args          = ["app-server"]
 min_version   = 0.162.1
-error_prefix  = "agrouter: "
+# Ralphex's Codex executor matches limit patterns only on ERROR:/FATAL:/PANIC: stderr lines
+error_prefix  = "ERROR: agrouter: "
 error_message = You've hit your usage limit
 
 [model.claude-fable-5-1]
