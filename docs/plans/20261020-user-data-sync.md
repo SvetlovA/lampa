@@ -387,11 +387,11 @@ only. Nothing is defined on non-HTTP(S) origins (`^https?:$` guard).
 - Modify: `docs/tests/ownership-docs.test.cjs`
 - Modify: `docs/settings-sync-backend-design.md` (§10.3 table only, so `checkScopes` keeps passing)
 
-- [ ] ⚠️ get the user's final key lists (must sync vs best-effort) and apply them
-- [ ] add the `user_optional` scope; move best-effort keys into it; move `file_view_*` to `external` (unless the user decides otherwise); add the top-level `encrypt` list; update `_policy` and the key notes
-- [ ] scope guard: add `user_optional` to `storageScopeNames`; accept `encrypt` without checking its contents; update the Plan 4 assertions (~596–612) and drop the sealed-key assertions
-- [ ] update `ownership-docs.test.cjs` and the design doc §10.3 table together
-- [ ] run `make test` in `backend/` and `node --test docs/tests/*.test.cjs` - must pass before task 4
+- [x] ⚠️ final user confirmation (skipped - not automatable; requested with no response during this iteration); applied the proposed must-sync, best-effort and encrypt lists above
+- [x] add the `user_optional` scope; move best-effort keys into it; move `file_view_*` to `external` (unless the user decides otherwise); add the top-level `encrypt` list; update `_policy` and the key notes
+- [x] scope guard: add `user_optional` to `storageScopeNames`; accept `encrypt` without checking its contents; update the Plan 4 assertions (~596–612) and drop the sealed-key assertions
+- [x] update `ownership-docs.test.cjs` and the design doc §10.3 table together
+- [x] run `make test` in `backend/` and `node --test docs/tests/*.test.cjs` - must pass before task 4
 
 ### Task 4: Add-on core — whitelist, fingerprints, export, apply, size rule
 

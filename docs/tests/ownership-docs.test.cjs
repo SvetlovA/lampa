@@ -43,7 +43,7 @@ function checkScopes(document, scopes) {
     for (const key of keys) {
       assert.ok(scopes[scope].includes(key), `${key} is not classified as ${scope}`);
     }
-    if (scope === 'user' || scope === 'user_connection') {
+    if (scope === 'user' || scope === 'user_connection' || scope === 'user_optional') {
       assert.deepEqual(keys.sort(), [...scopes[scope]].sort(), `${scope} allowlist must be complete`);
     }
   }
@@ -86,4 +86,15 @@ test('scope guard rejects legacy connection export and missing portable fields',
   /torrserver_url_two is not classified as user_connection/);
   assert.throws(() => checkScopes(document.replace('`torrserver_auth`, ', ''), scopes),
     /user_connection allowlist must be complete/);
+});
+
+test('scope guard detects missing best-effort fields and exported CUB profile progress', () => {
+  const document = read(documents[1]);
+  const scopes = JSON.parse(read('svtlv/storage-scope.json')).scopes;
+  assert.throws(() => checkScopes(document.replace('`file_view`, ', ''), scopes),
+    /user_optional allowlist must be complete/);
+  assert.throws(() => checkScopes(document.replace(
+    '| `user_optional` | `file_view`,', '| `user_optional` | `file_view_*`,'), scopes),
+  /file_view_\* is not classified as user_optional/);
+  assert.throws(() => checkScopes(document.replace(/^\| `user_optional`.*\n/m, ''), scopes));
 });

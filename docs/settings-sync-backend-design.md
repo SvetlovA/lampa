@@ -831,16 +831,17 @@ smoke checks. Account, ownership and sync integrations remain in `svtlv/`.
 ### 10.3 Storage ownership audit (Plan 3)
 
 `svtlv/storage-scope.json` is the machine-readable inventory of the shipped
-bundle, audited at its read/write sites. Version 1 defines six scopes; the table
+bundle, audited at its read/write sites. Version 1 defines seven scopes; the table
 below summarizes their actual rules. The JSON file is the complete authority.
 
 | Scope | Examples and rule |
 | --- | --- |
-| `user` | `favorite`, `file_view`, `file_view_*`, `language`, `mine_reactions`, `online_last_balanser`, `online_view`, `online_watched_last`, `person_subscribes_id`, `search_history`, `tmdb_lang`, `torrents_view`, `user_clarifys`. Portable preferences and durable user data; bounded cache access does not change ownership. |
-| `user_connection` | `torrserver_url`, `torrserver_auth`, `torrserver_login`, `torrserver_password`. Only the sole TorrServer endpoint, authentication toggle and credentials are portable connection fields. Login/password are sealed by the API. |
+| `user` | `favorite`, `language`, `mine_reactions`, `person_subscribes_id`, `tmdb_lang`. Portable preferences and personal data must sync. |
+| `user_connection` | `torrserver_url`, `torrserver_auth`, `torrserver_login`, `torrserver_password`. Only the sole TorrServer endpoint, authentication toggle and credentials are portable connection fields. These fields must sync; the top-level encrypt list selects login/password for sealing by the API. |
+| `user_optional` | `file_view`, `online_last_balanser`, `online_view`, `online_watched_last`, `search_history`, `torrents_view`, `user_clarifys`. History, playback progress and torrent views sync best-effort; optional values may be dropped to fit the upload limit or local quota. |
 | `device` | `player`, `player_iptv`, `player_torrent`, `player_volume`, `interface_size`, `navigation_type`, `plugins`, `plugins_blacklist`, `menu_sort`, `menu_hide`, `start_page`, `content_rows*`, `parental_control_pin`. Hardware, controls, executable plugins and feature-dependent menus never sync. |
 | `connection` | `jackett_url`, `jackett_key`, `prowlarr_url`, `prowlarr_key`, `parser_use`, `parser_use_link`, `parse_lang`, `tmdb_proxy`, `proxy_other`, `cub_domain`, `torrserver_savedb`. Other endpoints, credentials and server/device-dependent behavior stay local. |
-| `external` | `account`, `account_bookmarks_*`, `account_timeline_sync*`, `account_plugins`, `cloud_token`, `cloud_use`, `terminal_access`. CUB and third-party identity, tokens, cursors and service-owned data never become Keycloak user data. |
+| `external` | `file_view_*`, `account`, `account_bookmarks_*`, `account_timeline_sync*`, `account_plugins`, `cloud_token`, `cloud_use`, `terminal_access`. CUB and third-party identity, tokens, cursors and service-owned data never become Keycloak user data. |
 | `cache` | `activity`, `torrents_filter_data`, `recomends_list`, `recomends_scan`, `timetable`, `cub_alive`, `lampa_uid`, `region`, `storage_*`. Generated navigation, cached responses, device identity and sync bookkeeping stay local. |
 
 Plan 4 exports only `user` and `user_connection` rules. Exact keys take precedence

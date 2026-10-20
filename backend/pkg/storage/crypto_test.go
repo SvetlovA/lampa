@@ -189,13 +189,15 @@ func extractStorageKeys(bundle []byte) []string {
 	return result
 }
 
-var storageScopeNames = []string{"user", "user_connection", "device", "connection", "external", "cache"}
+var storageScopeNames = []string{"user", "user_connection", "user_optional", "device", "connection", "external", "cache"}
 var storageScopeEntryPattern = regexp.MustCompile(`^[a-zA-Z0-9_.:-]+\*?$`)
 
 type storageScopeFile struct {
 	Version int                 `json:"version"`
 	Scopes  map[string][]string `json:"scopes"`
 	Notes   map[string]string   `json:"notes"`
+	// encryption policy belongs to the frontend; this guard only inventories scopes.
+	Encrypt json.RawMessage `json:"encrypt"`
 }
 
 func parseStorageScope(data []byte) (storageScopeFile, error) {
@@ -212,7 +214,7 @@ func parseStorageScope(data []byte) (storageScopeFile, error) {
 		return scope, fmt.Errorf("unsupported storage scope version %d", scope.Version)
 	}
 	if len(scope.Scopes) != len(storageScopeNames) {
-		return scope, errors.New("storage scope must contain all six scopes")
+		return scope, fmt.Errorf("storage scope must contain all %d scopes", len(storageScopeNames))
 	}
 	for _, name := range storageScopeNames {
 		if entries, ok := scope.Scopes[name]; !ok || entries == nil {
@@ -265,7 +267,7 @@ func resolveStorageScope(entries map[string]string, key string) string {
 	return scope
 }
 
-func storageScopeDrift(bundle []byte, entries map[string]string, sensitive []string) []string {
+func storageScopeDrift(bundle []byte, entries map[string]string) []string {
 	keys := extractStorageKeys(bundle)
 	var problems []string
 	for _, key := range keys {
@@ -283,12 +285,6 @@ func storageScopeDrift(bundle []byte, entries map[string]string, sensitive []str
 			problems = append(problems, "stale exact: "+entry)
 		}
 	}
-	for _, key := range sensitive {
-		scope := resolveStorageScope(entries, key)
-		if scope != "user_connection" && scope != "connection" {
-			problems = append(problems, "sensitive key outside connection scopes: "+key)
-		}
-	}
 	slices.Sort(problems)
 	return problems
 }
@@ -303,14 +299,19 @@ func TestStorageScope_matchBundle(t *testing.T) {
 	require.NoError(t, err)
 	entries, err := storageScopeEntries(scope.Scopes)
 	require.NoError(t, err)
-	problems := storageScopeDrift(bundle, entries, nil)
+	problems := storageScopeDrift(bundle, entries)
 	assert.Empty(t, problems, "storage scope drift (audit read/write sites before classifying):\n%s", strings.Join(problems, "\n"))
 	// Portable settings must not absorb local engines, credentials owned by other
 	// services, executable plugins, or generated CUB cursors via broad prefixes.
 	for _, tc := range []struct{ key, scope string }{
-		{"language", "user"}, {"tmdb_lang", "user"}, {"file_view_42", "user"},
-		{"online_watched_last", "user"}, {"torrents_view", "user"},
+		{"language", "user"}, {"tmdb_lang", "user"}, {"favorite", "user"},
+		{"mine_reactions", "user"}, {"person_subscribes_id", "user"},
+		{"file_view", "user_optional"}, {"file_view_42", "external"},
+		{"online_watched_last", "user_optional"}, {"torrents_view", "user_optional"},
+		{"online_view", "user_optional"}, {"online_last_balanser", "user_optional"},
+		{"search_history", "user_optional"}, {"user_clarifys", "user_optional"},
 		{"torrserver_url", "user_connection"}, {"torrserver_auth", "user_connection"},
+		{"torrserver_login", "user_connection"}, {"torrserver_password", "user_connection"},
 		{"torrserver_url_two", ""}, {"torrserver_use_link", ""}, {"torrserver_savedb", "connection"},
 		{"plugins", "device"}, {"plugins_blacklist", "device"}, {"player", "device"},
 		{"menu_sort", "device"}, {"menu_hide", "device"}, {"start_page", "device"},
@@ -325,8 +326,6 @@ func TestStorageScope_matchBundle(t *testing.T) {
 			assert.Equal(t, tc.scope, resolveStorageScope(entries, tc.key))
 		})
 	}
-	assert.ElementsMatch(t, []string{"torrserver_url", "torrserver_auth", "torrserver_login", "torrserver_password"},
-		scope.Scopes["user_connection"], "only the sole TorrServer connection belongs in Plan 4")
 	t.Logf("audited %d extracted storage keys/fragments and %d scope entries", len(keys), len(entries))
 }
 
@@ -434,15 +433,19 @@ func TestStorageScopeEntries(t *testing.T) {
 }
 
 func TestParseStorageScope(t *testing.T) {
-	valid := `{"version":1,"scopes":{"user":[],"user_connection":[],"device":[],"connection":[],"external":[],"cache":[]},"notes":{}}`
+	valid := `{"version":1,"scopes":{"user":[],"user_connection":[],"user_optional":[],"device":[],"connection":[],"external":[],"cache":[]},"notes":{}}`
 	for _, tc := range []struct{ name, data, problem string }{
 		{"valid empty inventory", valid, ""},
+		{"encryption list", strings.Replace(valid, `"version":1`, `"version":1,"encrypt":["custom.secret","missing"]`, 1), ""},
+		{"encryption policy not audited", strings.Replace(valid, `"version":1`, `"version":1,"encrypt":["plugins","not a storage key",42]`, 1), ""},
+		{"optional inventory", strings.Replace(valid, `"user_optional":[]`, `"user_optional":["history","progress_*"]`, 1), ""},
 		{"malformed", `{`, "decode"},
 		{"empty", ``, "decode"},
 		{"unsupported version", strings.Replace(valid, `"version":1`, `"version":2`, 1), "version"},
 		{"missing version", strings.Replace(valid, `"version":1,`, "", 1), "version"},
-		{"missing scopes", `{"version":1}`, "six scopes"},
-		{"missing scope", strings.Replace(valid, `"user":[],`, "", 1), "six scopes"},
+		{"missing scopes", `{"version":1}`, "all 7 scopes"},
+		{"missing optional scope", strings.Replace(valid, `"user_optional":[],`, "", 1), "all 7 scopes"},
+		{"missing scope", strings.Replace(valid, `"user":[],`, "", 1), "all 7 scopes"},
 		{"unknown scope", strings.Replace(valid, `"user":[]`, `"users":[]`, 1), "missing"},
 		{"null array", strings.Replace(valid, `"user":[]`, `"user":null`, 1), "missing"},
 		{"wrong array type", strings.Replace(valid, `"user":[]`, `"user":"key"`, 1), "decode"},
@@ -464,26 +467,21 @@ func TestParseStorageScope(t *testing.T) {
 
 func TestStorageScopeDrift(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		bundle    string
-		entries   map[string]string
-		sensitive []string
-		want      []string
+		name    string
+		bundle  string
+		entries map[string]string
+		want    []string
 	}{
 		{name: "empty allowlist inventory", bundle: `Storage.get('b'); Storage.get('a');`, entries: map[string]string{}, want: []string{"unclassified: a", "unclassified: b"}},
+		{name: "optional", bundle: `Storage.get('history');`, entries: map[string]string{"history": "user_optional"}},
 		{name: "exact", bundle: `Storage.get('a');`, entries: map[string]string{"a": "user"}},
 		{name: "stale exact", bundle: `var a = 'a';`, entries: map[string]string{"a": "user"}, want: []string{"stale exact: a"}},
 		{name: "prefix", bundle: `Storage.get('file_view'); var name = 'file_view_' + id;`, entries: map[string]string{"file_view": "user", "file_view_*": "user"}},
 		{name: "stale prefix", bundle: `Storage.get('key_value');`, entries: map[string]string{"key_*": "device"}, want: []string{"stale prefix: key_*"}},
 		{name: "variable prefix literal", bundle: `var base = 'content_rows';`, entries: map[string]string{"content_rows*": "device"}},
-		{name: "secret user connection", bundle: `Storage.get('secret');`, entries: map[string]string{"secret": "user_connection"}, sensitive: []string{"secret"}},
-		{name: "secret connection", bundle: `Storage.get('secret');`, entries: map[string]string{"secret": "connection"}, sensitive: []string{"secret"}},
-		{name: "secret exact overrides unsafe prefix", bundle: `Storage.get('secret_key'); var name = 'secret_' + id;`, entries: map[string]string{"secret_*": "user", "secret_key": "connection"}, sensitive: []string{"secret_key"}},
-		{name: "unsafe secret", bundle: `Storage.get('secret');`, entries: map[string]string{"secret": "user"}, sensitive: []string{"secret"}, want: []string{"sensitive key outside connection scopes: secret"}},
-		{name: "unclassified secret", bundle: `Storage.get('secret');`, entries: map[string]string{}, sensitive: []string{"secret"}, want: []string{"sensitive key outside connection scopes: secret", "unclassified: secret"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, storageScopeDrift([]byte(tc.bundle), tc.entries, tc.sensitive))
+			assert.Equal(t, tc.want, storageScopeDrift([]byte(tc.bundle), tc.entries))
 		})
 	}
 }
