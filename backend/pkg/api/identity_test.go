@@ -173,7 +173,7 @@ func TestServer_DenyAllRoutes(t *testing.T) {
 	srv, _ := newTestServer(t, svc, DenyAll{})
 	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
 		t.Run(method, func(t *testing.T) {
-			req := newRequest(method, userDataPath, strings.NewReader(`{"schema_version":1,"data":{}}`))
+			req := newRequest(method, userDataPath, strings.NewReader(`{"schema_version":2,"data":{}}`))
 			req.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()
 			srv.Handler().ServeHTTP(w, req)
@@ -193,12 +193,12 @@ func TestServer_UserIDFromRequestIgnored(t *testing.T) {
 	const otherID = "11111111-2222-4333-8444-555555555555"
 	svc := &mocks.UserDataMock{
 		ReplaceFunc: func(_ context.Context, userID string, raw []byte) (storage.Document, error) {
-			return storage.Document{SchemaVersion: 1}, nil
+			return storage.Document{SchemaVersion: 2}, nil
 		},
 	}
 	srv, _ := newTestServer(t, svc, allowAll(testUserID))
 
-	body := `{"schema_version":1,"user_id":"` + otherID + `","data":{}}`
+	body := `{"schema_version":2,"user_id":"` + otherID + `","data":{}}`
 	req := newRequest(http.MethodPut, userDataPath+"?user_id="+otherID, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-User-Id", otherID)
@@ -208,7 +208,7 @@ func TestServer_UserIDFromRequestIgnored(t *testing.T) {
 	resp := w.Result()
 	defer resp.Body.Close()
 
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
 	require.Len(t, svc.ReplaceCalls(), 1)
 	assert.Equal(t, testUserID, svc.ReplaceCalls()[0].UserID)
 }

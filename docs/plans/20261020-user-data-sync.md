@@ -346,21 +346,22 @@ only. Nothing is defined on non-HTTP(S) origins (`^https?:$` guard).
 - Modify: `backend/pkg/storage/document.go`, `document_test.go`
 - Modify: `backend/pkg/storage/crypto.go`, `crypto_test.go`
 - Modify: `backend/pkg/storage/service.go`, `service_test.go`
-- Modify: `backend/pkg/storage/postgres.go`, `postgres_test.go`
+- Modify: `backend/pkg/storage/postgres.go`, `postgres_test.go`, `migrate_test.go`
 - Create: `backend/migrations/00003_user_data_v2.sql`
 - Modify: `backend/migrations/migrations_test.go`
 - Modify: `backend/pkg/api/userdata.go`, `userdata_test.go`, `flow_test.go`
 - Modify: `backend/cmd/lampa-api/main.go`, `backend/pkg/config/defaults/appsettings.json`, `backend/pkg/config/config_test.go`
+- Modify: `backend/cmd/lampa-api/main_test.go`, `backend/pkg/api/server_test.go`, `identity_test.go`, `csrf_test.go`, `backend/pkg/storage/torrents_test.go` (dependent fixtures and 204 assertions)
 - Modify: `AGENTS.md` (stale `SensitiveSettings` text)
 
-- [ ] `ParseDocument`: `schema_version` must be 2; `data` object with keys matching `^[A-Za-z0-9_.:-]{1,128}$` and any values except a reserved `$sealed` object; optional `encrypt` array (same pattern, ≤ 64); remove `Sections`, section filling and `MaxSectionBytes`
-- [ ] raise `Api.MaxBodyBytes` to 4194304; update the limits wiring in `main.go`
-- [ ] `crypto.go`: `sealListed(data, encrypt)` and `openAll(data)` (unreadable value → dropped + `[WARN]`) replace `SensitiveSettings` extraction; keep the AES-GCM code; delete `SensitiveSettings`, `TestSensitiveSettings_matchUI` and `plainUIInputs`; pass `nil` where `storageScopeDrift` took `SensitiveSettings`
-- [ ] migration `00003`: drop `encrypted_connections`, add `etag text not null default ''`; `postgres.go` stops using the old column; a row with `schema_version` ≠ 2 reads as "not found"
-- [ ] `userdata.go`: drop `orderedData`; GET returns the opened document; PUT answers `204` (no body); ETag/`If-Match` come in Task 2
-- [ ] write tests: any JSON values round-trip; listed keys sealed in stored JSONB (plaintext absent) and decrypted on read; unlisted keys plain; listed-but-missing ignored; `$sealed` input → 400; unreadable sealed value omitted with the rest returned
-- [ ] write tests: bad key (including `.`/`:` accepted), oversize body, malformed/too long `encrypt`, v1 PUT rejected, v1 row → 404; migration test lists `00003` and the column is gone; update `flow_test.go` for v2 bodies and 204
-- [ ] run `make fmt test race lint` in `backend/` - must pass before task 2
+- [x] `ParseDocument`: `schema_version` must be 2; `data` object with keys matching `^[A-Za-z0-9_.:-]{1,128}$` and any values except a reserved `$sealed` object; optional `encrypt` array (same pattern, ≤ 64); remove `Sections`, section filling and `MaxSectionBytes`
+- [x] raise `Api.MaxBodyBytes` to 4194304; update the limits wiring in `main.go`
+- [x] `crypto.go`: `sealListed(data, encrypt)` and `openAll(data)` (unreadable value → dropped + `[WARN]`) replace `SensitiveSettings` extraction; keep the AES-GCM code; delete `SensitiveSettings`, `TestSensitiveSettings_matchUI` and `plainUIInputs`; pass `nil` where `storageScopeDrift` took `SensitiveSettings`
+- [x] migration `00003`: drop `encrypted_connections`, add `etag text not null default ''`; `postgres.go` stops using the old column; a row with `schema_version` ≠ 2 reads as "not found"
+- [x] `userdata.go`: drop `orderedData`; GET returns the opened document; PUT answers `204` (no body); ETag/`If-Match` come in Task 2
+- [x] write tests: any JSON values round-trip; listed keys sealed in stored JSONB (plaintext absent) and decrypted on read; unlisted keys plain; listed-but-missing ignored; `$sealed` input → 400; unreadable sealed value omitted with the rest returned
+- [x] write tests: bad key (including `.`/`:` accepted), oversize body, malformed/too long `encrypt`, v1 PUT rejected, v1 row → 404; migration test lists `00003` and the column is gone; update `flow_test.go` for v2 bodies and 204
+- [x] run `make fmt test race lint` in `backend/` - must pass before task 2
 
 ### Task 2: Expected-user precondition, ETag and If-Match
 

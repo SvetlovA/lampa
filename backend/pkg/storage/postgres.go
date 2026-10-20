@@ -24,14 +24,13 @@ var (
 // dataExceptionClass is the SQLSTATE class of errors caused by the data of a statement.
 const dataExceptionClass = "22"
 
-// Record is one row of lampa_user_data: the document data without credentials plus their sealed blob.
+// Record is one row of lampa_user_data with selected values sealed in place.
 type Record struct {
-	UserID               string          // canonical uuid of the owner
-	SchemaVersion        int             // document schema version
-	Data                 json.RawMessage // json object with all sections, sensitive settings removed
-	EncryptedConnections []byte          // sealed credentials, nil when the user has none
-	CreatedAt            time.Time       // set on first insert, never changed
-	UpdatedAt            time.Time       // set on every upsert
+	UserID        string          // canonical uuid of the owner
+	SchemaVersion int             // document schema version
+	Data          json.RawMessage // json object with selected values sealed in place
+	CreatedAt     time.Time       // set on first insert, never changed
+	UpdatedAt     time.Time       // set on every upsert
 }
 
 // PgStore keeps user documents and torrent membership in postgres.
@@ -52,9 +51,9 @@ func (s *PgStore) Get(ctx context.Context, userID string) (Record, error) {
 	rec := Record{UserID: userID}
 	var data []byte
 	err := s.pool.QueryRow(ctx,
-		`select schema_version, data, encrypted_connections, created_at, updated_at
+		`select schema_version, data, created_at, updated_at
 		from lampa_user_data where user_id = $1`, userID).
-		Scan(&rec.SchemaVersion, &data, &rec.EncryptedConnections, &rec.CreatedAt, &rec.UpdatedAt)
+		Scan(&rec.SchemaVersion, &data, &rec.CreatedAt, &rec.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Record{}, ErrNotFound
 	}
@@ -69,15 +68,14 @@ func (s *PgStore) Get(ctx context.Context, userID string) (Record, error) {
 // the CreatedAt and UpdatedAt fields of rec are ignored.
 func (s *PgStore) Upsert(ctx context.Context, rec Record) (Record, error) {
 	err := s.pool.QueryRow(ctx,
-		`insert into lampa_user_data (user_id, schema_version, data, encrypted_connections)
-		values ($1, $2, $3, $4)
+		`insert into lampa_user_data (user_id, schema_version, data)
+		values ($1, $2, $3)
 		on conflict (user_id) do update set
 			schema_version = excluded.schema_version,
 			data = excluded.data,
-			encrypted_connections = excluded.encrypted_connections,
 			updated_at = now()
 		returning created_at, updated_at`,
-		rec.UserID, rec.SchemaVersion, []byte(rec.Data), rec.EncryptedConnections).
+		rec.UserID, rec.SchemaVersion, []byte(rec.Data)).
 		Scan(&rec.CreatedAt, &rec.UpdatedAt)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && strings.HasPrefix(pgErr.Code, dataExceptionClass) {

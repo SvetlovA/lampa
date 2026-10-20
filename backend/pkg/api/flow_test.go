@@ -105,7 +105,7 @@ func newFlowServer(t *testing.T) (*Server, *fakeStore) {
 	key[0] = 1
 	sealer, err := storage.NewSealer(key)
 	require.NoError(t, err)
-	limits := storage.Limits{MaxBodyBytes: 1 << 10, MaxSectionBytes: storage.DefaultMaxSectionBytes, MaxDepth: storage.DefaultMaxDepth}
+	limits := storage.Limits{MaxBodyBytes: 1 << 10, MaxDepth: storage.DefaultMaxDepth}
 	logger := log.New(io.Discard, "", 0)
 	svc, err := storage.NewService(store, sealer, limits, logger)
 	require.NoError(t, err)
@@ -137,27 +137,30 @@ func errorCode(t *testing.T, body string) string {
 
 func TestServer_UserDataFlow(t *testing.T) {
 	srv, store := newFlowServer(t)
-	putBody := `{"schema_version":1,"data":{"settings":{"jackett_key":"` + flowKey + `","language":"ru"},"favorites":{"a":1}}}`
+	putBody := `{"schema_version":2,"data":{"custom.secret":"` + flowKey + `","language":"ru","favorites":{"a":1}},"encrypt":["custom.secret"]}`
 
 	status, body := call(t, srv, http.MethodGet, flowUserA, "")
 	require.Equal(t, http.StatusNotFound, status)
 	assert.Equal(t, "user_data_not_found", errorCode(t, body))
 
-	status, _ = call(t, srv, http.MethodPut, flowUserA, putBody)
-	require.Equal(t, http.StatusOK, status)
+	status, body = call(t, srv, http.MethodPut, flowUserA, putBody)
+	require.Equal(t, http.StatusNoContent, status)
+	assert.Empty(t, body)
 	stored := store.records[flowUserA]
 	assert.NotContains(t, string(stored.Data), flowKey, "credentials are sealed before they reach the store")
-	assert.NotEmpty(t, stored.EncryptedConnections)
+	assert.Contains(t, string(stored.Data), `"$sealed"`)
 
 	status, body = call(t, srv, http.MethodGet, flowUserA, "")
 	require.Equal(t, http.StatusOK, status)
 	var got struct {
-		Data struct {
-			Settings map[string]any `json:"settings"`
-		} `json:"data"`
+		SchemaVersion int                        `json:"schema_version"`
+		Data          map[string]json.RawMessage `json:"data"`
 	}
 	require.NoError(t, json.Unmarshal([]byte(body), &got))
-	assert.Equal(t, map[string]any{"jackett_key": flowKey, "language": "ru"}, got.Data.Settings)
+	assert.Equal(t, 2, got.SchemaVersion)
+	assert.JSONEq(t, `"`+flowKey+`"`, string(got.Data["custom.secret"]))
+	assert.JSONEq(t, `"ru"`, string(got.Data["language"]))
+	assert.JSONEq(t, `{"a":1}`, string(got.Data["favorites"]))
 
 	status, body = call(t, srv, http.MethodGet, flowUserB, "")
 	require.Equal(t, http.StatusNotFound, status, "another user never sees the document")
@@ -180,7 +183,7 @@ func TestServer_StoreDown(t *testing.T) {
 
 	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
 		t.Run(method, func(t *testing.T) {
-			status, body := call(t, srv, method, flowUserA, `{"schema_version":1,"data":{}}`)
+			status, body := call(t, srv, method, flowUserA, `{"schema_version":2,"data":{}}`)
 			require.Equal(t, http.StatusServiceUnavailable, status)
 			assert.Equal(t, "storage_unavailable", errorCode(t, body))
 			assert.NotContains(t, body, "10.0.0.5", "driver details never reach the client")
@@ -227,8 +230,8 @@ func TestServer_TorrentFlow(t *testing.T) {
 	list(flowUserB, "other-server", []string{})
 
 	// deleting the user document does not remove torrent memberships
-	status, _ := call(t, srv, http.MethodPut, flowUserA, `{"schema_version":1,"data":{}}`)
-	require.Equal(t, http.StatusOK, status)
+	status, _ := call(t, srv, http.MethodPut, flowUserA, `{"schema_version":2,"data":{}}`)
+	require.Equal(t, http.StatusNoContent, status)
 	status, _ = call(t, srv, http.MethodDelete, flowUserA, "")
 	require.Equal(t, http.StatusNoContent, status)
 	list(flowUserA, testTorrentServer, []string{testTorrentHash, v2Hash})
@@ -262,4 +265,34 @@ func TestServer_TorrentFlow(t *testing.T) {
 		assert.NotContains(t, w.Body.String(), "10.0.0.5")
 	}
 	assert.Len(t, store.hashes, 3, "failed mutations preserve memberships")
+}
+
+func TestServer_UserDataValidationFlow(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		code string
+	}{
+		{name: "v1", body: `{"schema_version":1,"data":{}}`, code: storage.CodeUnsupportedSchemaVersion},
+		{name: "bad key", body: `{"schema_version":2,"data":{"bad/key":1}}`, code: storage.CodeInvalidDocument},
+		{name: "reserved value", body: `{"schema_version":2,"data":{"key":{"$sealed":"input"}}}`, code: storage.CodeInvalidDocument},
+		{name: "malformed encrypt", body: `{"schema_version":2,"data":{},"encrypt":"key"}`, code: storage.CodeInvalidDocument},
+		{name: "long encrypt", body: `{"schema_version":2,"data":{},"encrypt":[` + strings.Repeat(`"a",`, 64) + `"a"]}`, code: storage.CodeInvalidDocument},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, store := newFlowServer(t)
+			status, body := call(t, srv, http.MethodPut, flowUserA, tc.body)
+			require.Equal(t, http.StatusBadRequest, status)
+			assert.Equal(t, tc.code, errorCode(t, body))
+			assert.Empty(t, store.records)
+		})
+	}
+}
+
+func TestServer_UserDataOldRow(t *testing.T) {
+	srv, store := newFlowServer(t)
+	store.records[flowUserA] = storage.Record{UserID: flowUserA, SchemaVersion: 1, Data: json.RawMessage(`{"settings":{}}`)}
+	status, body := call(t, srv, http.MethodGet, flowUserA, "")
+	require.Equal(t, http.StatusNotFound, status)
+	assert.Equal(t, "user_data_not_found", errorCode(t, body))
 }

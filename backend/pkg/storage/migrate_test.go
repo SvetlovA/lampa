@@ -145,7 +145,9 @@ func TestMigrate_torrserverDown(t *testing.T) {
 	defer db.Close()
 	provider, err := goose.NewProvider(goose.DialectPostgres, db, migrations.FS)
 	require.NoError(t, err)
-	_, err = provider.Down(t.Context())
+	_, err = provider.Down(t.Context()) // v2 document migration
+	require.NoError(t, err)
+	_, err = provider.Down(t.Context()) // torrent ownership migration
 	require.NoError(t, err)
 	assert.False(t, tableExists(t, p, "lampa_torrserver_hashes"))
 	assert.True(t, tableExists(t, p, "lampa_user_data"), "rollback preserves the existing document table")
@@ -181,4 +183,51 @@ func TestMigrate_canceledContext(t *testing.T) {
 	require.Error(t, storage.Migrate(ctx, p))
 	assert.False(t, tableExists(t, p, "lampa_user_data"))
 	assert.False(t, tableExists(t, p, "lampa_torrserver_hashes"))
+}
+
+func TestMigrate_userDataV2(t *testing.T) {
+	t.Parallel()
+	p := emptyDB(t)
+	db := stdlib.OpenDBFromPool(p)
+	defer db.Close()
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, migrations.FS)
+	require.NoError(t, err)
+	_, err = provider.UpTo(t.Context(), 2)
+	require.NoError(t, err)
+	id := newUserID(t)
+	_, err = p.Exec(t.Context(), `insert into lampa_user_data (user_id, schema_version, data, encrypted_connections)
+		values ($1, 1, '{"settings":{"language":"ru"}}', '\x010203')`, id)
+	require.NoError(t, err)
+	require.NoError(t, storage.Migrate(t.Context(), p))
+
+	var etag string
+	var version int
+	var data string
+	err = p.QueryRow(t.Context(), `select schema_version, data::text, etag from lampa_user_data where user_id = $1`, id).
+		Scan(&version, &data, &etag)
+	require.NoError(t, err)
+	assert.Equal(t, 1, version, "old rows are retained but read as absent")
+	assert.JSONEq(t, `{"settings":{"language":"ru"}}`, data)
+	assert.Empty(t, etag, "etag defaults to an empty non-null string")
+	var oldColumn bool
+	err = p.QueryRow(t.Context(), `select exists (select 1 from information_schema.columns
+		where table_schema = 'public' and table_name = 'lampa_user_data' and column_name = 'encrypted_connections')`).Scan(&oldColumn)
+	require.NoError(t, err)
+	assert.False(t, oldColumn)
+	svc, _ := newTestService(t, newTestStore(t, p), newTestSealer(t, 1))
+	_, err = svc.Get(t.Context(), id)
+	require.ErrorIs(t, err, storage.ErrNotFound)
+	_, err = svc.Replace(t.Context(), id, testBody)
+	require.NoError(t, err, "a v2 save replaces the old document")
+	got, err := svc.Get(t.Context(), id)
+	require.NoError(t, err)
+	assert.Equal(t, 2, got.SchemaVersion)
+
+	_, err = provider.Down(t.Context())
+	require.NoError(t, err)
+	var blob []byte
+	err = p.QueryRow(t.Context(), `select encrypted_connections from lampa_user_data where user_id = $1`, id).Scan(&blob)
+	require.NoError(t, err, "down restores the old column without pretending to recover old credentials")
+	assert.Nil(t, blob)
+	require.NoError(t, storage.Migrate(t.Context(), p), "v2 migration can be reapplied")
 }

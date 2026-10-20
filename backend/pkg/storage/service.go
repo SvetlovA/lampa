@@ -2,7 +2,6 @@ package storage
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -42,15 +41,14 @@ func NewService(store Store, sealer *Sealer, limits Limits, logger Logger) (*Ser
 		return nil, errors.New("nil sealer")
 	case logger == nil:
 		return nil, errors.New("nil logger")
-	case limits.MaxBodyBytes <= 0 || limits.MaxSectionBytes <= 0 || limits.MaxDepth <= 0:
+	case limits.MaxBodyBytes <= 0 || limits.MaxDepth <= 0:
 		return nil, errors.New("limits must be positive")
 	}
 	return &Service{store: store, sealer: sealer, limits: limits, logger: logger}, nil
 }
 
-// Get returns the document of userID with its connection credentials merged back into settings.
-// returns ErrNotFound when the user has no document, ErrUnavailable when the store fails and
-// ErrConnectionsUnreadable when the sealed credentials cannot be opened.
+// Get returns the version-2 document with readable sealed values opened.
+// older versions read as missing; unreadable sealed values are omitted.
 func (s *Service) Get(ctx context.Context, userID string) (Document, error) {
 	id, err := canonicalUserID(userID)
 	if err != nil {
@@ -61,17 +59,18 @@ func (s *Service) Get(ctx context.Context, userID string) (Document, error) {
 		return Document{}, s.storeError("get user data", err)
 	}
 
-	var data map[string]json.RawMessage
-	if err = json.Unmarshal(rec.Data, &data); err != nil {
+	if rec.SchemaVersion != SchemaVersion {
+		return Document{}, ErrNotFound
+	}
+	data, err := decodeObject(rec.Data)
+	if err != nil {
 		return Document{}, fmt.Errorf("decode stored data: %w", err)
 	}
-	doc := Document{SchemaVersion: rec.SchemaVersion, Data: data, UpdatedAt: rec.UpdatedAt}
-	merged, err := s.sealer.Merge(id, doc, rec.EncryptedConnections)
+	opened, err := s.sealer.openAll(id, data, s.logger)
 	if err != nil {
-		s.logger.Printf("[ERROR] merge connections of user %s: %v", id, err)
-		return Document{}, fmt.Errorf("merge connections: %w", err)
+		return Document{}, fmt.Errorf("open stored data: %w", err)
 	}
-	return merged, nil
+	return Document{SchemaVersion: rec.SchemaVersion, Data: opened, UpdatedAt: rec.UpdatedAt}, nil
 }
 
 // Replace validates raw as a PUT body and stores it as the whole document of userID.
@@ -87,16 +86,16 @@ func (s *Service) Replace(ctx context.Context, userID string, raw []byte) (Docum
 		return Document{}, err
 	}
 
-	clean, blob, err := s.sealer.Split(id, doc)
+	sealed, err := s.sealer.sealListed(id, doc.Data, doc.Encrypt)
 	if err != nil {
-		return Document{}, fmt.Errorf("split connections: %w", err)
+		return Document{}, fmt.Errorf("seal data: %w", err)
 	}
-	data, err := encodeObject(clean.Data)
+	data, err := encodeObject(sealed)
 	if err != nil {
 		return Document{}, fmt.Errorf("encode data: %w", err)
 	}
 
-	rec, err := s.store.Upsert(ctx, Record{UserID: id, SchemaVersion: doc.SchemaVersion, Data: data, EncryptedConnections: blob})
+	rec, err := s.store.Upsert(ctx, Record{UserID: id, SchemaVersion: doc.SchemaVersion, Data: data})
 	if errors.Is(err, ErrInvalidData) {
 		// the driver error carries only the sqlstate message, never document content
 		s.logger.Printf("[WARN] upsert user data: %v", err)

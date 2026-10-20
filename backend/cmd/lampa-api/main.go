@@ -99,9 +99,8 @@ func start(ctx context.Context, cfg config.Config, logger *log.Logger, listen li
 		return fmt.Errorf("create sealer: %w", err)
 	}
 	limits := storage.Limits{
-		MaxBodyBytes:    cfg.MaxBodyBytes,
-		MaxSectionBytes: storage.DefaultMaxSectionBytes,
-		MaxDepth:        storage.DefaultMaxDepth,
+		MaxBodyBytes: cfg.MaxBodyBytes,
+		MaxDepth:     storage.DefaultMaxDepth,
 	}
 	svc, err := storage.NewService(store, sealer, limits, logger)
 	if err != nil {

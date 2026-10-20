@@ -21,27 +21,26 @@ import (
 
 var testUpdatedAt = time.Date(2026, 9, 18, 21, 30, 0, 123000000, time.FixedZone("JDT", 9*3600))
 
-// testDocument has sections in non-response order and a value html escaping would change.
+// testDocument includes arbitrary keys and a value html escaping would change.
 func testDocument() storage.Document {
 	return storage.Document{
-		SchemaVersion: 1,
+		SchemaVersion: 2,
 		Data: map[string]json.RawMessage{
-			"other":     json.RawMessage(`{}`),
-			"settings":  json.RawMessage(`{"torrserver_url":"http://a/?x=1&y=<2>"}`),
-			"favorites": json.RawMessage(`{"card":[1,2]}`),
+			"custom.key:1": json.RawMessage(`[null,true,42,"x"]`),
+			"settings":     json.RawMessage(`{"torrserver_url":"http://a/?x=1&y=<2>"}`),
+			"favorites":    json.RawMessage(`{"card":[1,2]}`),
 		},
 		UpdatedAt: testUpdatedAt,
 	}
 }
 
-const testDocumentJSON = `{"schema_version":1,"data":{"settings":{"torrserver_url":"http://a/?x=1&y=<2>"},` +
-	`"favorites":{"card":[1,2]},"other":{}},"updated_at":"2026-09-18T12:30:00.123Z"}` + "\n"
+const testDocumentJSON = `{"schema_version":2,"data":{"settings":{"torrserver_url":"http://a/?x=1&y=<2>"},` +
+	`"favorites":{"card":[1,2]},"custom.key:1":[null,true,42,"x"]},"updated_at":"2026-09-18T12:30:00.123Z"}` + "\n"
 
-// assertDocumentJSON checks body against testDocumentJSON, including section order and no html escaping.
+// assertDocumentJSON checks the document values and no html escaping.
 func assertDocumentJSON(t *testing.T, body []byte) {
 	t.Helper()
 	assert.JSONEq(t, testDocumentJSON, string(body))
-	assert.Regexp(t, `"data":\{"settings":.*"favorites":.*"other":`, string(body), "sections in response order")
 	assert.Contains(t, string(body), `&y=<2>`, "no html escaping")
 }
 
@@ -57,8 +56,6 @@ func TestServer_GetUserData(t *testing.T) {
 		{name: "not found", err: storage.ErrNotFound, status: http.StatusNotFound, code: "user_data_not_found"},
 		{name: "unavailable", err: fmt.Errorf("get user data: %w: %w", storage.ErrUnavailable, errors.New("dial 10.0.0.5")),
 			status: http.StatusServiceUnavailable, code: "storage_unavailable"},
-		{name: "connections unreadable", err: fmt.Errorf("merge connections: %w", storage.ErrConnectionsUnreadable),
-			status: http.StatusInternalServerError, code: "connections_unreadable"},
 		{name: "unexpected", err: errors.New("decode stored data: bad"), status: http.StatusInternalServerError,
 			code: "internal_error", logged: `[ERROR] "GET" "/api/v1/user-data": decode stored data: bad`},
 	}
@@ -99,7 +96,7 @@ func TestServer_GetUserData(t *testing.T) {
 }
 
 func TestServer_PutUserData(t *testing.T) {
-	const validBody = `{"schema_version":1,"data":{}}`
+	const validBody = `{"schema_version":2,"data":{}}`
 	tests := []struct {
 		name        string
 		contentType string
@@ -109,8 +106,8 @@ func TestServer_PutUserData(t *testing.T) {
 		code        string
 		called      bool
 	}{
-		{name: "stored", contentType: "application/json", body: validBody, status: http.StatusOK, called: true},
-		{name: "json with charset", contentType: "application/json; charset=utf-8", body: validBody, status: http.StatusOK, called: true},
+		{name: "stored", contentType: "application/json", body: validBody, status: http.StatusNoContent, called: true},
+		{name: "json with charset", contentType: "application/json; charset=utf-8", body: validBody, status: http.StatusNoContent, called: true},
 		{name: "missing content type", body: validBody, status: http.StatusUnsupportedMediaType, code: "unsupported_media_type"},
 		{name: "form content type", contentType: "application/x-www-form-urlencoded", body: validBody,
 			status: http.StatusUnsupportedMediaType, code: "unsupported_media_type"},
@@ -124,7 +121,7 @@ func TestServer_PutUserData(t *testing.T) {
 			code: "invalid_document", err: &storage.ValidationError{Code: storage.CodeInvalidDocument, Reason: "data must be an object"}},
 		{name: "unsupported schema version", contentType: "application/json", body: validBody, called: true,
 			status: http.StatusBadRequest, code: "unsupported_schema_version",
-			err: &storage.ValidationError{Code: storage.CodeUnsupportedSchemaVersion, Reason: "schema_version must be 1"}},
+			err: &storage.ValidationError{Code: storage.CodeUnsupportedSchemaVersion, Reason: "schema_version must be 2"}},
 		{name: "document too large", contentType: "application/json", body: validBody, called: true,
 			status: http.StatusRequestEntityTooLarge, code: "request_too_large",
 			err: &storage.ValidationError{Code: storage.CodeTooLarge, Reason: "body exceeds size limit"}},
@@ -163,7 +160,7 @@ func TestServer_PutUserData(t *testing.T) {
 			if tc.code == "" {
 				body, err := io.ReadAll(resp.Body)
 				require.NoError(t, err)
-				assertDocumentJSON(t, body)
+				assert.Empty(t, body)
 				return
 			}
 			assert.Equal(t, tc.code, decodeError(t, resp).Error.Code)
@@ -227,21 +224,6 @@ func TestServer_DeleteUserData(t *testing.T) {
 			assert.Equal(t, tc.code, decodeError(t, resp).Error.Code)
 		})
 	}
-}
-
-func TestOrderedData_MarshalJSON(t *testing.T) {
-	out, err := json.Marshal(orderedData{
-		"history":  json.RawMessage(`{"a":1}`),
-		"unknown":  json.RawMessage(`{"dropped":true}`),
-		"settings": json.RawMessage(`{}`),
-	})
-	require.NoError(t, err)
-	assert.JSONEq(t, `{"settings":{},"history":{"a":1}}`, string(out))
-	assert.Regexp(t, `^\{"settings":.*"history":`, string(out), "sections in response order")
-
-	out, err = json.Marshal(orderedData{})
-	require.NoError(t, err)
-	assert.Equal(t, `{}`, string(out))
 }
 
 func TestIsJSON(t *testing.T) {

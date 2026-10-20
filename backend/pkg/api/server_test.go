@@ -142,12 +142,12 @@ func TestServer_AccessLog(t *testing.T) {
 	const secretBody, secretCookie, secretQuery = "body-secret-value", "cookie-secret-value", "query-secret-value"
 	svc := &mocks.UserDataMock{
 		ReplaceFunc: func(context.Context, string, []byte) (storage.Document, error) {
-			return storage.Document{SchemaVersion: 1}, nil
+			return storage.Document{SchemaVersion: 2}, nil
 		},
 	}
 	srv, logs := newTestServer(t, svc, allowAll(testUserID))
 	req := newRequest(http.MethodPut, userDataPath+"?token="+secretQuery,
-		strings.NewReader(`{"schema_version":1,"data":{"other":{"k":"`+secretBody+`"}}}`))
+		strings.NewReader(`{"schema_version":2,"data":{"other":{"k":"`+secretBody+`"}}}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+secretCookie)
 	req.AddCookie(&http.Cookie{Name: "session", Value: secretCookie, Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode})
@@ -155,10 +155,10 @@ func TestServer_AccessLog(t *testing.T) {
 	srv.Handler().ServeHTTP(w, req)
 	resp := w.Result()
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
 
 	out := logs.String()
-	assert.Regexp(t, `^\[INFO\] "PUT" "/api/v1/user-data" 200 \S+\n$`, out)
+	assert.Regexp(t, `^\[INFO\] "PUT" "/api/v1/user-data" 204 \S+\n$`, out)
 	for _, secret := range []string{secretBody, secretCookie, secretQuery} {
 		assert.NotContains(t, out, secret)
 	}
@@ -195,7 +195,7 @@ func TestServer_Serve(t *testing.T) {
 		GetFunc: func(context.Context, string) (storage.Document, error) {
 			close(started)
 			<-release
-			return storage.Document{SchemaVersion: 1}, nil
+			return storage.Document{SchemaVersion: 2}, nil
 		},
 	}
 	srv, _ := newTestServer(t, svc, allowAll(testUserID))

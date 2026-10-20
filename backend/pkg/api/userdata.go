@@ -11,33 +11,11 @@ import (
 	"github.com/SvetlovA/lampa/backend/pkg/storage"
 )
 
-// documentResponse is the wire shape of a stored document, returned by GET and PUT.
+// documentResponse is the wire shape of a stored document, returned by GET.
 type documentResponse struct {
-	SchemaVersion int         `json:"schema_version"`
-	Data          orderedData `json:"data"`
-	UpdatedAt     time.Time   `json:"updated_at"`
-}
-
-// orderedData encodes document sections in storage.Sections order instead of map key order.
-type orderedData map[string]json.RawMessage
-
-// MarshalJSON writes the known sections in response order and skips missing ones.
-func (d orderedData) MarshalJSON() ([]byte, error) {
-	out := []byte{'{'}
-	for _, name := range storage.Sections {
-		raw, ok := d[name]
-		if !ok {
-			continue
-		}
-		if len(out) > 1 {
-			out = append(out, ',')
-		}
-		out = append(out, '"')
-		out = append(out, name...)
-		out = append(out, '"', ':')
-		out = append(out, raw...)
-	}
-	return append(out, '}'), nil
+	SchemaVersion int                        `json:"schema_version"`
+	Data          map[string]json.RawMessage `json:"data"`
+	UpdatedAt     time.Time                  `json:"updated_at"`
 }
 
 func (s *Server) getUserData(w http.ResponseWriter, r *http.Request) {
@@ -66,12 +44,12 @@ func (s *Server) putUserData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, _ := UserID(r.Context())
-	doc, err := s.svc.Replace(r.Context(), id, raw)
+	_, err = s.svc.Replace(r.Context(), id, raw)
 	if err != nil {
 		s.writeServiceError(w, r, err)
 		return
 	}
-	writeDocument(w, doc)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) deleteUserData(w http.ResponseWriter, r *http.Request) {
@@ -98,8 +76,6 @@ func (s *Server) writeServiceError(w http.ResponseWriter, r *http.Request, err e
 		WriteError(w, http.StatusNotFound, "user_data_not_found", "user data not found")
 	case errors.Is(err, storage.ErrUnavailable):
 		WriteError(w, http.StatusServiceUnavailable, "storage_unavailable", "storage unavailable")
-	case errors.Is(err, storage.ErrConnectionsUnreadable):
-		WriteError(w, http.StatusInternalServerError, "connections_unreadable", "stored connections cannot be read")
 	default:
 		s.logger.Printf("[ERROR] %q %q: %v", r.Method, logPath(r.URL.Path), err)
 		WriteError(w, http.StatusInternalServerError, "internal_error", "internal error")
@@ -109,7 +85,7 @@ func (s *Server) writeServiceError(w http.ResponseWriter, r *http.Request, err e
 func writeDocument(w http.ResponseWriter, doc storage.Document) {
 	WriteJSON(w, http.StatusOK, documentResponse{
 		SchemaVersion: doc.SchemaVersion,
-		Data:          orderedData(doc.Data),
+		Data:          doc.Data,
 		UpdatedAt:     doc.UpdatedAt.UTC(),
 	})
 }

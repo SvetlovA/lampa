@@ -335,7 +335,7 @@ func TestPgStore_TorrentMembershipIsolation(t *testing.T) {
 	require.NoError(t, s.ClaimHash(t.Context(), alice, "one", otherHash))
 
 	// deleting a user document leaves its independent torrent membership intact.
-	_, err := s.Upsert(t.Context(), testRecord(alice, `{}`, nil))
+	_, err := s.Upsert(t.Context(), testRecord(alice, `{}`))
 	require.NoError(t, err)
 	require.NoError(t, s.Delete(t.Context(), alice))
 	hashes, err := s.ListHashes(t.Context(), alice, "one")
