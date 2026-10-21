@@ -16,7 +16,7 @@ this implementation: each has its own My Torrents ownership list. Saving under
 one address does not automatically claim the torrent under the other. Shared
 identity or alias mapping is outside this plan.
 Sharing owned torrents across both links is deferred in
-[`docs/backlog/share-torrents-between-torrserver-links.md`](../backlog/share-torrents-between-torrserver-links.md).
+[`docs/backlog/share-torrents-between-torrserver-links.md`](../../backlog/share-torrents-between-torrserver-links.md).
 
 ## Context (from discovery)
 
@@ -243,10 +243,27 @@ in Post-Completion; no production code changes were needed for acceptance.
 - Modify: `docs/tests/ownership-docs.test.cjs` (if additional assertions need updating)
 - Move: this plan to `docs/plans/completed/` after completion
 
-- [ ] Replace current one-link descriptions with both synced URLs, shared credentials, the local selector/default, original upstream per-path URL behavior and effective-server membership behavior. Document the original selected-empty differences without presenting a new routing policy.
-- [ ] Document compatibility with older one-URL documents and the need to refresh older clients before relying on durable URL-2 sync.
-- [ ] Update `CLAUDE.md` to remove instructions to reapply the one-link patch, list both portable URL fields and the device-local selector, and describe the revised bundle guard while retaining the separate shared-timecode removal. Update other active guidance and commands if needed; leave completed historical plans as records of their original work.
-- [ ] Run documentation guards and the final frontend suite, record verification results and remaining manual checks, then move this completed plan.
+- [x] Replace current one-link descriptions with both synced URLs, shared credentials, the local selector/default, original upstream per-path URL behavior and effective-server membership behavior. Document the original selected-empty differences without presenting a new routing policy.
+- [x] Document compatibility with older one-URL documents and the need to refresh older clients before relying on durable URL-2 sync.
+- [x] Update `CLAUDE.md` to remove instructions to reapply the one-link patch, list both portable URL fields and the device-local selector, and describe the revised bundle guard while retaining the separate shared-timecode removal. Update other active guidance and commands if needed; leave completed historical plans as records of their original work.
+- [x] Run documentation guards and the final frontend suite, record verification results and remaining manual checks, then move this completed plan.
+
+Verification: all 14 documentation guards and all 448 frontend tests passed
+with no skips. The new guards require complete two-URL/shared-credential examples,
+exclude the device-local selector from exports, retain credential sealing and
+reject obsolete one-link maintenance instructions outside historical records.
+Pinned Acorn ES5 parsing passed the plan command and separate checks of every
+add-on and `app.min.js`; `git diff --check` passed. No runtime or Go code changed
+in this documentation task; Task 4's targeted Go guards and lint remain valid.
+Active README/maintenance guidance now preserves upstream per-path behavior,
+effective-server membership and older-client compatibility. Completed historical
+plans were left unchanged. The plan is moved to `docs/plans/completed/`, with its
+backlog links updated for that location.
+
+Remaining manual checks: browser/TV remote controls and playback, two signed-in
+clients with different selections, live membership switching, and refreshing
+older deployed clients. These checks were not run; deployment remains separate
+and requires its own request. The concrete checklist is retained below.
 
 ## Post-Completion
 

@@ -112,6 +112,64 @@ function userDataExamples(document) {
     .map(match => JSON.parse(match[1])).filter(value => Object.hasOwn(value, 'schema_version'));
 }
 
+function checkConnectionExample(example) {
+  const scope = JSON.parse(read('svtlv/storage-scope.json'));
+  const keys = Object.keys(example.data).filter(key => key.startsWith('torrserver_'));
+  assert.deepEqual(keys.sort(), [...scope.scopes.user_connection].sort(),
+    'example must include both URLs and shared authentication, without the local selector');
+  assert.deepEqual([...example.encrypt].sort(), [...scope.encrypt].sort(),
+    'example must seal the shared credentials');
+}
+
+test('both published PUT examples include both URLs and shared sealed credentials, never the selector', () => {
+  for (const file of documents) {
+    for (const example of userDataExamples(read(file))) checkConnectionExample(example);
+  }
+});
+
+test('connection example guard detects a missing secondary URL, exported selector or unsealed credentials', () => {
+  const example = userDataExamples(read(documents[0]))[0];
+  const missingURL = structuredClone(example);
+  delete missingURL.data.torrserver_url_two;
+  assert.throws(() => checkConnectionExample(missingURL), /both URLs/);
+  const exportedSelector = structuredClone(example);
+  exportedSelector.data.torrserver_use_link = 'two';
+  assert.throws(() => checkConnectionExample(exportedSelector), /local selector/);
+  assert.throws(() => checkConnectionExample({...example, encrypt: []}), /seal the shared credentials/);
+});
+
+function checkCurrentLinkGuidance(document) {
+  // The design's Plan 3 implementation record deliberately retains its historical decisions.
+  const current = document.replace(/### Plan 3:[\s\S]*?(?=### Plan 4:)/, '').replace(/\s+/g, ' ');
+  assert.doesNotMatch(current,
+    /(?:sole TorrServer URL|only one TorrServer URL input remains|drops the second TorrServer input|reapply the (?:small, marked |marked )?one-link (?:bundle|core) patch)/i,
+    'current guidance must not restore the superseded one-link policy');
+  for (const key of ['torrserver_url', 'torrserver_url_two', 'torrserver_use_link']) {
+    assert.ok(current.includes('`' + key + '`'), `${key} must be documented`);
+  }
+  assert.match(current, /device-local[^.]*`one`/, 'document the local selector and its default');
+  assert.match(current, /selector-only change sends no user-data PUT/i, 'document selection without uploads');
+  assert.match(current, /whole-document writes can omit (?:URL 2|it)/i, 'document older-client compatibility');
+  assert.ok(current.includes('`Lampa.Torserver.ip()`'), 'document the public effective-server identity');
+}
+
+test('operator and maintenance guidance retain the two-link sync and effective-server contract', () => {
+  for (const file of [...documents, 'CLAUDE.md']) checkCurrentLinkGuidance(read(file));
+  assert.match(read('CLAUDE.md'), /TestTorrserverTwoURLs_matchBundle/);
+});
+
+test('current-guidance guard rejects obsolete single-link update instructions while allowing history', () => {
+  const document = read(documents[1]);
+  checkCurrentLinkGuidance(document);
+  for (const obsolete of [
+    'Reapply the marked one-link core patch after upstream updates.',
+    'Only one TorrServer URL input remains.',
+    'The sole TorrServer URL is portable.'
+  ]) {
+    assert.throws(() => checkCurrentLinkGuidance(document + '\n' + obsolete), /superseded one-link policy/);
+  }
+});
+
 test('published user-data examples use the implemented schema and valid raw-storage envelopes', () => {
   const schema = Number(read('backend/pkg/storage/document.go').match(/const SchemaVersion = (\d+)/)[1]);
   const scope = JSON.parse(read('svtlv/storage-scope.json'));

@@ -4,7 +4,8 @@ Status: Implemented
 
 Date: 2026-09-15 (authentication and Account UI decisions added 2026-09-24;
 Plan 3 storage and TorrServer decisions updated 2026-10-14;
-Plan 4 user-data synchronization implemented 2026-10-20)
+Plan 4 user-data synchronization implemented 2026-10-20;
+upstream two-link TorrServer behavior restored 2026-10-21)
 
 Target branch: `svtlvtv`
 
@@ -52,11 +53,12 @@ TorrServer's own saved torrents are separate from browser storage
 and require the handling in §10.4.
 
 TorrServer and Jackett remain unchanged and the browser calls them directly;
-the API does not proxy their traffic. Plan 3 reduces Lampa's built-in TorrServer
-settings to one URL through a small, marked `app.min.js` patch and a matching
-`assembly.json` stamp. Account, ownership and synchronization integrations stay
-in `svtlv/`; compiled stylesheets and upstream language files remain unchanged.
-Upstream bundle updates require reapplying the one-link patch (§10.2).
+the API does not proxy their traffic. Lampa's original two-link TorrServer
+settings and per-path runtime behavior are restored in `app.min.js`, with a
+matching `assembly.json` stamp. Both URLs and shared credentials sync while each
+client selects a link locally (§10.3–§10.4). Account, ownership and synchronization
+integrations stay in `svtlv/`. Upstream updates must retain both links and the
+separate marked shared-timecode removal (§10.2).
 
 ## 3. Architecture
 
@@ -703,6 +705,8 @@ Example PUT body (`Content-Type: application/json`, `X-Lampa-Csrf: 1`):
   "data": {
     "language": "ru",
     "torrserver_url": "http://ts:8090",
+    "torrserver_url_two": "http://192.168.1.10:8090",
+    "torrserver_auth": "true",
     "torrserver_login": "user",
     "torrserver_password": "secret",
     "favorite": "{\"book\":[],\"history\":[]}"
@@ -887,7 +891,8 @@ the independent consumer of `/health/critical`.
 ## 10. Browser integration and upstream compatibility
 
 Keep account, ownership and synchronization integrations outside the generated
-Lampa files. The agreed one-link core patch is the narrow exception:
+Lampa files. Restoring upstream two-link behavior and retaining the separate
+shared-timecode removal are the agreed narrow core exceptions:
 
 ```text
 svtlv/
@@ -939,8 +944,9 @@ account change, refresh and logout.
   available, which deployment checks must detect.
 - Keep backend, database, deployment and documentation files in additive
   directories that upstream Lampa does not own.
-- The marked one-link `app.min.js` patch and matching `assembly.json` stamp are
-  the explicit Plan 3 core-change decision. Any further generated-file change
+- Preserve the restored upstream two-link `app.min.js` behavior and the separate
+  marked shared-timecode removal with a matching `assembly.json` stamp. Do not
+  reapply the superseded one-link removal. Any further generated-file change
   requires a separate decision.
 
 ### 10.2 Minimal loader seam
@@ -963,9 +969,14 @@ This works for both current loader branches:
 - an Android-provided remote `app.min.js` with local fallback.
 
 When frontend updates are received, preserve the marked `index.html` loader
-seam and reapply the small, marked one-link bundle patch with its version and
-`assembly.json` stamp. Run the bundle drift/runtime guards, ES5 checks and Lampa
-smoke checks. Account, ownership and sync integrations remain in `svtlv/`.
+seam, retain the original two-link controls/routing, and reapply the separate
+marked shared-timecode removal and save-to-database description changes with a
+matching version and `assembly.json` stamp. `TestTorrserverTwoURLs_matchBundle`
+guards both URL inputs, the default selector, timecode removal, unrelated parser
+controls and version metadata. Runtime coverage retains the historical filename
+`backend/pkg/storage/testdata/torrserver-one-link.test.cjs`. Run the full frontend
+suite, the ES5 parser separately for each add-on and `app.min.js`, and Lampa smoke
+checks. Account, ownership and sync integrations remain in `svtlv/`.
 
 ### 10.3 Storage ownership audit (Plan 3)
 
@@ -989,16 +1000,25 @@ best-effort. Exact keys take precedence over prefixes; the longest trailing-aste
 rules are rejected. Unclassified keys, including arbitrary plugin/add-on values,
 remain device-local; they are never implicitly allowed for export.
 
-The five `user_connection` fields follow the same document-level first-login
-rule as other synced data: guest values upload only if there is no server
-document. An existing document replaces guest values, including clearing absent
-fields. Later explicit local edits are dirty and saved (§7). Each client retains
-its local link selection; changing it does not rewrite either synced URL.
-URL aliases still produce different server IDs.
-
 `language` and `tmdb_lang` were verified as portable interface/content
 preferences. `plugins`, `plugins_blacklist`, `menu_sort`, `menu_hide` and
 `start_page` remain device-local because scripts and features can differ.
+
+Both URLs and the shared authentication toggle/username/password pair must sync.
+`torrserver_use_link` stays device-local (`one` by default, or `two`); a stored
+selection survives reloads, imports, polling, conditional-save retries, account
+replacement and logout. A selector-only change sends no user-data PUT and never
+swaps or rewrites the URL fields. Logout clears synced connection values under
+the normal ownership rules while leaving the selector local.
+
+Older schema-version-2 documents without URL 2 remain valid. Both URLs follow the
+same document-level first-login rule: guest values upload only without a server
+document; an existing document replaces guest values, clearing absent synced
+fields. Later explicit edits sync normally, including URL-2 empty-string tombstones.
+There is no separate migration or merge rule. Refresh older clients after deployment
+before relying on durable URL-2 sync: their whole-document writes can omit URL 2
+because their allowlist excludes it. Mixed-version preservation is outside this change.
+
 `torrserver_savedb` controls saved playback additions and is connection-local,
 rather than a portable account preference. `file_view` is optional local
 progress. `file_view_*` belongs to CUB profiles and is excluded entirely, without
@@ -1030,19 +1050,39 @@ through membership requests. `svtlv/torrserver-ownership.js` wraps the public
 `Lampa.Torserver` methods to filter My Torrents before rendering, record canonical
 returned hashes, and replace removal with membership release.
 
-**One URL and server identity.** The built-in settings now expose only
-`torrserver_url`; there is no secondary input or link selector. The second link
-is dropped without migration: a device that used it falls back to `torrserver_url`
-(or stays unconfigured) until the URL is re-entered. Normal torrent,
-parser/search, authentication, status and speed-test paths use only that field.
-Explicit request schemes retain the existing `Utils.checkEmptyUrl` behavior.
+**Two URLs and the local selector.** The built-in settings expose
+`torrserver_url`, `torrserver_url_two` and `torrserver_use_link`, defaulting to
+`one`. Both URLs share one authentication toggle and username/password pair.
+The original upstream behavior differs by path:
 
-The add-on trims and lowercases the sole URL, removes its HTTP(S) scheme and
-trailing slashes, then synchronously computes an ES5 SHA-256 digest (64 lowercase
-hex characters). This `server_id` does not depend on the page's scheme or a
-short 32-bit hash. Different host aliases, paths or ports identify different
-membership sets; changing the URL hides old rows and restoring it reveals them.
-Plan 4 converges devices on the account's sole URL and credentials (§10.3).
+| Path | Original URL behavior |
+| --- | --- |
+| Torrent operations, streaming and speed tests | `Torserver.ip()` / `url()` use the selected URL when nonempty, otherwise the other nonempty URL; both empty means unconfigured. |
+| Parser/search | Read the selected field directly; an empty selected field reports an unconfigured TorrServer even if `ip()` could fall back. |
+| Generic request authentication | Match against the selected field directly; an empty selected field adds no Basic auth, including on requests using the fallback endpoint. |
+| Status checks | Editing either URL checks that field; changing the selector or opening settings checks the selected field, with no fallback. Nonempty checked fields receive shared credentials explicitly when auth is enabled. |
+
+Explicit request schemes retain upstream `Utils.checkEmptyUrl` behavior. These
+selected-empty differences are restored from upstream; do not replace them with
+a common resolver. Missing/invalid selection retains upstream behavior without
+new normalization or storage writes.
+
+**Effective-server membership.** The add-on takes the effective raw endpoint from
+public `Lampa.Torserver.ip()`, trims and lowercases it, removes its HTTP(S) scheme
+and trailing slashes, then synchronously computes an ES5 SHA-256 digest (64
+lowercase hex characters). This `server_id` does not depend on the page's scheme
+or a short 32-bit hash. Existing URL-1 memberships retain their IDs. Missing
+public API or both URLs empty leaves ownership unconfigured.
+
+Different normalized hosts, paths or ports remain separate membership sets even
+when URL 1 is a tailnet address and URL 2 a home LAN address for the same physical
+server. Adding under one address never claims ownership under the other. Switching
+to another effective endpoint hides the old rows; switching back restores them.
+Either URL or local selector changes refresh My Torrents, including discarding
+inactive screens. Pending list/add/playback results retain their captured account,
+generation and effective-server checks; stale results cannot affect the other
+server's membership. Shared alias identity is deferred to
+[`docs/backlog/share-torrents-between-torrserver-links.md`](backlog/share-torrents-between-torrserver-links.md).
 
 | Operation | Signed-in account | Anonymous guest |
 | --- | --- | --- |
@@ -1352,8 +1392,9 @@ Deviations recorded while implementing Plan 2
 After Plan 2 provides authenticated identity, classify every bundle storage
 key in `svtlv/storage-scope.json` with a Go drift guard (§10.3). Add the
 membership table/API and the ES5 public-API wrapper for account and device-local
-guest My Torrents (§10.4). Reduce built-in TorrServer settings to one URL and
-remove TrackTimecode. Verify user/server/guest isolation, membership-only removal,
+guest My Torrents (§10.4). The original Plan 3 reduced TorrServer settings to one
+URL; the 2026-10-21 restoration supersedes that part while retaining the separate
+TrackTimecode removal. Verify user/server/guest isolation, membership-only removal,
 first-render filtering and the absence of shared timecodes. Include race/coverage/lint and frontend runtime checks; deployment,
 real TorrServer and browser/TV smoke checks remain in the completed plan's
 Post-Completion checklist.
@@ -1362,8 +1403,9 @@ Result: every audited key has an explicit scope, accounts and guests see only
 their own memberships, and TorrServer records remain untouched by removal.
 Direct server access remains outside this view separation.
 
-Deviations recorded while implementing Plan 3
-(`docs/plans/completed/20261008-storage-scope-torrserver-ownership.md`):
+Historical deviations recorded while implementing Plan 3
+(`docs/plans/completed/20261008-storage-scope-torrserver-ownership.md`); the
+one-link decision is superseded by the restoration in §10.4:
 
 - A narrowly marked `app.min.js` one-link patch and matching `assembly.json`
   stamp were explicitly agreed after the original additive-only design. It drops
@@ -1427,10 +1469,11 @@ Deviations and accepted behavior recorded while implementing Plan 4
   marker, to apply data before Lampa initializes. Missing or failed sync never
   blocks normal boot beyond that deadline.
 
-Result: signed-in devices share whitelisted user data and the sole TorrServer
-connection, with live refresh during playback, persistent unsaved edits and
-clear-on-logout behavior. History/progress are best-effort; hardware, plugins
-and unrelated network configuration stay local.
+Result: signed-in devices share whitelisted user data, both TorrServer URLs and
+shared credentials, with live refresh during playback, persistent unsaved edits
+and clear-on-logout behavior. The active-link selection remains local to each
+client. History/progress are best-effort; hardware, plugins and unrelated network
+configuration stay local.
 
 ## 15. Acceptance criteria
 
@@ -1445,8 +1488,10 @@ The design is complete when:
 - later signed-in changes update both local storage and the server document;
 - the same Keycloak user receives the same user-owned data on another device,
   while each device retains its player and other local connection settings;
-  the sole TorrServer URL/auth/credentials sync with the same document-level
-  first-login rule, and later explicit edits reach other devices;
+  both TorrServer URLs and shared auth/credentials sync with the same document-level
+  first-login rule, and later explicit edits and secondary clears reach other devices;
+  older one-URL documents remain valid, and older clients are refreshed before relying
+  on durable URL-2 persistence;
 - signed-in My Torrents shows only entries claimed by that user, including
   when two users claim the same torrent hash; one user's removal does not
   remove the other's membership or the TorrServer record, even for the last row;
@@ -1454,9 +1499,12 @@ The design is complete when:
   guest removal changes only local storage, and login/logout transfers no hashes;
 - existing unowned torrents stay hidden until re-added individually; operator
   deletion hides retained memberships and re-add of the same hash restores them;
-- only one TorrServer URL input remains, the second link is dropped without
-  migration, and all runtime paths use the sole URL;
-- changing the sole URL hides memberships and restoring it reveals them;
+- both TorrServer URL inputs and the local selector retain original upstream per-path
+  behavior, including selected-empty differences in parser/auth/status paths;
+  selection defaults to `one`, persists locally and alone sends no user-data PUT;
+- membership follows the effective `Torserver.ip()` endpoint; switching to a different
+  normalized alias hides memberships and switching back restores them, including for
+  two addresses reaching the same physical server;
   HTTP/HTTPS page origins produce the same scheme-free SHA-256 server ID;
 - TrackTimecode is gone: no toggle and no TorrServer `/viewed` reads or writes;
   Lampa's local progress continues to work;
@@ -1476,7 +1524,8 @@ The design is complete when:
   evaluates the full `/health` JSON and sends notifications for bad checks;
 - synchronization and ownership code stay outside `app.min.js`, `css/app.css`
   and upstream language bundles; upstream updates preserve the loader seam,
-  reapply the marked one-link core patch and pass the storage drift/runtime guards;
+  retain both links and the separate marked shared-timecode removal, and pass the
+  storage drift/runtime guards;
 - failure of the optional Svtlv add-on never prevents original Lampa startup;
 - existing TorrServer and Jackett service configuration remains unchanged.
 

@@ -34,4 +34,4 @@ the inactive TorrServer address. Prefer reusing existing endpoint identities
 and membership operations; physical-server discovery or alias detection is
 not required for this behavior.
 
-Related plan: [Restore two TorrServer URLs with a local selector](../plans/20261021-restore-two-torrserver-urls.md).
+Related plan: [Restore two TorrServer URLs with a local selector](../plans/completed/20261021-restore-two-torrserver-urls.md).

@@ -101,10 +101,25 @@ reserved and rejected. There is no backend list of secret setting names or UI-in
 The frontend reads [`svtlv/storage-scope.json`](../svtlv/storage-scope.json) at runtime.
 `user` and `user_connection` must sync; `user_optional` is best-effort. Exact keys beat
 prefixes and the longest prefix wins. Unknown keys, player settings, plugins and other
-connection credentials remain local. Only the sole TorrServer URL, authentication toggle,
-login and password are portable connection fields; the shipped `encrypt` list selects
-login/password. Add a key to `user` or `user_optional` to sync it and also to `encrypt`
+connection credentials remain local. Both TorrServer URLs (`torrserver_url`,
+`torrserver_url_two`), the shared authentication toggle (`torrserver_auth`), login and
+password are portable connection fields; the shipped `encrypt` list selects login/password. Add a key to `user` or `user_optional` to sync it and also to `encrypt`
 if it should be sealed. No JS or Go change is required.
+
+The active-link selector `torrserver_use_link` is device-local: `one` (URL 1) by
+default, or `two` (URL 2). Each client preserves its stored selection across reloads,
+imports, polling, save retries, account replacement and logout. A selector-only change
+sends no user-data PUT and never swaps or rewrites either URL. Both URLs share the same
+authentication toggle and username/password pair. Logout clears the synced connection
+values under the existing ownership rules while leaving the local selector intact.
+
+Older schema-version-2 documents without URL 2 remain valid. The existing document-level
+first-login rule still applies: guest values upload only if no account document exists;
+an existing document replaces them, including clearing absent synced fields. Later URL
+edits and explicit secondary clears sync normally as values and empty-string tombstones.
+Refresh older clients after deployment before relying on durable URL-2 sync: their
+whole-document writes can omit URL 2 because their allowlist excludes it. Mixed-version
+preservation is outside this change.
 
 Clearing or removing a synchronized setting sends an empty-string tombstone. Other
 devices apply that empty value, hiding any IndexedDB reserve copy; a successful save
@@ -166,7 +181,9 @@ Run the frontend runtime and documentation checks from the repository root:
 
 ```sh
 node --test docs/tests/*.test.cjs backend/pkg/storage/testdata/torrserver-one-link.test.cjs
-npx --yes acorn@8.14.0 --ecma5 --silent svtlv/*.js
+for file in svtlv/*.js app.min.js; do
+  npx --yes acorn@8.14.0 --ecma5 --silent "$file"
+done
 ```
 
 WSL `git` cannot resolve this worktree's Windows `.git` path, so `make build` in WSL reports
@@ -337,6 +354,8 @@ Example PUT body (`Content-Type: application/json`, `X-Lampa-Csrf: 1`):
   "data": {
     "language": "ru",
     "torrserver_url": "http://ts:8090",
+    "torrserver_url_two": "http://192.168.1.10:8090",
+    "torrserver_auth": "true",
     "torrserver_login": "user",
     "torrserver_password": "secret",
     "favorite": "{\"book\":[],\"history\":[]}"
@@ -384,14 +403,19 @@ identity (for example, another tab signed in as someone else), the API returns
 `/api/v1/session` without retrying the operation; sync stops saves and polling and sends
 the Account `expired` event for the same session recheck on 401/409. Omitting the header preserves the
 existing API behavior; the header never authenticates a caller or selects another user.
-Identity, URL and guest-storage changes also discard inactive My Torrents screens so
+Identity, either URL, local selector and guest-storage changes also discard inactive My Torrents screens so
 returning from a detail screen fetches a newly filtered list.
 
 Membership routes accept an opaque `server_id` of 1–64 ASCII letters, digits, underscores
-or hyphens. The add-on derives a 64-character lowercase SHA-256 ID from the sole
-`torrserver_url`, trimmed, lowercased, stripped of its HTTP(S) scheme and trailing slashes.
-The page's scheme does not affect the ID. Different URL aliases produce different IDs;
-changing the URL hides existing memberships and restoring it reveals them. The backend
+or hyphens. The add-on derives a 64-character lowercase SHA-256 ID from the effective raw
+endpoint returned by public `Lampa.Torserver.ip()`, trimmed, lowercased, stripped of its
+HTTP(S) scheme and trailing slashes. The page's scheme does not affect the ID, and existing
+URL-1 memberships keep their IDs. Different normalized hosts, paths or ports produce
+different IDs even when both links reach the same physical server. Switching links hides
+one membership set and switching back restores it; adding under one address never claims
+ownership under the other. Missing public API or both URLs empty leaves ownership
+unconfigured. Changes to either URL or the local selector refresh My Torrents; pending
+responses remain bound to the captured account and effective server. The backend
 trims and lowercases a `hash`, then requires 40 or 64 hexadecimal characters.
 
 ### Torrent membership storage and logging
@@ -465,14 +489,19 @@ and torrent membership need the database. The critical database check probes bot
   switch account operations into guest writes. Direct playback remains available while
   identity is unresolved or the API is down; membership recording is skipped if identity
   was unresolved at invocation or changed before TorrServer answered.
-- The marked bundle patch drops the second TorrServer input and selector without migrating
-  them: every runtime path uses only `torrserver_url`, so a device that used the second link
-  must re-enter it. The same patch removes TrackTimecode (the toggle and all shared `/viewed`
-  reads/writes); playback progress stays in Lampa's local `file_view*`. Reapply the patch and its
-  version/build stamp after upstream bundle updates. Account sync shares the sole URL,
-  authentication toggle and credentials: guest data uploads only when there is no server
-  document; otherwise guest values are cleared and server values applied. Later explicit
-  edits sync normally. Different URL aliases still select different membership sets.
+- Preserve the original upstream two-link settings and per-path URL behavior after bundle
+  updates. Torrent operations, streams and speed tests use `Torserver.ip()` / `url()`: the
+  selected nonempty URL wins, otherwise the other nonempty URL is used; both empty means
+  unconfigured. Parser/search and generic authentication use the selected field directly.
+  With an empty selected field, search reports an unconfigured TorrServer and generic
+  requests receive no Basic auth even if torrent operations fall back. Status checks use
+  the changed field on either URL edit and the selected field on selector changes/settings
+  open, with no fallback; they send the shared credentials explicitly when auth is enabled.
+  Explicit URL schemes retain upstream `Utils.checkEmptyUrl` behavior. These are the original
+  upstream differences, not a common routing policy. The separate marked patch still removes
+  TrackTimecode (the toggle and all shared `/viewed` reads/writes); playback progress stays in
+  Lampa's local `file_view*`. Reapply that removal and its version/build stamp after upstream
+  updates without removing the two-link controls or changing their routing.
 - Account sync polls every 60 seconds while visible and on screen return, applying clean
   remote changes live, including during playback. A normal save costs a poll GET plus a PUT;
   each authenticates against Keycloak, even a 304 (no cache). Dirty fingerprints in
