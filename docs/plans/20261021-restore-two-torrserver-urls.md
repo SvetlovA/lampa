@@ -2,7 +2,9 @@
 
 ## Overview
 
-Restore Lampa's two TorrServer URL inputs and link selector. Store both URLs and
+Restore Lampa's two TorrServer URL inputs, link selector and runtime behavior
+exactly as implemented before the one-link removal, preserving upstream
+compatibility. Store both URLs and
 the existing shared authentication settings in the account's database document.
 Each client chooses its active link locally: switching links never changes the
 account document or another client's selection. The default selection is URL 1.
@@ -36,13 +38,18 @@ account document or another client's selection. The default selection is URL 1.
 - Keep changes focused and ES5-compatible. Add-on changes use public Lampa APIs.
 - Restoring the built-in two-link configuration requires a narrow bundle edit,
   as explicitly requested. Account sync and ownership integration stay in `svtlv/`.
+- Restore original two-link fragments without redesigning their behavior. Keep
+  upstream names, markup, translations, selector registration, defaults, events,
+  request routing and per-path fallback semantics. Adapt bundle-local identifiers
+  only as needed to match the current Rollup scope.
 - Update this plan if implementation reveals a material change in scope.
 - Preserve existing shared-timecode removal, membership isolation, parser search
   modes and unrelated Jackett/Prowlarr settings.
 
 ## Solution Overview
 
-Restore the original input names and selector values. Add URL 2 to the existing
+Restore the original two-link implementation from `ed967ae^:app.min.js`, including
+its existing behavior in each consumer. Add URL 2 to the existing
 portable connection allowlist and classify the selector as device-local. Use
 `Lampa.Torserver.ip()` as the public authority for the effective endpoint when
 deriving membership identity, so list, playback and membership use the same server.
@@ -64,16 +71,20 @@ the original settings. Login and password retain their existing encryption polic
 | `torrserver_use_link` | `device` | Never export or import; local `one` / `two` |
 
 - Register `torrserver_use_link` with default `one`. Preserve an explicit stored
-  client selection across reloads and account sync. Missing or invalid selection
-  resolves to `one`; applying remote settings must not reset a valid selection.
-- Restore the original effective-URL fallback: use the selected URL when present,
+  client selection across reloads and account sync. Preserve upstream behavior
+  for missing/invalid stored values without adding new normalization or writes;
+  applying remote settings must not reset a valid selection.
+- Restore the original `Torserver.ip()` fallback: use the selected URL when present,
   otherwise the other nonempty URL. Both empty means unconfigured. Defaulting to
   `one` does not prevent fallback when only URL 2 is configured.
 - Do not swap, copy or rewrite URL fields when the selector changes.
-- Route torrent operations, streaming, TorrServer parser/search, authentication
-  and speed tests through the effective endpoint. Restore both input status
-  checks and appropriate change listeners. Avoid retaining the original
-  mismatch where some consumers ignored the effective-URL fallback.
+- Restore each runtime path exactly as before removal: torrent operations,
+  streaming and speed tests use the original `Torserver.ip()` / `url()` behavior;
+  parser/search and authentication use the selected URL field directly, as in
+  upstream. Restore the original status-check selection, both URL change
+  listeners, selector listener and speed-test insertion after the second input.
+  Preserve the original differences when the selected field is empty; do not
+  introduce a shared resolver or change fallback behavior in upstream consumers.
 - Derive `server_id` from the effective raw URL using the existing normalization
   and SHA-256 algorithm. Existing URL-1 memberships therefore retain their IDs;
   aliases with different normalized hosts/paths/ports remain separate.
@@ -101,8 +112,10 @@ the original settings. Login and password retain their existing encryption polic
 - Exercise actual bundle functions in the existing Node VM harness, updating its
   one-link expectations to two-link behavior. Keep its current filename to avoid
   unnecessary CI and command changes.
-- Cover both selections, default/invalid selection, selected-empty fallback,
-  both-empty behavior, explicit schemes and authenticated effective-URL requests.
+- Cover both selections, default/invalid selection, selected-empty behavior in
+  each upstream path, both-empty behavior, explicit schemes and authentication
+  against the selected field. Use the historical implementation as the behavioral
+  reference, including cases where parser/auth behavior differs from `ip()` fallback.
 - Extend ownership tests for selected-server isolation and delayed responses.
 - Extend sync tests with two clients sharing one server document but different
   local selections, including remote edits, secondary clears and logout.
@@ -115,6 +128,17 @@ the original settings. Login and password retain their existing encryption polic
 - Mark completed items `[x]` immediately and keep this plan aligned with changes.
 - Add newly discovered tasks with a ➕ prefix and blockers with a ⚠️ prefix.
 - Move the plan to `docs/plans/completed/` only after implementation is complete.
+
+## Auto Review
+
+- `planning:make` plan-review verdict: **APPROVE**. No critical or important issues.
+- [plan-review] Task 5 minor finding addressed: explicitly update `CLAUDE.md` so
+  future maintenance restores both links and retains our sync/ownership policy.
+- The reviewer verified historical per-path URL behavior, public `Torserver.ip()`
+  availability, generic sync scope filtering and test coverage across all five tasks.
+- Tasks 1 and 2 must both be complete before deployment: core routing and
+  ownership must agree on the effective server in the delivered application.
+- This review inspected the plan and code; application tests run during implementation.
 
 ## Implementation Steps
 
@@ -129,12 +153,13 @@ the original settings. Login and password retain their existing encryption polic
 - Modify: `docs/settings-sync-backend-design.md`
 - Modify: `docs/tests/ownership-docs.test.cjs`
 
-- [ ] Restore both URL inputs and the local selector with default `one`, existing translation keys, `.selector` elements and remote-compatible settings behavior.
-- [ ] Restore effective two-link routing across torrent, parser/search, authentication, speed-test and status paths, with consistent empty-field fallback and change listeners.
+- [ ] Restore both URL inputs and the selector from the original template and Params registration, preserving names, labels, markup, ordering, events and default `one` exactly.
+- [ ] Restore the original two-link fragments across torrent, parser/search, authentication, speed-test and status paths, including their original per-path fallback semantics and change listeners; adapt only shifted bundle-local identifiers.
 - [ ] Add `torrserver_url_two` to `user_connection` and `torrserver_use_link` to `device`; update policy notes while retaining shared credential encryption.
 - [ ] Rename/adapt the Go single-URL guard to require two inputs and the default selector; retain timecode-removal, unrelated-parser and version-stamp assertions. Update scope expectations and the design scope table/negative documentation fixture together so guards remain valid.
 - [ ] Update the application version and matching assembly metadata using the current stamp convention; leave CSS version unchanged unless CSS changes are actually required.
-- [ ] Update bundle runtime tests for both links, defaults, fallback, empty values, scheme handling, auth, search changes, speed tests and status checks.
+- [ ] Update bundle runtime tests for both links, defaults, fallback, empty values, scheme handling, auth, search changes, speed tests and status checks, matching historical upstream behavior rather than imposing new consistency rules.
+- [ ] Compare each restored fragment with `ed967ae^:app.min.js`; add regression coverage for selected-empty cases proving that original `ip()` fallback and direct selected-field consumers remain unchanged.
 - [ ] Run the bundle runtime tests, documentation guards, current frontend tests, targeted Go guards and ES5 checks; all must pass before Task 2.
 
 ### Task 2: Bind ownership to the effective selected server
@@ -172,7 +197,7 @@ the original settings. Login and password retain their existing encryption polic
 - Update: relevant test files only if a concrete gap is found
 
 - [ ] Verify both URLs and shared credentials are stored by account sync while selection remains local, persists across reloads and defaults to `one` when absent.
-- [ ] Verify every endpoint-dependent path and membership identity agrees on the effective server, including selected-empty fallback.
+- [ ] Verify restored core fragments match the original two-link implementation, including its per-path selected-empty behavior; verify add-on membership identity follows the effective `Torserver.ip()` endpoint used by torrent operations.
 - [ ] Run `node --test docs/tests/*.test.cjs backend/pkg/storage/testdata/torrserver-one-link.test.cjs` from the repository root.
 - [ ] Run `npx --yes acorn@8.14.0 --ecma5 --silent svtlv/*.js app.min.js` and `git diff --check`.
 - [ ] From `backend/`, run `go test ./pkg/storage -run 'TestTorrserver|TestStorageScope|TestSensitiveSettings'` and `make lint` if Go guard code changed. Use the available supported Go environment; record any unavailable checks explicitly.
@@ -183,12 +208,13 @@ the original settings. Login and password retain their existing encryption polic
 **Files:**
 - Modify: `backend/README.md`
 - Modify: `docs/settings-sync-backend-design.md`
+- Modify: `CLAUDE.md`
 - Modify: `docs/tests/ownership-docs.test.cjs` (if additional assertions need updating)
 - Move: this plan to `docs/plans/completed/` after completion
 
-- [ ] Replace current one-link descriptions with both synced URLs, shared credentials, the local selector/default, effective-URL fallback and selected-server membership behavior.
+- [ ] Replace current one-link descriptions with both synced URLs, shared credentials, the local selector/default, original upstream per-path URL behavior and effective-server membership behavior. Document the original selected-empty differences without presenting a new routing policy.
 - [ ] Document compatibility with older one-URL documents and the need to refresh older clients before relying on durable URL-2 sync.
-- [ ] Update active guidance and commands if needed; leave completed historical plans as records of their original work.
+- [ ] Update `CLAUDE.md` to remove instructions to reapply the one-link patch, list both portable URL fields and the device-local selector, and describe the revised bundle guard while retaining the separate shared-timecode removal. Update other active guidance and commands if needed; leave completed historical plans as records of their original work.
 - [ ] Run documentation guards and the final frontend suite, record verification results and remaining manual checks, then move this completed plan.
 
 ## Post-Completion
