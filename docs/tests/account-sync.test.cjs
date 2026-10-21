@@ -8,8 +8,8 @@ const {test} = require('node:test');
 const source = fs.readFileSync(path.join(__dirname, '../../svtlv/account-sync.js'), 'utf8');
 const bundle = fs.readFileSync(path.join(__dirname, '../../app.min.js'), 'utf8');
 // Resolve methods through the public export: Rollup's internal suffixes drift.
-function upstreamStorageMethod(method) {
-  const exports = bundle.match(/  var Storage = \{([\s\S]*?)\n  \};/)[1];
+function upstreamStorageMethod(method, module = 'Storage') {
+  const exports = bundle.match(new RegExp('  var ' + module + ' = \\{([\\s\\S]*?)\\n  \\};'))[1];
   const name = exports.match(new RegExp('\\b' + method + ': ([\\w$]+)'))[1];
   const start = bundle.indexOf('\n  function ' + name + '(') + 1;
   const end = bundle.indexOf('\n  }', start) + 4;
@@ -101,12 +101,18 @@ function page(options = {}) {
   const Lampa = window.Lampa;
   if (options.upstreamStorage) {
     const upstream = vm.createContext({window, readed: memory, reserve: options.reserve || {},
+      Storage: Lampa.Storage, values: {}, defaults: {}, Params: {},
       Arrays: {isObject: value => value !== null && typeof value === 'object' && !Array.isArray(value),
         isArray: Array.isArray},
       listener: {send(name, event) { for (const fn of storageListeners[name] || []) fn(event); }},
       Cache: {rewriteData() { return Promise.resolve(); }}, console: {log() {}}
     });
     Lampa.Storage.get = vm.runInContext(upstreamStorageMethod('get'), upstream);
+    // Use the actual selector registration and public field methods for defaults.
+    upstream.select = vm.runInContext(upstreamStorageMethod('select', 'Params'), upstream);
+    vm.runInContext(bundle.match(/  select\('torrserver_use_link',[\s\S]*?\);/)[0], upstream);
+    upstream.Params.field = vm.runInContext(upstreamStorageMethod('field', 'Params'), upstream);
+    Lampa.Storage.field = vm.runInContext(upstreamStorageMethod('field'), upstream);
     const set = vm.runInContext(upstreamStorageMethod('set'), upstream);
     Lampa.Storage.set = function (key, value, nolisten, callerror) {
       storageWrites.push({key, value});
@@ -213,6 +219,25 @@ test('scope fetch uses the loader cache version and classifies the real inventor
   for (const [key, expected] of cases) assert.equal(p.core.classify(key), expected, key);
   for (const [key, expected] of cases) {
     assert.equal(p.core.synced(key), ['user', 'user_connection', 'user_optional'].includes(expected), key);
+  }
+});
+
+test('both TorrServer URLs must sync while selection stays local and shared credentials stay sealed', () => {
+  const data = {torrserver_url: 'http://tailnet:8090', torrserver_url_two: 'http://192.168.1.2:8090',
+    torrserver_auth: 'true', torrserver_login: 'user', torrserver_password: 'secret'};
+  const p = page({items: {...data, torrserver_use_link: 'two'}}); p.load();
+  for (const key of Object.keys(data)) {
+    assert.equal(p.core.classify(key), 'user_connection', key);
+    assert.equal(p.core.synced(key), true, key);
+  }
+  assert.equal(p.core.classify('torrserver_use_link'), 'device');
+  assert.equal(p.core.synced('torrserver_use_link'), false);
+  assert.deepEqual(clean(p.core.exportLocal()), data);
+  const body = clean(p.core.fitBody({...data, torrserver_use_link: 'one'}));
+  assert.deepEqual(body.data, data);
+  for (const key of ['torrserver_login', 'torrserver_password']) assert.ok(body.encrypt.includes(key));
+  for (const key of ['torrserver_url', 'torrserver_url_two', 'torrserver_use_link']) {
+    assert.equal(body.encrypt.includes(key), false, key);
   }
 });
 
@@ -1863,6 +1888,173 @@ function acceptanceDevice(server, options = {}, scope = realScope) {
   return p;
 }
 
+const torrserverConnection = {
+  torrserver_url: 'http://tailnet:8090', torrserver_url_two: 'http://192.168.1.2:8090',
+  torrserver_auth: 'true', torrserver_login: 'shared user', torrserver_password: 'shared secret'
+};
+
+test('two links: first guest upload and other client imports retain independent selections across reload', () => {
+  const server = sharedDocument();
+  const a = page({state: guestState, uninspected: true, upstreamStorage: true,
+    items: {...torrserverConnection, torrserver_use_link: 'two'}});
+  a.state(signedIn('Alice'));
+  a.requests[0].success(clean(realScope)); server.respond(a.requests.at(-1));
+  a.tick(2000); server.respond(a.requests.at(-1));
+  const put = a.requests.at(-1);
+  assert.deepEqual(putBody(put).data, torrserverConnection);
+  assert.deepEqual(putBody(put).encrypt, realScope.encrypt);
+  server.respond(put);
+  assert.deepEqual(server.data(), torrserverConnection);
+  const b = acceptanceDevice(server, {items: {torrserver_use_link: 'one'}});
+  const fresh = acceptanceDevice(server);
+  for (const [p, selection] of [[a, 'two'], [b, 'one'], [fresh, 'one']]) {
+    for (const [key, value] of Object.entries(torrserverConnection)) assert.equal(p.items[key], value, key);
+    assert.equal(p.window.Lampa.Storage.field('torrserver_use_link'), selection);
+    assert.equal(Object.hasOwn(JSON.parse(p.items[BASE]), 'torrserver_use_link'), false);
+    const restarted = acceptanceDevice(server, {items: p.items, hidden: true});
+    assert.equal(restarted.window.Lampa.Storage.field('torrserver_use_link'), selection);
+    restarted.tick(600000);
+    assert.equal(restarted.requests.length, 2, 'clean imported configuration does not upload on reload');
+  }
+});
+
+for (const local of ['one', 'two', undefined]) {
+  test('two links: remote selectors are ignored and local switches never save: ' + local, () => {
+    const server = sharedDocument({...torrserverConnection, torrserver_use_link: local === 'two' ? 'one' : 'two'});
+    const p = acceptanceDevice(server, {hidden: true,
+      items: local ? {torrserver_use_link: local} : {}});
+    assert.equal(p.window.Lampa.Storage.field('torrserver_use_link'), local || 'one');
+    assert.equal(p.items.torrserver_use_link, local, 'import does not even persist a default selector');
+    const before = {...p.items}, document = server.data();
+    for (const selection of ['two', 'one', 'two']) {
+      p.window.Lampa.Storage.set('torrserver_use_link', selection);
+      p.tick(600000);
+      assert.equal(p.requests.length, 2, 'a selector event does not dirty the export or start a save');
+      assert.equal(p.items[BASE], before[BASE]);
+      assert.equal(p.items.torrserver_url, before.torrserver_url);
+      assert.equal(p.items.torrserver_url_two, before.torrserver_url_two);
+    }
+    assert.deepEqual(server.data(), document);
+    p.visibility(false); const poll = p.requests.at(-1);
+    poll.success(documentV2({...torrserverConnection, torrserver_use_link: 'one'}), 200, '"remote"');
+    assert.equal(p.window.Lampa.Storage.field('torrserver_use_link'), 'two', 'live import also ignores selector');
+    p.visibility(true); p.tick(600000);
+    assert.equal(p.requests.filter(r => r.config.type === 'PUT').length, 0);
+  });
+}
+
+for (const clear of ['', null]) {
+  test('two links: URL edits poll live and secondary clears survive saves and reload: ' + clear, () => {
+    const server = sharedDocument(torrserverConnection);
+    const a = acceptanceDevice(server, {items: {torrserver_use_link: 'one'}});
+    const b = acceptanceDevice(server, {items: {torrserver_use_link: 'two'}});
+    const updated = {...torrserverConnection, torrserver_url: 'https://new-tailnet',
+      torrserver_url_two: 'http://192.168.1.3:8090'};
+    a.change('torrserver_url', updated.torrserver_url);
+    a.change('torrserver_url_two', updated.torrserver_url_two);
+    a.tick(2000); server.respond(a.requests.at(-1)); server.respond(a.requests.at(-1));
+    b.tick(60000); server.respond(b.requests.at(-1));
+    for (const [key, value] of Object.entries(updated)) assert.equal(b.window.Lampa.Storage.get(key) + '', value, key);
+    assert.equal(b.window.Lampa.Storage.field('torrserver_use_link'), 'two');
+    b.change('torrserver_url_two', clear); b.tick(2000); server.respond(b.requests.at(-1));
+    assert.equal(putBody(b.requests.at(-1)).data.torrserver_url_two, '');
+    server.respond(b.requests.at(-1));
+    a.tick(60000); server.respond(a.requests.at(-1));
+    assert.equal(a.window.Lampa.Storage.get('torrserver_url_two'), '');
+    a.change('torrserver_login', 'changed shared user'); a.tick(2000);
+    server.respond(a.requests.at(-1)); server.respond(a.requests.at(-1));
+    assert.deepEqual(server.data(), {...updated, torrserver_url_two: '', torrserver_login: 'changed shared user'});
+    for (const [p, selection] of [[a, 'one'], [b, 'two']]) {
+      const restarted = acceptanceDevice(server, {items: p.items, hidden: true,
+        reserve: {torrserver_url_two: 'http://old-reserve:8090'}});
+      assert.equal(restarted.window.Lampa.Storage.get('torrserver_url_two'), '');
+      assert.equal(restarted.window.Lampa.Storage.field('torrserver_use_link'), selection);
+      assert.equal(Object.hasOwn(JSON.parse(restarted.items[BASE]), 'torrserver_url_two'), false);
+      restarted.tick(600000);
+      assert.equal(restarted.requests.length, 2);
+    }
+  });
+}
+
+for (const secondary of ['http://new-lan:8090', '']) for (const firstWriter of [0, 1]) {
+  test('two links: stale-save retry merges independent URL edits without syncing selection: ' + secondary + ' / ' + firstWriter, () => {
+    const server = sharedDocument(torrserverConnection);
+    const devices = ['one', 'two'].map(selection => acceptanceDevice(server, {items: {torrserver_use_link: selection}}));
+    devices[0].change('torrserver_url', 'https://new-tailnet');
+    devices[1].change('torrserver_url_two', secondary);
+    for (const p of devices) { p.tick(2000); server.respond(p.requests.at(-1)); }
+    const winner = devices[firstWriter], retrying = devices[1 - firstWriter];
+    assert.equal(winner.requests.at(-1).config.headers['If-Match'], retrying.requests.at(-1).config.headers['If-Match']);
+    server.respond(winner.requests.at(-1)); server.respond(retrying.requests.at(-1));
+    assert.equal(server.responses.at(-1), 412);
+    const selection = retrying.items.torrserver_use_link;
+    retrying.change('torrserver_use_link', selection === 'one' ? 'two' : 'one');
+    server.respond(retrying.requests.at(-1));
+    assert.equal(Object.hasOwn(putBody(retrying.requests.at(-1)).data, 'torrserver_use_link'), false);
+    server.respond(retrying.requests.at(-1));
+    winner.tick(60000); server.respond(winner.requests.at(-1));
+    assert.deepEqual(server.data(), {...torrserverConnection, torrserver_url: 'https://new-tailnet', torrserver_url_two: secondary});
+    for (const p of devices) {
+      assert.equal(p.items.torrserver_url, 'https://new-tailnet');
+      assert.equal(p.window.Lampa.Storage.get('torrserver_url_two', ''), secondary);
+      assert.equal(p.reloads.length, 0); assert.deepEqual(p.notices, []);
+    }
+    assert.equal(retrying.items.torrserver_use_link, selection === 'one' ? 'two' : 'one');
+    assert.equal(winner.items.torrserver_use_link, firstWriter === 0 ? 'one' : 'two');
+  });
+}
+
+for (const previous of ['guest', 'Bob']) for (const secondary of [false, true]) {
+  test('two links: existing account replaces guest or previous-owner URLs and logout retains selector: ' + previous + ' / ' + secondary, () => {
+    const data = {...torrserverConnection};
+    if (!secondary) delete data.torrserver_url_two;
+    const server = sharedDocument(data);
+    const p = loginPage({upstreamStorage: true, items: {
+      ...(previous === 'Bob' ? {[USER]: 'Bob'} : {}), torrserver_use_link: 'two',
+      torrserver_url: 'http://private-old-primary', torrserver_url_two: 'http://private-old-secondary',
+      torrserver_password: 'private old password'
+    }});
+    server.respond(p.dataRequest);
+    assert.equal(p.items[USER], 'Alice');
+    assert.equal(p.items.torrserver_url, data.torrserver_url);
+    assert.equal(p.items.torrserver_url_two, data.torrserver_url_two || '', 'absent secondary clears previous-owner/guest data');
+    assert.equal(p.items.torrserver_password, data.torrserver_password);
+    assert.equal(p.items.torrserver_use_link, 'two');
+    const restarted = acceptanceDevice(server, {items: p.items});
+    restarted.tick(2000);
+    assert.equal(restarted.requests.length, 2, 'guest data must never be uploaded over an existing account document');
+    restarted.state(guestState);
+    for (const key of Object.keys(torrserverConnection)) assert.equal(restarted.items[key], '', key);
+    assert.equal(restarted.items.torrserver_use_link, 'two');
+    assert.equal(restarted.items[USER], undefined);
+    assert.equal(restarted.items[BASE], undefined);
+    assert.equal(restarted.requests.filter(r => r.config.type === 'PUT').length, 0);
+  });
+}
+
+for (const key of ['torrserver_url', 'torrserver_url_two']) {
+  test('two links: failed live URL persistence disables uploads and retains cleanup ownership: ' + key, () => {
+    const server = sharedDocument(torrserverConnection);
+    const p = acceptanceDevice(server, {items: {torrserver_use_link: 'two'}});
+    p.faults.quota = key;
+    p.tick(60000);
+    p.requests.at(-1).success(documentV2({...torrserverConnection, [key]: 'http://new-server'}), 200, '"new"');
+    assert.equal(p.items[key], undefined, 'upstream quota fallback removes the raw item');
+    assert.equal(p.window.Lampa.Storage.get(key), 'http://new-server', 'the incoming value remains in memory');
+    assert.equal(p.items[USER], 'Alice');
+    const requests = p.requests.length;
+    p.change('torrserver_url', 'http://another-edit'); p.tick(600000);
+    assert.equal(p.requests.length, requests, 'failed must-sync persistence stops polling and saves');
+    assert.equal(p.requests.filter(r => r.config.type === 'PUT').length, 0);
+    assert.deepEqual(server.data(), torrserverConnection);
+    delete p.faults.quota;
+    p.state(guestState);
+    for (const field of Object.keys(torrserverConnection)) assert.equal(p.items[field], '', field);
+    assert.equal(p.items.torrserver_use_link, 'two');
+    assert.equal(p.items[USER], undefined);
+  });
+}
+
 for (const mode of ['login', 'recovery', 'omitted']) test('account application refreshes stale guest caches without a raw change: ' + mode, () => {
   const server = sharedDocument(mode === 'omitted' ? {} : {favorite: '{"book":[2]}'});
   const sharedItems = {favorite: '{"book":[1]}', ...(mode === 'recovery' ? {[USER]: 'Alice'} : {})};
@@ -2207,7 +2399,7 @@ test('a restarted device persists a recovered must-sync reserve value before upl
 });
 
 test('first login recovers writable must-sync reserve values without omitting them', () => {
-  for (const key of ['favorite', 'torrserver_password']) {
+  for (const key of ['favorite', 'torrserver_password', 'torrserver_url', 'torrserver_url_two']) {
     const raw = key === 'favorite' ? '{"book":[1,2]}' : 'private credential';
     const p = loginPage({items: {language: 'en'}, reserve: {[key]: raw}, upstreamStorage: true});
     p.dataRequest.fail(404, missingDocument);
@@ -2220,7 +2412,7 @@ test('first login recovers writable must-sync reserve values without omitting th
 });
 
 test('first login disables uploads if must-sync reserve values still cannot be persisted', () => {
-  for (const key of ['favorite', 'torrserver_password']) for (const otherLocalData of [false, true]) {
+  for (const key of ['favorite', 'torrserver_password', 'torrserver_url', 'torrserver_url_two']) for (const otherLocalData of [false, true]) {
     const reserveValue = key === 'favorite' ? '{"book":[1,2]}' : 'private credential';
     const p = loginPage({items: otherLocalData ? {language: 'en'} : {},
       reserve: {[key]: reserveValue}, upstreamStorage: true});

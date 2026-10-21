@@ -194,13 +194,17 @@ Pinned Acorn ES5 parsing passed for each add-on and `app.min.js`; `git diff --ch
 - Modify: `docs/tests/account-sync.test.cjs`
 - Modify: `svtlv/account-sync.js` (only if behavioral tests expose a gap in generic policy handling)
 
-- [ ] Add scope assertions showing both URLs are must-sync and the selector is local; retain login/password sealing assertions.
-- [ ] Test a first upload and another client's import of both URLs and credentials, with each client keeping its own selection and a fresh client defaulting to URL 1.
-- [ ] Test that selector-only changes neither dirty exported data nor issue a PUT; remote documents containing a selector must not overwrite the local value.
-- [ ] Test live polling, explicit URL edits, URL-2 clears/tombstones and stale-save retries with different client selections.
-- [ ] Test existing documents without URL 2, account replacement, logout and must-sync storage failures using current isolation and recovery rules.
-- [ ] Keep generic sync code unchanged if these behaviors already follow from policy; if a change is needed, cover the discovered failure and recovery.
-- [ ] Run all account-sync tests and the full frontend suite; all must pass before Task 4.
+- [x] Add scope assertions showing both URLs are must-sync and the selector is local; retain login/password sealing assertions.
+- [x] Test a first upload and another client's import of both URLs and credentials, with each client keeping its own selection and a fresh client defaulting to URL 1.
+- [x] Test that selector-only changes neither dirty exported data nor issue a PUT; remote documents containing a selector must not overwrite the local value.
+- [x] Test live polling, explicit URL edits, URL-2 clears/tombstones and stale-save retries with different client selections.
+- [x] Test existing documents without URL 2, account replacement, logout and must-sync storage failures using current isolation and recovery rules.
+- [x] Keep generic sync code unchanged if these behaviors already follow from policy; if a change is needed, cover the discovered failure and recovery.
+- [x] Run all account-sync tests and the full frontend suite; all must pass before Task 4.
+
+Verification: all 158 account-sync tests and all 444 frontend tests passed.
+Pinned Acorn ES5 parsing passed for every add-on and `app.min.js`; `git diff --check` passed.
+The existing generic sync implementation satisfies the two-link policy without changes.
 
 ### Task 4: Verify acceptance criteria
 
