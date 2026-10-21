@@ -39,7 +39,7 @@
   `external`, `cache`; exact keys beat prefixes, longest `*` prefix wins; entries match
   `^[a-zA-Z0-9_.:-]+\*?$`) is checked by `TestStorageScope_matchBundle`
   (`backend/pkg/storage/crypto_test.go`, which also passes `SensitiveSettings` to
-  `storageScopeDrift`) and by `docs/tests/ownership-docs.test.cjs` (`checkScopes` compares
+  `storageScopeDrift`) and by `tests/ownership-docs.test.cjs` (`checkScopes` compares
   the design doc §10.3 table with the scope names and `user` keys). It ships in `lampa-web`.
 - `svtlv/account.js` publishes `window.svtlv_account_state {status, generation, user_id}`
   and the `svtlv_account` Listener event, and rechecks the session on `{type: 'expired'}`.
@@ -59,7 +59,7 @@
 - `index.html` seam: account.js (no wait) → torrserver-ownership.js → `startLampa()`. Old
   engines can fire both load callbacks; the seam guards with `svtlv_started`.
   `torrserver-ownership.js` installs a `window.Lampa` accessor; other add-ons must poll.
-- Tests: `node --test docs/tests/*.test.cjs` run the real add-on in `vm`; `acorn --ecma5`
+- Tests: `node --test tests/*.test.cjs` run the real add-on in `vm`; `acorn --ecma5`
   parses `svtlv/*.js`; Go `make test/race/lint` (native macOS with cgo + Docker works here).
 
 ## Development Approach
@@ -73,7 +73,7 @@
 - maintain backward compatibility: a missing, failing or throwing `account-sync.js` must still boot Lampa
 
 ## Testing Strategy
-- **unit tests**: `docs/tests/account-sync.test.cjs` runs the add-on in `vm` like
+- **unit tests**: `tests/account-sync.test.cjs` runs the add-on in `vm` like
   `torrserver-ownership.test.cjs`, with fake `$.ajax`, `localStorage`, timers,
   `Lampa.Storage`, `Lampa.Listener`, `Lampa.Favorite`, `Lampa.Timeline`,
   `storage`/`visibilitychange` events and `location.reload`, and the real
@@ -397,20 +397,20 @@ only. Nothing is defined on non-HTTP(S) origins (`^https?:$` guard).
 **Files:**
 - Modify: `svtlv/storage-scope.json`
 - Modify: `backend/pkg/storage/crypto_test.go` (scope names, Plan 4 assertions)
-- Modify: `docs/tests/ownership-docs.test.cjs`
+- Modify: `tests/ownership-docs.test.cjs`
 - Modify: `docs/settings-sync-backend-design.md` (§10.3 table only, so `checkScopes` keeps passing)
 
 - [x] ⚠️ final user confirmation (skipped - not automatable; requested with no response during this iteration); applied the proposed must-sync, best-effort and encrypt lists above
 - [x] add the `user_optional` scope; move best-effort keys into it; move `file_view_*` to `external` (unless the user decides otherwise); add the top-level `encrypt` list; update `_policy` and the key notes
 - [x] scope guard: add `user_optional` to `storageScopeNames`; accept `encrypt` without checking its contents; update the Plan 4 assertions (~596–612) and drop the sealed-key assertions
 - [x] update `ownership-docs.test.cjs` and the design doc §10.3 table together
-- [x] run `make test` in `backend/` and `node --test docs/tests/*.test.cjs` - must pass before task 4
+- [x] run `make test` in `backend/` and `node --test tests/*.test.cjs` - must pass before task 4
 
 ### Task 4: Add-on core — whitelist, fingerprints, export, apply, size rule
 
 **Files:**
 - Create: `svtlv/account-sync.js`
-- Create: `docs/tests/account-sync.test.cjs`
+- Create: `tests/account-sync.test.cjs`
 - Modify: `.github/workflows/tests.yaml`
 
 - [x] create `svtlv/account-sync.js` IIFE with the protocol guard, inline `{en, ru}` strings and a `$.ajax` helper (JSON, timeout, `Content-Type`, `If-Match`/`If-None-Match`)
@@ -420,7 +420,7 @@ only. Nothing is defined on non-HTTP(S) origins (`^https?:$` guard).
 - [x] wrap every storage access in try/catch; failures turn sync off for the page and never block boot
 - [x] write tests: `classify` against a copy of the Go guard's case table on the real JSON; export/apply round trip exact; apply ignores non-synced keys and non-string values and never overwrites dirty keys; base updated on apply
 - [x] write tests: `fp`/dirty for '' vs null vs value; clear writes `''` so a `reserve` fallback is hidden; must-sync before optional and optional failure skipped; size rule with escapes (encoded size) drops largest optional first, must-sync overflow blocks, lone surrogate; invalid scope JSON disables sync
-- [x] add `node --test docs/tests/account-sync.test.cjs` to `tests.yaml`; confirm `acorn --ecma5` passes
+- [x] add `node --test tests/account-sync.test.cjs` to `tests.yaml`; confirm `acorn --ecma5` passes
 - [x] run node tests - must pass before task 5
 
 ### Task 5: Pre-boot apply and loader seam
@@ -428,8 +428,8 @@ only. Nothing is defined on non-HTTP(S) origins (`^https?:$` guard).
 **Files:**
 - Modify: `svtlv/account-sync.js`
 - Modify: `index.html` (inside `svtlv:begin/end` only)
-- Modify: `docs/tests/account-sync.test.cjs`
-- Modify: `docs/tests/torrserver-ownership.test.cjs` (seam assertion ~821)
+- Modify: `tests/account-sync.test.cjs`
+- Modify: `tests/torrserver-ownership.test.cjs` (seam assertion ~821)
 
 - [x] implement `window.svtlv_sync_boot(done)` per the boot diagram: ignore a second call; arm the 3s timer first; no marker → `done` with no request; scope and user-data fetched in parallel; `done` exactly once; late responses ignored
 - [x] handle valid 200 (apply, ready), 404 `user_data_not_found` (ready), 401/409 (clear, not ready), other/invalid/no scope (not ready, remember for the after-boot Noty), must-sync apply failure (uploads off, Noty)
@@ -443,8 +443,8 @@ only. Nothing is defined on non-HTTP(S) origins (`^https?:$` guard).
 **Files:**
 - Modify: `svtlv/account-sync.js`
 - Modify: `svtlv/account.js`
-- Modify: `docs/tests/account-sync.test.cjs`
-- Modify: `docs/tests/account-state.test.cjs`
+- Modify: `tests/account-sync.test.cjs`
+- Modify: `tests/account-state.test.cjs`
 
 - [x] poll for `window.Lampa` like `account.js` (never `defineProperty`); read `svtlv_account_state` and follow `svtlv_account` state events; a repeated `signed_in(U)` for the handled U does nothing
 - [x] `signed_in(U)` per the post-boot diagram, including the 404 split (no marker keeps guest data, another marker clears); marker and base before any reload; reload when anything was cleared or written
@@ -459,7 +459,7 @@ only. Nothing is defined on non-HTTP(S) origins (`^https?:$` guard).
 
 **Files:**
 - Modify: `svtlv/account-sync.js`
-- Modify: `docs/tests/account-sync.test.cjs`
+- Modify: `tests/account-sync.test.cjs`
 
 - [x] follow `Lampa.Storage.listener` `change` for synced keys (ignored while `applying`) only to start the timer; dirty state always comes from `dirty(key)`
 - [x] timers: 2s when a must-sync key is dirty, 5 min when only optional keys are; flush on `visibilitychange` to hidden; one save at a time, a trigger during a save → exactly one more
@@ -472,7 +472,7 @@ only. Nothing is defined on non-HTTP(S) origins (`^https?:$` guard).
 
 **Files:**
 - Modify: `svtlv/account-sync.js`
-- Modify: `docs/tests/account-sync.test.cjs`
+- Modify: `tests/account-sync.test.cjs`
 
 - [x] implement `poll()` per the poll diagram with `lastDoc`/`lastEtag`; one request at a time; the save flow starts with `poll()`
 - [x] triggers: `visibilitychange` to visible and a 60s timer while visible and uploads are on; stop on logout or 401/409
@@ -489,7 +489,7 @@ only. Nothing is defined on non-HTTP(S) origins (`^https?:$` guard).
 - [x] a change on another device shows up on a running page within about 60s (or on screen return) without a reload, also during playback, including bookmarks and progress (two independent VM pages verified; physical playback check skipped - not automatable here)
 - [x] adding a key only to `storage-scope.json` makes it sync with no JS or Go change (test with a temporary scope)
 - [x] logout or expired session: synced keys gone (also those in IndexedDB reserve), device keys (`player`, `jackett_*`, `plugins`, …) untouched
-- [x] run full suite: `node --test docs/tests/*.test.cjs backend/pkg/storage/testdata/torrserver-one-link.test.cjs`, `npx --yes acorn@8.14.0 --ecma5 --silent svtlv/*.js`, and `make test race lint` in `backend/`
+- [x] run full suite: `node --test tests/*.test.cjs`, `npx --yes acorn@8.14.0 --ecma5 --silent svtlv/*.js`, and `make test race lint` in `backend/`
 - [x] confirm `git diff` does not touch `app.min.js`, `css/app.css`, `lang/*`, `assembly.json`
 
 Verification: all 231 Node tests and the pinned ES5 parser pass. Backend `make test race
@@ -504,7 +504,7 @@ Post-Completion.
 ### Task 10: [Final] Update documentation
 - [x] `docs/settings-sync-backend-design.md`: §4 any-JSON document v2, `encrypt`, in-place `$sealed`, `etag` column, dropped `encrypted_connections`, limits; §6/§7 boot apply, fingerprints, ETag polling, live apply (also during playback), save with `If-Match`; §8 precondition, `ETag`/`304`/`412`, PUT 204 and the v2 example; §5.3.1 Keycloak calls per poll/save; §10 lists `account-sync.js` (no `account-sync.css`) and how it reads the whitelist; §12 secrets chosen by `encrypt`; §16 resolved (clear on logout); Status → Implemented
 - [x] §14 Plan 4 deviations: any-JSON document instead of sections; no feature flag; `file_view_*` not synced; §6.3 read-back GET dropped; key-level last-wins with `If-Match`; CUB writers not coordinated (`favorite`/`file_view` unused while CUB sync is active); "Clear cache" and CUB backup restore undone by the next boot GET; sign-in/out notices disappear in the reload; `app.min.js` starts up to 3s later on signed-in boots
-- [x] keep `docs/tests/ownership-docs.test.cjs` passing after doc edits
+- [x] keep `tests/ownership-docs.test.cjs` passing after doc edits
 - [x] `CLAUDE.md`: Svtlv add-ons section gets `account-sync.js`, the seam order, the marker and base keys, and "to sync a key, add it to `user`/`user_optional` in `storage-scope.json`; to encrypt it, also add it to `encrypt`"; lampa-api section replaces the `SensitiveSettings`/`TestSensitiveSettings_matchUI` text with the any-JSON v2 document, in-place sealing and ETag
 - [x] `backend/README.md`: document v2 shape, precondition, ETag and `If-Match`
 - [x] retain this plan at `docs/plans/20261020-user-data-sync.md` during active review;

@@ -70,7 +70,7 @@ func TestParseUUID(t *testing.T) {
 }
 
 // TestTorrserverTwoURLs_matchBundle guards the two-link settings and separate timecode removal.
-// Runtime request tests live in testdata/torrserver-one-link.test.cjs.
+// Runtime request tests live in tests/torrserver-one-link.test.cjs at the repository root.
 func TestTorrserverTwoURLs_matchBundle(t *testing.T) {
 	bundle := readBundle(t)
 	text := string(bundle)

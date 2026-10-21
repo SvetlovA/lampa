@@ -35,7 +35,7 @@ Sharing owned torrents across both links is deferred in
 - `svtlv/torrserver-ownership.js` currently derives membership identity directly
   from URL 1 and refreshes only when that URL changes.
 - `backend/pkg/storage/crypto_test.go` and
-  `backend/pkg/storage/testdata/torrserver-one-link.test.cjs` enforce the old
+  `tests/torrserver-one-link.test.cjs` enforce the old
   one-link behavior. Documentation guards also assume URL 2 cannot sync.
 - The current implementation drops the old second link without migration; the
   historical migration described in the completed Plan 3 is not live code.
@@ -158,9 +158,9 @@ the original settings. Login and password retain their existing encryption polic
 - Modify: `assembly.json`
 - Modify: `svtlv/storage-scope.json`
 - Modify: `backend/pkg/storage/crypto_test.go`
-- Modify: `backend/pkg/storage/testdata/torrserver-one-link.test.cjs`
+- Modify: `tests/torrserver-one-link.test.cjs`
 - Modify: `docs/settings-sync-backend-design.md`
-- Modify: `docs/tests/ownership-docs.test.cjs`
+- Modify: `tests/ownership-docs.test.cjs`
 
 - [x] Restore both URL inputs and the selector from the original template and Params registration, preserving names, labels, markup, ordering, events and default `one` exactly.
 - [x] Restore the original two-link fragments across torrent, parser/search, authentication, speed-test and status paths, including their original per-path fallback semantics and change listeners; adapt only shifted bundle-local identifiers.
@@ -175,8 +175,8 @@ the original settings. Login and password retain their existing encryption polic
 
 **Files:**
 - Modify: `svtlv/torrserver-ownership.js`
-- Modify: `docs/tests/torrserver-ownership.test.cjs`
-- Modify: `docs/tests/account-state.test.cjs` (public API fixture if needed)
+- Modify: `tests/torrserver-ownership.test.cjs`
+- Modify: `tests/account-state.test.cjs` (public API fixture if needed)
 
 - [x] Resolve the raw effective endpoint through public `Lampa.Torserver.ip()` before applying existing server-ID normalization; preserve graceful behavior when the public API is unavailable.
 - [x] Refresh the relevant My Torrents activity on either URL or local selector changes, keeping existing account-generation and effective-server checks.
@@ -191,7 +191,7 @@ Pinned Acorn ES5 parsing passed for each add-on and `app.min.js`; `git diff --ch
 ### Task 3: Verify both URLs sync independently of local selection
 
 **Files:**
-- Modify: `docs/tests/account-sync.test.cjs`
+- Modify: `tests/account-sync.test.cjs`
 - Modify: `svtlv/account-sync.js` (only if behavioral tests expose a gap in generic policy handling)
 
 - [x] Add scope assertions showing both URLs are must-sync and the selector is local; retain login/password sealing assertions.
@@ -214,7 +214,7 @@ The existing generic sync implementation satisfies the two-link policy without c
 
 - [x] Verify both URLs and shared credentials are stored by account sync while selection remains local, persists across reloads and defaults to `one` when absent.
 - [x] Verify restored core fragments match the original two-link implementation, including its per-path selected-empty behavior; verify add-on membership identity follows the effective `Torserver.ip()` endpoint used by torrent operations.
-- [x] Run `node --test docs/tests/*.test.cjs backend/pkg/storage/testdata/torrserver-one-link.test.cjs` from the repository root.
+- [x] Run `node --test tests/*.test.cjs` from the repository root.
 - [x] Run `npx --yes acorn@8.14.0 --ecma5 --silent svtlv/*.js app.min.js` and `git diff --check`.
 - [x] From `backend/`, run `go test ./pkg/storage -run 'TestTorrserver|TestStorageScope|TestSensitiveSettings'` and `make lint` if Go guard code changed. Use the available supported Go environment; record any unavailable checks explicitly.
 - [x] Add a regression test for any new failure discovered during acceptance review and rerun the affected checks before proceeding. (No new failures or coverage gaps found; existing behavioral tests cover the acceptance criteria.)
@@ -240,7 +240,7 @@ in Post-Completion; no production code changes were needed for acceptance.
 - Modify: `backend/README.md`
 - Modify: `docs/settings-sync-backend-design.md`
 - Modify: `CLAUDE.md`
-- Modify: `docs/tests/ownership-docs.test.cjs` (if additional assertions need updating)
+- Modify: `tests/ownership-docs.test.cjs` (if additional assertions need updating)
 - Move: this plan to `docs/plans/completed/` after completion
 
 - [x] Replace current one-link descriptions with both synced URLs, shared credentials, the local selector/default, original upstream per-path URL behavior and effective-server membership behavior. Document the original selected-empty differences without presenting a new routing policy.

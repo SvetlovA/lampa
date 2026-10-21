@@ -180,7 +180,7 @@ they can never silently skip there. Dependencies are vendored: after changing th
 Run the frontend runtime and documentation checks from the repository root:
 
 ```sh
-node --test docs/tests/*.test.cjs backend/pkg/storage/testdata/torrserver-one-link.test.cjs
+node --test tests/*.test.cjs
 for file in svtlv/*.js app.min.js; do
   npx --yes acorn@8.14.0 --ecma5 --silent "$file"
 done

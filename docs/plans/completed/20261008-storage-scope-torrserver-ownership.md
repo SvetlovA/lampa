@@ -247,7 +247,7 @@ There is no foreign key to `lampa_user_data`: a user can own torrents without ha
 - Modify: `app.min.js` (only the marked fork changes for the settings template, migration and TorrServer-related readers)
 - Modify: `assembly.json`
 - Modify: `backend/pkg/storage/crypto_test.go`
-- Create: `backend/pkg/storage/testdata/torrserver-one-link.test.cjs`
+- Create: `tests/torrserver-one-link.test.cjs`
 
 - [x] add the one-time effective-URL migration and local rollback record from the transition section; ensure an edited sole URL wins on every later load and a failed persistence is visible
 - [x] remove the second TorrServer URL input and selector; use `torrserver_url` in `Torserver.ip`/`url`, request authentication, TorrServer parser/search, URL-change listeners and checks; move the speed-test insertion anchor to the remaining input
@@ -256,7 +256,7 @@ There is no foreign key to `lampa_user_data`: a user can own torrents without ha
 - [x] run the relevant backend bundle-guard test and `make test`; manually check the four migration rows above, changing the URL after migration, authenticated requests, parser/search, speed test, and the single settings row on browser and TV before task 1 (manual browser/TV checks skipped - require external clients and a configured TorrServer; not automatable in this workspace)
 
 Task 0 validation and implementation notes:
-- `node --test backend/pkg/storage/testdata/torrserver-one-link.test.cjs`: 37 checks pass against the actual bundle functions, including all legacy URL combinations, later edits/clearing, IndexedDB reserve/cache handling, write failures, corrupt backups, startup sequencing, authenticated requests, parser/search, speed test and status hooks.
+- `node --test tests/torrserver-one-link.test.cjs`: 37 checks pass against the actual bundle functions, including all legacy URL combinations, later edits/clearing, IndexedDB reserve/cache handling, write failures, corrupt backups, startup sequencing, authenticated requests, parser/search, speed test and status hooks.
 - The backup is a plain localStorage journal with a completion marker. An incomplete journal never reapplies a legacy URL on a later load; an unresolved save stays visible until the sole URL is checked, so even an edit back to the original primary or an empty URL wins.
 - `TestSensitiveSettings_matchUI` and the new `TestTorrserverSingleURL_matchBundle` pass. The latter guards legacy-key isolation, the single settings input, unrelated parser controls, template balance and matching assembly versions/stamps.
 - `LAMPA_API_REQUIRE_DOCKER=1 make test`, `LAMPA_API_REQUIRE_DOCKER=1 make race`, and `make lint` pass natively on macOS with cgo and Docker; WSL is unavailable on this host. Backend coverage is 93.8% overall (`pkg/storage`: 94.1%, `pkg/api`: 96.7%).
@@ -366,7 +366,7 @@ Task 5 validation and implementation notes:
 
 **Files:**
 - Modify: `svtlv/account.js`
-- Create: `docs/tests/account-state.test.cjs`
+- Create: `tests/account-state.test.cjs`
 - Modify: `.github/workflows/tests.yaml`
 
 - [x] publish a current-page account state and generation before the initial `/session` request (`checking`), after each authenticated/anonymous result, after successful logout, and when an ownership `401` starts session re-checking; notify the ownership add-on on transitions. A refresh failure may retain only a guest state already confirmed in this page lifetime; an initial failure and a formerly signed-in state fail closed
@@ -381,14 +381,14 @@ Task 6 validation and implementation notes:
 - Every session recheck invalidates earlier GET callbacks; device sign-in and successful logout also invalidate earlier responses. Avatar and the guarded plain-localStorage flag update before state listeners run. An outage retains only a currently confirmed guest, never an initial unknown state or a guest identity from before an intervening sign-in.
 - Initial outages keep the heartbeat and expiry listener available; a later successful check activates the account UI once. Expiry during logout immediately blocks ownership without starting a session renewal; the existing pending-GET drain is preserved, and failed logout resumes checking when needed.
 - Added 21 Node built-in tests executing the full actual add-on with controlled public Lampa APIs, HTTP callbacks and timers. They cover early/delayed startup, absent/stale flags, malformed responses, outages, expiry races, concurrent refreshes, avatar/flag publication ordering, storage errors, logout/SSO ordering, TV device sign-in, reload isolation and non-HTTP origins. The frontend CI job runs this test without new dependencies; `docs/` is already excluded from the web image.
-- `node --test docs/tests/account-state.test.cjs`, the pinned ES5 gate, `LAMPA_API_REQUIRE_DOCKER=1 make test`, `LAMPA_API_REQUIRE_DOCKER=1 make race`, `make lint`, and `git diff --check` pass. Backend checks ran natively on macOS with cgo and Docker because WSL is unavailable here. Coverage remains 94.1% overall (`pkg/storage`: 95.2%, `pkg/api`: 97.1%). Live browser/TV verification remains in Post-Completion.
+- `node --test tests/account-state.test.cjs`, the pinned ES5 gate, `LAMPA_API_REQUIRE_DOCKER=1 make test`, `LAMPA_API_REQUIRE_DOCKER=1 make race`, `make lint`, and `git diff --check` pass. Backend checks ran natively on macOS with cgo and Docker because WSL is unavailable here. Coverage remains 94.1% overall (`pkg/storage`: 95.2%, `pkg/api`: 97.1%). Live browser/TV verification remains in Post-Completion.
 
 ### Task 7: Add the TorrServer ownership add-on
 
 **Files:**
 - Create: `svtlv/torrserver-ownership.js`
 - Modify: `index.html` (seam plus marked loader deferral/readyState guard required for first-render ordering)
-- Create: `docs/tests/torrserver-ownership.test.cjs`
+- Create: `tests/torrserver-ownership.test.cjs`
 - Modify: `.github/workflows/tests.yaml` (run the ownership runtime tests)
 
 - [x] add the IIFE skeleton (protocol check, load guard, early install as soon as `Lampa.Torserver` exists, guarded hooks that fail closed for list/remove, re-open an already active `mytorrents` activity) and `serverId()`
@@ -469,7 +469,7 @@ Task 9 validation and acceptance audit notes:
 - Added a shared-server acceptance scenario running the actual add-on for two accounts and two independent guest profiles against controlled external services. It verifies account/guest isolation, guest removal preserving account membership, same-account server changes/restoration, removal of the last account row without physical deletion, and operator deletion/re-add restoring only retained account/guest memberships. Added an explicit HTTP/HTTPS page-origin equivalence test for scheme-free server ids.
 - Existing runtime tests cover initial/refresh API outages, expiry and stale generations, guest/account transitions without copying hashes, cleared/corrupt/unavailable guest storage, saved versus transient playback, pending removal reconciliation, suppressed timecodes, first-render publication ordering and missing-file boot fallback. Missing/disabled add-ons intentionally leave upstream shared list/removal behavior available; browser/TV engine compatibility and actual TorrServer response formats remain in Post-Completion.
 - Added a Go regression test showing that response control reaches the underlying writer through access logging while ownership paths stay redacted. Assertions run outside the handler, as required by the lint gate. API coverage increases from 97.1% to 97.5%, exceeding the earlier plans' 97.3–97.4%; storage remains 95.2%, exceeding the earlier 94.1–94.4%. Overall coverage is 94.2% excluding mocks.
-- All 135 frontend runtime checks pass (`node --test docs/tests/account-state.test.cjs docs/tests/torrserver-ownership.test.cjs backend/pkg/storage/testdata/torrserver-one-link.test.cjs`). `LAMPA_API_REQUIRE_DOCKER=1 make test`, `LAMPA_API_REQUIRE_DOCKER=1 make race`, `make lint`, the pinned ES5 gate, Compose configuration validation and `git diff --check` pass. Backend checks ran on macOS with Go 1.27.2, cgo and Docker; WSL/CI's Go 1.26 execution and live browser/TV checks remain external verification.
+- All 135 frontend runtime checks pass (`node --test tests/account-state.test.cjs tests/torrserver-ownership.test.cjs tests/torrserver-one-link.test.cjs`). `LAMPA_API_REQUIRE_DOCKER=1 make test`, `LAMPA_API_REQUIRE_DOCKER=1 make race`, `make lint`, the pinned ES5 gate, Compose configuration validation and `git diff --check` pass. Backend checks ran on macOS with Go 1.27.2, cgo and Docker; WSL/CI's Go 1.26 execution and live browser/TV checks remain external verification.
 
 ### Task 10: [Final] Update documentation
 - [x] `backend/README.md`: ownership routes in "API", the new table, the access-log redaction, and in "Operational caveats" the view-separation caveat, device-local guest membership, the one-link migration and the Android external-client limitation

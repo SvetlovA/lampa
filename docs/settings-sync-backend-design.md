@@ -980,7 +980,7 @@ marked shared-timecode removal and save-to-database description changes with a
 matching version and `assembly.json` stamp. `TestTorrserverTwoURLs_matchBundle`
 guards both URL inputs, the default selector, timecode removal, unrelated parser
 controls and version metadata. Runtime coverage retains the historical filename
-`backend/pkg/storage/testdata/torrserver-one-link.test.cjs`. Run the full frontend
+`tests/torrserver-one-link.test.cjs`. Run the full frontend
 suite, the ES5 parser separately for each add-on and `app.min.js`, and Lampa smoke
 checks. Account, ownership and sync integrations remain in `svtlv/`.
 

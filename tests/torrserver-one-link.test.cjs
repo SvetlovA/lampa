@@ -1,12 +1,12 @@
-// Run with: node --test backend/pkg/storage/testdata/torrserver-one-link.test.cjs
+// Run with: node --test tests/torrserver-one-link.test.cjs
 // Executes the actual bundle functions without booting Lampa or contacting a server.
-// The historical filename is retained for existing CI commands.
+// The historical filename is retained for continuity.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const {test} = require('node:test');
-const bundle = fs.readFileSync(path.join(__dirname, '../../../../app.min.js'), 'utf8');
+const bundle = fs.readFileSync(path.join(__dirname, '../app.min.js'), 'utf8');
 
 function source(name, indent = '  ') {
   const declaration = indent === '  ' ? '\n' + indent + 'function ' + name + '(' : '\n' + indent + name + ': function ' + name + '(';

@@ -1,10 +1,10 @@
-// Run with: node --test docs/tests/ownership-docs.test.cjs
+// Run with: node --test tests/ownership-docs.test.cjs
 // Guard the published API, migration SQL and scope examples against implementation drift.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const {test} = require('node:test');
-const read = name => fs.readFileSync(path.join(__dirname, '../..', name), 'utf8');
+const read = name => fs.readFileSync(path.join(__dirname, '..', name), 'utf8');
 const documents = ['backend/README.md', 'docs/settings-sync-backend-design.md'];
 
 function routesIn(document) {

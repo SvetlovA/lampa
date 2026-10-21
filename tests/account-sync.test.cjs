@@ -5,8 +5,8 @@ const path = require('node:path');
 const vm = require('node:vm');
 const {createHash} = require('node:crypto');
 const {test} = require('node:test');
-const source = fs.readFileSync(path.join(__dirname, '../../svtlv/account-sync.js'), 'utf8');
-const bundle = fs.readFileSync(path.join(__dirname, '../../app.min.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../svtlv/account-sync.js'), 'utf8');
+const bundle = fs.readFileSync(path.join(__dirname, '../app.min.js'), 'utf8');
 // Resolve methods through the public export: Rollup's internal suffixes drift.
 function upstreamStorageMethod(method, module = 'Storage') {
   const exports = bundle.match(new RegExp('  var ' + module + ' = \\{([\\s\\S]*?)\\n  \\};'))[1];
@@ -15,7 +15,7 @@ function upstreamStorageMethod(method, module = 'Storage') {
   const end = bundle.indexOf('\n  }', start) + 4;
   return '(' + bundle.slice(start, end) + ')';
 }
-const realScope = JSON.parse(fs.readFileSync(path.join(__dirname, '../../svtlv/storage-scope.json'), 'utf8'));
+const realScope = JSON.parse(fs.readFileSync(path.join(__dirname, '../svtlv/storage-scope.json'), 'utf8'));
 const BASE = 'svtlv_sync_base', USER = 'svtlv_sync_user';
 const REVISION = 'svtlv_sync_revision';
 const SCOPE = 'svtlv_sync_scope';

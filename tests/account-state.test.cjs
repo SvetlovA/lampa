@@ -1,4 +1,4 @@
-// Run with: node --test docs/tests/account-state.test.cjs
+// Run with: node --test tests/account-state.test.cjs
 // Runs the actual add-on, with controllable HTTP callbacks, timers and public Lampa APIs.
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
@@ -6,9 +6,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const {test} = require('node:test');
-const source = fs.readFileSync(path.join(__dirname, '../../svtlv/account.js'), 'utf8');
-const ownershipSource = fs.readFileSync(path.join(__dirname, '../../svtlv/torrserver-ownership.js'), 'utf8');
-const bundle = fs.readFileSync(path.join(__dirname, '../../app.min.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../svtlv/account.js'), 'utf8');
+const ownershipSource = fs.readFileSync(path.join(__dirname, '../svtlv/torrserver-ownership.js'), 'utf8');
+const bundle = fs.readFileSync(path.join(__dirname, '../app.min.js'), 'utf8');
 const flag = 'svtlv_account_signed_in';
 const signedIn = id => ({authenticated: true, user: {id, name: id, email: id + '@example.test'}});
 const guest = {authenticated: false};

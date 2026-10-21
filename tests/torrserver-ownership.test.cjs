@@ -1,4 +1,4 @@
-// Run with: node --test docs/tests/torrserver-ownership.test.cjs
+// Run with: node --test tests/torrserver-ownership.test.cjs
 // Execute the actual add-on with controlled public APIs, network and storage.
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
@@ -6,9 +6,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const {test} = require('node:test');
-const source = fs.readFileSync(path.join(__dirname, '../../svtlv/torrserver-ownership.js'), 'utf8');
-const html = fs.readFileSync(path.join(__dirname, '../../index.html'), 'utf8');
-const bundle = fs.readFileSync(path.join(__dirname, '../../app.min.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../svtlv/torrserver-ownership.js'), 'utf8');
+const html = fs.readFileSync(path.join(__dirname, '../index.html'), 'utf8');
+const bundle = fs.readFileSync(path.join(__dirname, '../app.min.js'), 'utf8');
 const ipSource = bundle.match(/  function ip\(\) \{[\s\S]*?\n  \}/)[0];
 const key = 'svtlv_torrserver_guest_hashes';
 const X = 'a'.repeat(40), Y = 'b'.repeat(40), Z = 'c'.repeat(64);
