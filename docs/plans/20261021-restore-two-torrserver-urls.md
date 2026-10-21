@@ -9,6 +9,15 @@ the existing shared authentication settings in the account's database document.
 Each client chooses its active link locally: switching links never changes the
 account document or another client's selection. The default selection is URL 1.
 
+The user's intended configuration is a tailnet address in URL 1 and a direct
+home LAN IP address in URL 2, both reaching the same physical TorrServer.
+The user accepts treating these addresses as separate server identities for
+this implementation: each has its own My Torrents ownership list. Saving under
+one address does not automatically claim the torrent under the other. Shared
+identity or alias mapping is outside this plan.
+Sharing owned torrents across both links is deferred in
+[`docs/backlog/share-torrents-between-torrserver-links.md`](../backlog/share-torrents-between-torrserver-links.md).
+
 ## Context (from discovery)
 
 - This is a distribution repository: the readable ES5 `app.min.js` bundle is the
