@@ -43,7 +43,7 @@ function checkScopes(document, scopes) {
     for (const key of keys) {
       assert.ok(scopes[scope].includes(key), `${key} is not classified as ${scope}`);
     }
-    if (scope === 'user' || scope === 'user_connection' || scope === 'user_optional') {
+    if (scope === 'user' || scope === 'user_connection') {
       assert.deepEqual(keys.sort(), [...scopes[scope]].sort(), `${scope} allowlist must be complete`);
     }
   }
@@ -90,15 +90,15 @@ test('scope guard rejects local selector export and missing portable fields', ()
     /user_connection allowlist must be complete/);
 });
 
-test('scope guard detects missing best-effort fields and exported CUB profile progress', () => {
+test('scope guard detects missing user fields and exported CUB profile progress', () => {
   const document = read(documents[1]);
   const scopes = JSON.parse(read('svtlv/storage-scope.json')).scopes;
   assert.throws(() => checkScopes(document.replace('`file_view`, ', ''), scopes),
-    /user_optional allowlist must be complete/);
+    /user allowlist must be complete/);
   assert.throws(() => checkScopes(document.replace(
-    '| `user_optional` | `file_view`,', '| `user_optional` | `file_view_*`,'), scopes),
-  /file_view_\* is not classified as user_optional/);
-  assert.throws(() => checkScopes(document.replace(/^\| `user_optional`.*\n/m, ''), scopes));
+    '| `user` | `favorite`, `file_view`,', '| `user` | `favorite`, `file_view_*`,'), scopes),
+  /file_view_\* is not classified as user/);
+  assert.throws(() => checkScopes(document.replace(/^\| `user`.*\n/m, ''), scopes));
 });
 
 function userDataSQL(document) {
@@ -184,7 +184,7 @@ test('published user-data examples use the implemented schema and valid raw-stor
       for (const key of example.encrypt) assert.match(key, /^[A-Za-z0-9_.:-]{1,128}$/, file);
       for (const [key, value] of Object.entries(example.data)) {
         assert.match(key, /^[A-Za-z0-9_.:-]{1,128}$/, file);
-        assert.ok(['user', 'user_connection', 'user_optional'].some(name => scope.scopes[name].includes(key)),
+        assert.ok(['user', 'user_connection'].some(name => scope.scopes[name].includes(key)),
           `${file}: example key ${key} must be portable`);
         assert.equal(typeof value, 'string', `${file}: add-on values must be raw storage strings`);
       }

@@ -3,10 +3,17 @@
   "scopes": {
     "user": [
       "favorite",
+      "file_view",
       "language",
       "mine_reactions",
+      "online_last_balanser",
+      "online_view",
+      "online_watched_last",
       "person_subscribes_id",
-      "tmdb_lang"
+      "search_history",
+      "tmdb_lang",
+      "torrents_view",
+      "user_clarifys"
     ],
     "user_connection": [
       "torrserver_auth",
@@ -14,15 +21,6 @@
       "torrserver_password",
       "torrserver_url",
       "torrserver_url_two"
-    ],
-    "user_optional": [
-      "file_view",
-      "online_last_balanser",
-      "online_view",
-      "online_watched_last",
-      "search_history",
-      "torrents_view",
-      "user_clarifys"
     ],
     "connection": [
       "cub_domain",
@@ -236,24 +234,24 @@
     "torrserver_password"
   ],
   "notes": {
-    "_policy": "Version 1 allowlist for Plan 4: user and user_connection must sync; user_optional syncs best-effort and may be dropped to fit the upload limit or local quota. All other scopes and unclassified keys stay local. Prefixes end in *; exact entries override prefixes, then the longest prefix wins. The encrypt list alone chooses which exported keys the API seals; the backend knows no setting names. Classification does not itself change any upstream writer.",
+    "_policy": "Version 1 allowlist for Plan 4: user and user_connection sync with the same save timing and persistence requirements. Oversized uploads fail without dropping values; any storage write failure disables sync for the page. All other scopes and unclassified keys stay local. Prefixes end in *; exact entries override prefixes, then the longest prefix wins. The encrypt list alone chooses which exported keys the API seals; the backend knows no setting names. Classification does not itself change any upstream writer.",
     "_extraction": "The guard conservatively inventories all settings data-name values and quoted *_ concatenations, including buttons, translation/metric identifiers and a commented country_ expression. These non-storage fragments are classified locally and documented below; they do not authorize export.",
     "_variable_keys": "Audited variable consumers: Timeline.filename returns file_view or file_view_<active CUB profile>; Tracker builds account_timeline_sync_<profile>; ContentRows builds content_rows_<installed row name>; WorkerArray builds storage_<field>_update_time. Generic Params/Input names resolve through registered settings; player_need selects player/player_iptv/player_torrent. Plugin {storage_<key>} interpolation, Console enumeration and remote configuration can access arbitrary keys: unclassified keys remain local.",
     "_cub_storage_sync": "Storage.init registers online_view, torrents_view, search_history, online_last_balanser, user_clarifys and torrents_filter_data. WorkerArray/Object write through Storage.set on CUB fetch/socket updates and send changes via socket plus storage/update when CUB sync/premium is enabled. Plan 4 does not coordinate CUB writers: overlapping keys use last-save-wins behavior; torrents_filter_data remains cache despite CUB sync.",
     "_cub_backup": "CUB Backup.publish serializes all localStorage except app.js to users/backup/export; inject restores arbitrary returned keys through localStorage.setItem then reloads. This manual whole-device backup can replace every user, connection and external key, independently of Storage.sync. The next Plan 4 boot GET reapplies non-dirty server values and preserves dirty local edits; this file governs Svtlv sync only and does not restrict CUB backup.",
     "favorite": "Must-sync local Favorite document contains bookmarks, likes, history, viewed and thrown categories plus cards. With CUB Permit.sync, mutations route to bookmarks/add/remove/clear and rendering uses CUB Bookmarks; the synced local document is unused in that mode. CUB caches/trackers stay external.",
-    "file_view": "Best-effort durable local playback positions, duration and percent. Timeline uses this unsuffixed key when CUB sync is off; the synced local document is unused while CUB progress sync is active. CUB first-profile initialization may copy it into the active profile key.",
+    "file_view": "Synced durable local playback positions, duration and percent. Timeline uses this unsuffixed key when CUB sync is off; the synced local document is unused while CUB progress sync is active. CUB first-profile initialization may copy it into the active profile key.",
     "file_view_*": "External durable progress partitioned by CUB profile id. Account.Timeline imports timeline/dump/changelog and sends timeline/update for the active profile. Never enumerate, export or import CUB-profile progress through Svtlv sync, or treat its suffix as a Keycloak id.",
     "language": "Portable interface/content language: Lang selects the dictionary and several catalog consumers use it. Keyboard layout and keyboard_default_lang remain device-specific; importing language must not replace those explicit device choices.",
     "tmdb_lang": "Portable catalog metadata, artwork-logo and search language sent to TMDB. Does not configure a player, keyboard or endpoint.",
     "mine_reactions": "Local map of reactions selected for media ids. Reaction submissions use the generated device lampa_uid; importing this map must not replay votes or synchronize that uid.",
-    "online_last_balanser": "Best-effort per-title online-provider choices, not credentials. Registered with CUB Storage.sync as object_string; plugins can supply its consumer. Missing providers are tolerated; overlapping CUB writes are not coordinated.",
-    "online_view": "Best-effort watched online hashes; CUB Storage.sync array_string also writes it. Overlapping CUB writes are not coordinated.",
-    "online_watched_last": "Best-effort last-viewed episode/voice history, used by card episode/continue logic. Storage.cache only bounds its size; no dedicated CUB Storage.sync registration.",
+    "online_last_balanser": "Synced per-title online-provider choices, not credentials. Registered with CUB Storage.sync as object_string; plugins can supply its consumer. Missing providers are tolerated; overlapping CUB writes are not coordinated.",
+    "online_view": "Synced watched online hashes; CUB Storage.sync array_string also writes it. Overlapping CUB writes are not coordinated.",
+    "online_watched_last": "Synced last-viewed episode/voice history, used by card episode/continue logic. Storage.cache only bounds its size; no dedicated CUB Storage.sync registration.",
     "person_subscribes_id": "User subscription ids, also written from CUB person/list and person/subscribe/unsubscribe responses. Importing local ids must not create remote subscriptions or overwrite the currently selected CUB account.",
-    "search_history": "Best-effort portable search history; CUB Storage.sync array_string also writes it. Overlapping CUB writes are not coordinated.",
-    "torrents_view": "Best-effort watched torrent identifiers, despite Storage.cache calls. CUB Storage.sync array_string also writes it; overlapping CUB writes are not coordinated.",
-    "user_clarifys": "Best-effort search-title clarifications keyed by media id; CUB Storage.sync object_object also writes it. Overlapping CUB writes are not coordinated.",
+    "search_history": "Synced portable search history; CUB Storage.sync array_string also writes it. Overlapping CUB writes are not coordinated.",
+    "torrents_view": "Synced watched torrent identifiers, despite Storage.cache calls. CUB Storage.sync array_string also writes it; overlapping CUB writes are not coordinated.",
+    "user_clarifys": "Synced search-title clarifications keyed by media id; CUB Storage.sync object_object also writes it. Overlapping CUB writes are not coordinated.",
     "plugins": "Device-local executable plugin URLs/configuration. Installed scripts can require platform APIs; first sync release must never install code from another device. CUB also supplies a separate account_plugins list.",
     "plugins_blacklist": "Device-local plugin suppression list; keep aligned with this device's executable scripts, never import from another platform.",
     "menu_sort": "Device menu ordering depends on installed plugins/features; keep local.",

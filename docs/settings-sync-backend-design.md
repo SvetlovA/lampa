@@ -244,10 +244,9 @@ in the `ETag` header. A conditional PUT updates only a row with the expected tag
 maximum JSON nesting is 32, counting the envelope. Invalid UTF-8, NUL escapes,
 unpaired surrogates and values PostgreSQL JSONB cannot store are rejected.
 The add-on measures the UTF-8 size of the JSON envelope including escaping and
-`encrypt`, then drops the largest encoded `user_optional` values first until it
-fits. If must-sync values alone exceed the limit, or measurement fails, it
-keeps local edits and notifies without uploading. Local optional quota failures
-are skipped; a must-sync write failure disables sync for the page.
+`encrypt`. If the complete document exceeds the limit, or measurement fails, it
+keeps all local edits and notifies without uploading. No values are dropped to fit.
+Any storage write failure disables sync for the page.
 
 Plan 3's membership table remains independent, created by
 `00002_create_lampa_torrserver_hashes.sql`:
@@ -576,13 +575,13 @@ filling gaps in an existing server document.
 ### 6.4 Changes while signed in
 
 Lampa keeps writing local storage normally. `Storage.listener` change events
-for synced keys start a timer; they do not define which keys are dirty. A
-must-sync edit waits 2 seconds; optional-only edits wait 5 minutes. Frequent
+for synced keys start a timer; they do not define which keys are dirty. Every
+synced edit waits 2 seconds. Frequent
 progress writes do not postpone an existing timer. Hiding the page flushes a
 save, including on a page already hidden. Only one save runs at a time; a
 trigger during that save requests one more pass.
 
-If a missing must-sync localStorage item still has a value in Lampa's memory or
+If a missing synced localStorage item still has a value in Lampa's memory or
 IndexedDB reserve, persist it before exporting it. Upstream caches normal caller
 defaults there too, so their presence alone does not indicate a storage failure.
 A failed write disables uploads for the page and notifies; a recovered value must
@@ -606,7 +605,7 @@ their values and mask IndexedDB reserve copies.
 Live refresh polls every 60 seconds while visible and on return to visible.
 Requests share an in-flight poll and use `If-None-Match: <lastEtag>`; `304`
 changes nothing. On a valid `200`, apply only differing, non-dirty, whitelisted
-string values, must-sync first. Write through `Lampa.Storage.set` with its
+string values. Write through `Lampa.Storage.set` with its
 JSON rule (parse only leading `[` or `{`), preserving exact raw storage strings
 for fingerprints. An `applying` guard prevents writes from scheduling a save.
 Call `Lampa.Favorite.read()` after `favorite` changes and `Lampa.Timeline.read()`
@@ -618,7 +617,7 @@ If a previously synchronized key in the current `encrypt` list is absent from a
 response, retain its local plaintext and make it dirty for recovery. A live
 refresh schedules a save; boot recovery uses the normal post-boot save timer.
 An explicit `''` tombstone is a clear instruction and does not trigger recovery.
-Omitted optional values outside the encryption list retain best-effort behavior.
+Omitted values outside the encryption list leave their local copies and fingerprints unchanged.
 When decryption omits a value, the API returns `200` even for a matching
 `If-None-Match`, retaining the stored ETag for the recovery PUT's `If-Match`.
 The response lists omitted fields in `unreadable_keys`. Until a complete response
@@ -922,7 +921,7 @@ patch `Lampa.Storage.set`, or depend on generated internal names with `$N`
 suffixes.
 
 The sync add-on reads `svtlv/storage-scope.json?v=<cache_version>` and validates
-its seven scopes and optional `encrypt` list. It classifies exact keys before
+its six scopes and optional `encrypt` list. It classifies exact keys before
 the longest matching prefix, exports only allowed raw strings, and uses the same
 classification for import. It keeps persistent fingerprints, applies at boot
 and live through public APIs, polls with ETags and saves dirty keys with `If-Match`.
@@ -930,7 +929,7 @@ Before importing values, it retains the validated scopes in `svtlv_sync_scope`
 for cleanup only. A missing or invalid current scope still blocks synchronization;
 the cached copy cannot authorize imports, uploads or document requests.
 
-To sync a key, add it to `user` (must-sync) or `user_optional` (best-effort) in
+To sync a key, add it to `user` in
 `storage-scope.json`; to encrypt it, also add it to `encrypt`. Prefix rules are
 supported for sync. Run the guards, commit and deploy the web image; no JS or Go
 change is needed. Unknown keys and excluded device values remain local on login,
@@ -987,22 +986,21 @@ checks. Account, ownership and sync integrations remain in `svtlv/`.
 ### 10.3 Storage ownership audit (Plan 3)
 
 `svtlv/storage-scope.json` is the machine-readable inventory of the shipped
-bundle, audited at its read/write sites. Version 1 defines seven scopes; the table
+bundle, audited at its read/write sites. Version 1 defines six scopes; the table
 below summarizes their actual rules. The JSON file is the complete authority.
 
 | Scope | Examples and rule |
 | --- | --- |
-| `user` | `favorite`, `language`, `mine_reactions`, `person_subscribes_id`, `tmdb_lang`. Portable preferences and personal data must sync. |
+| `user` | `favorite`, `file_view`, `language`, `mine_reactions`, `online_last_balanser`, `online_view`, `online_watched_last`, `person_subscribes_id`, `search_history`, `tmdb_lang`, `torrents_view`, `user_clarifys`. Portable preferences, personal data, history and playback progress sync with the same persistence rules. |
 | `user_connection` | `torrserver_url`, `torrserver_url_two`, `torrserver_auth`, `torrserver_login`, `torrserver_password`. Both TorrServer endpoints, the shared authentication toggle and credentials are portable connection fields. These fields must sync; the top-level encrypt list selects login/password for sealing by the API. |
-| `user_optional` | `file_view`, `online_last_balanser`, `online_view`, `online_watched_last`, `search_history`, `torrents_view`, `user_clarifys`. History, playback progress and torrent views sync best-effort; optional values may be dropped to fit the upload limit or local quota. |
 | `device` | `player`, `player_iptv`, `player_torrent`, `player_volume`, `interface_size`, `navigation_type`, `plugins`, `plugins_blacklist`, `menu_sort`, `menu_hide`, `start_page`, `content_rows*`, `parental_control_pin`, `torrserver_use_link`. Hardware, controls, executable plugins, feature-dependent menus and the active TorrServer link selector never sync. The selector defaults to one on each client. |
 | `connection` | `jackett_url`, `jackett_key`, `prowlarr_url`, `prowlarr_key`, `parser_use`, `parser_use_link`, `parse_lang`, `tmdb_proxy`, `proxy_other`, `cub_domain`, `torrserver_savedb`. Other endpoints, credentials and server/device-dependent behavior stay local. |
 | `external` | `file_view_*`, `account`, `account_bookmarks_*`, `account_timeline_sync*`, `account_plugins`, `cloud_token`, `cloud_use`, `terminal_access`. CUB and third-party identity, tokens, cursors and service-owned data never become Keycloak user data. |
 | `cache` | `activity`, `torrents_filter_data`, `recomends_list`, `recomends_scan`, `timetable`, `cub_alive`, `lampa_uid`, `region`, `storage_*`. Generated navigation, cached responses, device identity and sync bookkeeping stay local. |
 
-The sync add-on exports `user`, `user_connection` and `user_optional` rules,
-subject to the backend key pattern. The first two must sync; the third is
-best-effort. Exact keys take precedence over prefixes; the longest trailing-asterisk prefix wins. Duplicate or stale
+The sync add-on exports `user` and `user_connection` rules, subject to the
+backend key pattern. Both use the same save timing and persistence requirements.
+Exact keys take precedence over prefixes; the longest trailing-asterisk prefix wins. Duplicate or stale
 rules are rejected. Unclassified keys, including arbitrary plugin/add-on values,
 remain device-local; they are never implicitly allowed for export.
 
@@ -1026,7 +1024,7 @@ before relying on durable URL-2 sync: their whole-document writes can omit URL 2
 because their allowlist excludes it. Mixed-version preservation is outside this change.
 
 `torrserver_savedb` controls saved playback additions and is connection-local,
-rather than a portable account preference. `file_view` is optional local
+rather than a portable account preference. `file_view` is synced local
 progress. `file_view_*` belongs to CUB profiles and is excluded entirely, without
 active-profile mapping. Preserve excluded device values on every import.
 
@@ -1107,7 +1105,7 @@ owner. There is no automatic cleanup or row pruning.
 torrent file for everyone on the server, so the fork removes TrackTimecode from
 the bundle: the settings toggle, `Torserver.viewed`/`viewedSet` and every
 `/viewed` read or write. Playback progress lives only in Lampa's local
-`file_view` without CUB; Plan 4 syncs that key best-effort per account.
+`file_view` without CUB; that key syncs as regular user data per account.
 CUB-profile `file_view_*` remains external and never syncs.
 
 Guests keep a versioned map in plain
@@ -1225,8 +1223,8 @@ everything and leaves CUB's icon visible when `location.protocol` is not
 - `400`/`403`/`413`/`415`: notify and keep local data, with no retry loop.
 - Failed boot GET or scope fetch: start locally within 3 seconds, notify after
   boot, and allow signed-in handling to retry. Missing/invalid scope after boot
-  disables sync for that page. Storage-access failure disables sync without
-  blocking Lampa; optional quota failures alone may be skipped (§4).
+  disables sync for that page. Storage-access or write failure disables sync without
+  blocking Lampa (§4).
 - PostgreSQL unavailable: health reports `Unhealthy`; user-data endpoints return
   `503 storage_unavailable`.
 - Keycloak unavailable: existing sessions fail open (§5.3.1) and local operation
@@ -1456,7 +1454,7 @@ Deviations and accepted behavior recorded while implementing Plan 4
   does not restore the dropped column, so old user-data routes can return 503;
   the reverted frontend does not call them and local values remain usable.
 - `file_view_*` is external CUB-profile state and never synced; only the plain
-  `file_view` key is best-effort. No active CUB profile mapping was added.
+  `file_view` key syncs as regular user data. No active CUB profile mapping was added.
 - The read-back GET in the original §6.3 flow is dropped: PUT returns `204` and
   ETag; sent values update the base directly.
 - Conflict handling is last-wins per top-level key with `If-Match` and one
@@ -1478,7 +1476,7 @@ Deviations and accepted behavior recorded while implementing Plan 4
 Result: signed-in devices share whitelisted user data, both TorrServer URLs and
 shared credentials, with live refresh during playback, persistent unsaved edits
 and clear-on-logout behavior. The active-link selection remains local to each
-client. History/progress are best-effort; hardware, plugins and unrelated network
+client. History/progress sync as regular user data; hardware, plugins and unrelated network
 configuration stay local.
 
 ## 15. Acceptance criteria

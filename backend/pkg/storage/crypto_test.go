@@ -191,7 +191,7 @@ func extractStorageKeys(bundle []byte) []string {
 	return result
 }
 
-var storageScopeNames = []string{"user", "user_connection", "user_optional", "device", "connection", "external", "cache"}
+var storageScopeNames = []string{"user", "user_connection", "device", "connection", "external", "cache"}
 var storageScopeEntryPattern = regexp.MustCompile(`^[a-zA-Z0-9_.:-]+\*?$`)
 
 type storageScopeFile struct {
@@ -308,10 +308,10 @@ func TestStorageScope_matchBundle(t *testing.T) {
 	for _, tc := range []struct{ key, scope string }{
 		{"language", "user"}, {"tmdb_lang", "user"}, {"favorite", "user"},
 		{"mine_reactions", "user"}, {"person_subscribes_id", "user"},
-		{"file_view", "user_optional"}, {"file_view_42", "external"},
-		{"online_watched_last", "user_optional"}, {"torrents_view", "user_optional"},
-		{"online_view", "user_optional"}, {"online_last_balanser", "user_optional"},
-		{"search_history", "user_optional"}, {"user_clarifys", "user_optional"},
+		{"file_view", "user"}, {"file_view_42", "external"},
+		{"online_watched_last", "user"}, {"torrents_view", "user"},
+		{"online_view", "user"}, {"online_last_balanser", "user"},
+		{"search_history", "user"}, {"user_clarifys", "user"},
 		{"torrserver_url", "user_connection"}, {"torrserver_auth", "user_connection"},
 		{"torrserver_login", "user_connection"}, {"torrserver_password", "user_connection"},
 		{"torrserver_url_two", "user_connection"}, {"torrserver_use_link", "device"}, {"torrserver_savedb", "connection"},
@@ -435,19 +435,18 @@ func TestStorageScopeEntries(t *testing.T) {
 }
 
 func TestParseStorageScope(t *testing.T) {
-	valid := `{"version":1,"scopes":{"user":[],"user_connection":[],"user_optional":[],"device":[],"connection":[],"external":[],"cache":[]},"notes":{}}`
+	valid := `{"version":1,"scopes":{"user":[],"user_connection":[],"device":[],"connection":[],"external":[],"cache":[]},"notes":{}}`
 	for _, tc := range []struct{ name, data, problem string }{
 		{"valid empty inventory", valid, ""},
 		{"encryption list", strings.Replace(valid, `"version":1`, `"version":1,"encrypt":["custom.secret","missing"]`, 1), ""},
 		{"encryption policy not audited", strings.Replace(valid, `"version":1`, `"version":1,"encrypt":["plugins","not a storage key",42]`, 1), ""},
-		{"optional inventory", strings.Replace(valid, `"user_optional":[]`, `"user_optional":["history","progress_*"]`, 1), ""},
+		{"user inventory", strings.Replace(valid, `"user":[]`, `"user":["history","progress_*"]`, 1), ""},
 		{"malformed", `{`, "decode"},
 		{"empty", ``, "decode"},
 		{"unsupported version", strings.Replace(valid, `"version":1`, `"version":2`, 1), "version"},
 		{"missing version", strings.Replace(valid, `"version":1,`, "", 1), "version"},
-		{"missing scopes", `{"version":1}`, "all 7 scopes"},
-		{"missing optional scope", strings.Replace(valid, `"user_optional":[],`, "", 1), "all 7 scopes"},
-		{"missing scope", strings.Replace(valid, `"user":[],`, "", 1), "all 7 scopes"},
+		{"missing scopes", `{"version":1}`, "all 6 scopes"},
+		{"missing scope", strings.Replace(valid, `"user":[],`, "", 1), "all 6 scopes"},
 		{"unknown scope", strings.Replace(valid, `"user":[]`, `"users":[]`, 1), "missing"},
 		{"null array", strings.Replace(valid, `"user":[]`, `"user":null`, 1), "missing"},
 		{"wrong array type", strings.Replace(valid, `"user":[]`, `"user":"key"`, 1), "decode"},
@@ -475,7 +474,7 @@ func TestStorageScopeDrift(t *testing.T) {
 		want    []string
 	}{
 		{name: "empty allowlist inventory", bundle: `Storage.get('b'); Storage.get('a');`, entries: map[string]string{}, want: []string{"unclassified: a", "unclassified: b"}},
-		{name: "optional", bundle: `Storage.get('history');`, entries: map[string]string{"history": "user_optional"}},
+		{name: "user history", bundle: `Storage.get('history');`, entries: map[string]string{"history": "user"}},
 		{name: "exact", bundle: `Storage.get('a');`, entries: map[string]string{"a": "user"}},
 		{name: "stale exact", bundle: `var a = 'a';`, entries: map[string]string{"a": "user"}, want: []string{"stale exact: a"}},
 		{name: "prefix", bundle: `Storage.get('file_view'); var name = 'file_view_' + id;`, entries: map[string]string{"file_view": "user", "file_view_*": "user"}},

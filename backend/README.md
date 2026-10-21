@@ -99,11 +99,11 @@ Client input containing `$sealed` objects is
 reserved and rejected. There is no backend list of secret setting names or UI-input guard.
 
 The frontend reads [`svtlv/storage-scope.json`](../svtlv/storage-scope.json) at runtime.
-`user` and `user_connection` must sync; `user_optional` is best-effort. Exact keys beat
+`user` and `user_connection` sync with the same persistence rules. Exact keys beat
 prefixes and the longest prefix wins. Unknown keys, player settings, plugins and other
 connection credentials remain local. Both TorrServer URLs (`torrserver_url`,
 `torrserver_url_two`), the shared authentication toggle (`torrserver_auth`), login and
-password are portable connection fields; the shipped `encrypt` list selects login/password. Add a key to `user` or `user_optional` to sync it and also to `encrypt`
+password are portable connection fields; the shipped `encrypt` list selects login/password. Add a key to `user` to sync it and also to `encrypt`
 if it should be sealed. No JS or Go change is required.
 
 The active-link selector `torrserver_use_link` is device-local: `one` (URL 1) by
@@ -125,7 +125,7 @@ Clearing or removing a synchronized setting sends an empty-string tombstone. Oth
 devices apply that empty value, hiding any IndexedDB reserve copy; a successful save
 removes its dirty fingerprint. An explicit tombstone never triggers credential recovery.
 Fingerprints are refreshed from shared localStorage before dirty checks so other tabs'
-saves cannot make clean values appear dirty. A missing must-sync item still available
+saves cannot make clean values appear dirty. A missing synced item still available
 through Lampa's memory/IndexedDB fallback is persisted before export. This also handles
 normal cached defaults. Only a failed write disables uploads, preventing false deletions.
 
@@ -517,10 +517,11 @@ and torrent membership need the database. The critical database check probes bot
   policy never authorizes synchronization. Device settings and
   cloud data remain. Boot with a marker waits at most 3 seconds before starting Lampa;
   no marker sends no user-data request.
-- Optional history/progress values are dropped largest-first when the encoded request would
-  exceed 4 MiB. CUB writers, Clear cache and manual backup restore are not coordinated with
+- All synced changes, including history and progress, use the same 2-second save timer.
+  An encoded request over 4 MiB is rejected locally without dropping values; local edits stay dirty.
+  Any storage write failure disables sync for the page. CUB writers, Clear cache and manual backup restore are not coordinated with
   account sync; the next boot GET may restore server values. `file_view_*` belongs to CUB
-  and never syncs; plain `file_view` is best-effort. Browser/TV deployment checks remain
+  and never syncs; plain `file_view` syncs as regular user data. Browser/TV deployment checks remain
   in the completed Plan 4 checklist.
 - On Android with the external torrent client (`internal_torrclient` disabled), playback
   bypasses `Lampa.Torserver.hash` and cannot record membership. Only explicit Add to My

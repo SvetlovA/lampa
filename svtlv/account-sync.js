@@ -16,7 +16,7 @@
   var SCOPE_KEY = 'svtlv_sync_scope';
   var MAX_BYTES = 4 * 1024 * 1024;
   var KEY_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
-  var SCOPE_NAMES = ['user', 'user_connection', 'user_optional', 'device', 'connection', 'external', 'cache'];
+  var SCOPE_NAMES = ['user', 'user_connection', 'device', 'connection', 'external', 'cache'];
   var scope;
   var base;
   var baseRaw;
@@ -39,7 +39,6 @@
   var applying = false;
   var clearing = false;
   var saveTimer = null;
-  var saveDelay = 0;
   var saving = false;
   var saveAgain = false;
   var saveFailure = false;
@@ -88,13 +87,8 @@
     notify('storage');
   }
 
-  function quota(err) {
-    return err && (err.name == 'QuotaExceededError' || err.name == 'NS_ERROR_DOM_QUOTA_REACHED' ||
-      err.code === 22 || err.code === 1014);
-  }
-
   // Even obtaining localStorage, length or key() can throw in a TV WebView.
-  function storage(method, key, value, optional) {
+  function storage(method, key, value) {
     // Disabled synchronization must still allow ownership cleanup on logout.
     if (disabled && !clearing) throw new Error('Account sync disabled');
     try {
@@ -112,7 +106,6 @@
       }
       return store[method](key);
     } catch (err) {
-      if (optional && quota(err)) return false;
       disable();
       throw err;
     }
@@ -347,7 +340,7 @@
   function synced(key, policy) {
     if (typeof key != 'string' || !KEY_PATTERN.test(key)) return false;
     var name = classify(key, policy);
-    return name == 'user' || name == 'user_connection' || name == 'user_optional';
+    return name == 'user' || name == 'user_connection';
   }
 
   function fp(value) {
@@ -403,9 +396,9 @@
   function localValue(key) {
     var value = storage('getItem', key);
     // Upstream caches both caller defaults and quota-failed values in memory.
-    // Persist a missing must-sync value before exporting it; only an actual
+    // Persist a missing synced value before exporting it; only an actual
     // write failure disables sync, and a reserve value never becomes a deletion.
-    if (value === null && classify(key) != 'user_optional' && window.Lampa && window.Lampa.Storage) {
+    if (value === null && window.Lampa && window.Lampa.Storage) {
       var fallback;
       try {
         fallback = window.Lampa.Storage.get(key, '');
@@ -455,7 +448,7 @@
     return data;
   }
 
-  function writeLive(key, value, optional, raw) {
+  function writeLive(key, value, raw) {
     var parsed = value;
     if (!raw && (value.charAt(0) == '[' || value.charAt(0) == '{')) {
       try { parsed = JSON.parse(value); } catch (err) { /* Match Storage.get's raw fallback. */ }
@@ -468,10 +461,9 @@
       if (storage('getItem', key) !== encoded) throw new Error('Storage write failed');
       // Storage.set refreshes the memory cache but normalizes JSON whitespace.
       // Keep the server's exact raw string for export and fingerprint comparison.
-      if (encoded !== value) return storage('setItem', key, value, optional);
+      if (encoded !== value) return storage('setItem', key, value);
       return true;
     } catch (err) {
-      if (optional && quota(err)) return false;
       disable();
       throw err;
     }
@@ -490,7 +482,8 @@
       // Account application can leave raw storage unchanged while this tab still
       // caches guest/previous-account values, including keys cleared or omitted.
       localKeys().forEach(function (key) {
-        if (writeLive(key, storage('getItem', key), classify(key) == 'user_optional', true)) written[key] = true;
+        writeLive(key, storage('getItem', key), true);
+        written[key] = true;
       });
       refreshLive(written);
     } finally { applying = false; }
@@ -503,9 +496,6 @@
     var written = Object.create(null);
     var keys = Object.keys(data).filter(function (key) {
       return synced(key) && typeof data[key] == 'string';
-    });
-    keys.sort(function (a, b) {
-      return (classify(a) == 'user_optional' ? 1 : 0) - (classify(b) == 'user_optional' ? 1 : 0);
     });
     if (live) applying = true;
     try {
@@ -524,8 +514,8 @@
         // Storage and module caches belong to this tab, unlike localStorage/base.
         // A sibling may already have persisted a value this tab has never applied.
         if (differs || (live && (!own(lastDoc, key) || lastDoc[key] !== value))) {
-          var optional = classify(key) == 'user_optional';
-          if (!(live ? writeLive(key, value, optional) : storage('setItem', key, value, optional))) return;
+          if (live) writeLive(key, value);
+          else storage('setItem', key, value);
           if (differs) changed = true;
           written[key] = true;
         }
@@ -756,11 +746,10 @@
         applying = true;
         // Write the raw string unchanged so JSON normalization cannot bounce
         // storage events between tabs. Storage.get parses it for module readers.
-        if (writeLive(change.key, value, classify(change.key) == 'user_optional', true)) {
-          var written = Object.create(null);
-          written[change.key] = true;
-          refreshLive(written);
-        }
+        writeLive(change.key, value, true);
+        var written = Object.create(null);
+        written[change.key] = true;
+        refreshLive(written);
       } catch (err) { /* Persistence failures disable sync without breaking the page. */ }
       finally { applying = false; }
     });
@@ -786,7 +775,6 @@
   function stopSave() {
     clearTimeout(saveTimer);
     saveTimer = null;
-    saveDelay = 0;
     saving = false;
     saveAgain = false;
   }
@@ -796,9 +784,9 @@
     localKeys().forEach(function (key) { keys[key] = true; });
     Object.keys(readBase()).forEach(function (key) { if (synced(key)) keys[key] = true; });
     // First-login reserve values have neither a local item nor a fingerprint.
-    // Inspect exact must-sync rules so localValue can persist them or detect failure.
+    // Inspect exact synced rules so localValue can persist them or detect failure.
     Object.keys(scope.entries).forEach(function (key) {
-      if (synced(key) && classify(key) != 'user_optional') keys[key] = true;
+      if (synced(key)) keys[key] = true;
     });
     return Object.keys(keys).filter(dirty);
   }
@@ -817,16 +805,12 @@
       var keys = dirtyKeys();
       if (!keys.length) return;
       if (saving) { saveAgain = true; return; }
-      var delay = keys.some(function (key) { return classify(key) != 'user_optional'; }) ? 2000 : 300000;
-      // Frequent playback writes must not keep postponing an optional save.
-      if (saveTimer !== null && saveDelay <= delay) return;
-      clearTimeout(saveTimer);
-      saveDelay = delay;
+      // Batch changes without letting frequent writes postpone the save.
+      if (saveTimer !== null) return;
       saveTimer = setTimeout(function () {
         saveTimer = null;
-        saveDelay = 0;
         save();
-      }, delay);
+      }, 2000);
     } catch (err) { /* Storage failures already disable sync. */ }
   }
 
@@ -910,7 +894,6 @@
     if (saving) { saveAgain = true; return; }
     clearTimeout(saveTimer);
     saveTimer = null;
-    saveDelay = 0;
     try { if (!dirtyKeys().length) return; }
     catch (err) { return; }
     saving = true;
@@ -983,32 +966,18 @@
     attempt(false);
   }
 
-  function encodedBytes(value) {
-    // Check raw values as well: modern JSON.stringify escapes lone surrogates,
-    // while old TV engines leave them literal and encodeURIComponent throws.
-    encodeURIComponent(value);
-    return encodeURIComponent(JSON.stringify(value)).replace(/%[0-9A-F]{2}/g, 'x').length;
-  }
-
   function fitBody(data) {
     try {
       if (disabled || !scope) return null;
       var body = {schema_version: 2, data: Object.create(null), encrypt: scope.encrypt.slice()};
       Object.keys(data).forEach(function (key) {
         if (synced(key) && typeof data[key] == 'string') {
-          encodedBytes(data[key]);
+          // Old TV engines leave lone surrogates literal in JSON.stringify.
+          encodeURIComponent(data[key]);
           body.data[key] = data[key];
         }
       });
-      function size() { return encodeURIComponent(JSON.stringify(body)).replace(/%[0-9A-F]{2}/g, 'x').length; }
-      var bytes = size();
-      if (bytes <= MAX_BYTES) return body;
-      var optional = Object.keys(body.data).filter(function (key) { return classify(key) == 'user_optional'; });
-      optional.sort(function (a, b) { return encodedBytes(body.data[b]) - encodedBytes(body.data[a]); });
-      for (var i = 0; i < optional.length && bytes > MAX_BYTES; i++) {
-        delete body.data[optional[i]];
-        bytes = size();
-      }
+      var bytes = encodeURIComponent(JSON.stringify(body)).replace(/%[0-9A-F]{2}/g, 'x').length;
       if (bytes <= MAX_BYTES) return body;
     } catch (err) {
       // Encoding/measurement failure leaves local edits dirty for a later save.

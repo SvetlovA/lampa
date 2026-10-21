@@ -209,16 +209,16 @@ test('scope fetch uses the loader cache version and classifies the real inventor
   assert.equal(p.requests[0].config.timeout, 15000);
   const cases = [
     ['favorite', 'user'], ['language', 'user'], ['torrserver_login', 'user_connection'],
-    ['file_view', 'user_optional'], ['file_view_123', 'external'],
+    ['file_view', 'user'], ['file_view_123', 'external'],
     ['account', 'external'], ['account_token', ''], ['account_timeline_sync_12', 'external'],
-    ['account_bookmarks_sync', 'external'], ['search_history', 'user_optional'],
+    ['account_bookmarks_sync', 'external'], ['search_history', 'user'],
     ['search_other', 'cache'], ['developer_enabled', 'device'], ['developer_param_test', 'cache'],
     ['player_normalization_step_1', 'device'], ['plugins', 'device'], ['jackett_key', 'connection'],
     ['content_rows', 'device'], ['content_rows_movie', 'device'], ['unknown', ''], ['xaccount', '']
   ];
   for (const [key, expected] of cases) assert.equal(p.core.classify(key), expected, key);
   for (const [key, expected] of cases) {
-    assert.equal(p.core.synced(key), ['user', 'user_connection', 'user_optional'].includes(expected), key);
+    assert.equal(p.core.synced(key), ['user', 'user_connection'].includes(expected), key);
   }
 });
 
@@ -357,7 +357,7 @@ test('missing encrypted fields invalidate only a clean prior base and preserve d
     assert.equal(p.core.applyDoc({}).changed, false);
     assert.equal(p.items.torrserver_password, value === null ? undefined : value);
     assert.equal(p.core.dirty('torrserver_password'), true);
-    assert.equal(p.core.dirty('file_view'), false, 'best-effort nonencrypted omissions remain clean');
+    assert.equal(p.core.dirty('file_view'), false, 'nonencrypted omissions remain clean');
     assert.deepEqual(clean(p.core.overlay({})), {torrserver_password: value || ''});
     if (value !== 'secret') assert.equal(JSON.parse(p.items[BASE]).torrserver_password, p.core.fp('secret'),
       'dirty values retain their old comparison base, including deletions');
@@ -398,19 +398,18 @@ test('clear writes empty tombstones, masks reserve-only keys, and removes marker
   assert.equal(p.core.dirty('favorite'), false);
 });
 
-test('must-sync values apply first; optional quota failure leaves its old base for retry', () => {
-  const p = page({items: {file_view: 'old'}}); p.load(); p.syncedBase({file_view: 'old'});
-  p.faults.quota = 'file_view';
-  assert.equal(p.core.applyDoc({file_view: 'new', language: 'ru', torrserver_url: 'url'}).changed, true);
-  const writes = p.calls.filter(c => c.method === 'setItem').map(c => c.key);
-  assert.ok(writes.indexOf('language') < writes.indexOf('file_view'));
-  assert.ok(writes.indexOf('torrserver_url') < writes.indexOf('file_view'));
-  assert.equal(p.items.file_view, 'old');
-  assert.equal(JSON.parse(p.items[BASE]).file_view, p.core.fp('old'));
-  assert.equal(p.core.disabled(), false);
-  delete p.faults.quota;
-  p.core.applyDoc({file_view: 'new'});
-  assert.equal(p.items.file_view, 'new');
+test('quota failures for history and progress disable sync without advancing their baseline', () => {
+  for (const key of ['file_view', 'online_last_balanser', 'online_view', 'online_watched_last',
+    'search_history', 'torrents_view', 'user_clarifys']) {
+    const p = page({items: {[key]: 'old'}}); p.load(); p.syncedBase({[key]: 'old'});
+    assert.equal(p.core.classify(key), 'user', key);
+    p.faults.quota = key;
+    assert.throws(() => p.core.applyDoc({[key]: 'new', language: 'ru'}), /quota/, key);
+    assert.equal(p.items[key], 'old');
+    assert.equal(p.items.language, undefined, 'a failed write stops the import');
+    assert.equal(JSON.parse(p.items[BASE])[key], p.core.fp('old'));
+    assert.equal(p.core.disabled(), true);
+  }
 });
 
 test('must-sync quota failure stops apply and disables all subsequent requests', () => {
@@ -438,7 +437,7 @@ test('every storage operation and silent writes fail closed, including before La
   }
   const p = page(); p.load(); p.faults.read = 'file_view';
   assert.throws(() => p.core.applyDoc({file_view: 'new'}), /read/);
-  assert.equal(p.core.disabled(), true, 'optional read failures are not quota skips');
+  assert.equal(p.core.disabled(), true, 'read failures disable sync');
 });
 
 test('malformed persisted base disables sync instead of reclassifying edits as clean', () => {
@@ -460,27 +459,29 @@ test('silent metadata removal fails closed and repeated storage errors show one 
   assert.deepEqual(q.notices, ['Account sync is unavailable on this device']);
 });
 
-test('size rule measures escaped UTF-8 body and drops largest encoded optional value first', () => {
+test('oversized history and progress block the complete upload without dropping values', () => {
   const p = page(); p.load();
   const data = {language: 'ru', torrserver_password: 'секрет',
     file_view: '\\'.repeat(1100000), search_history: 'a'.repeat(1500000), online_view: 'b'.repeat(1000000)};
   assert.ok(Buffer.byteLength(JSON.stringify({schema_version: 2, data, encrypt: realScope.encrypt})) > LIMIT);
+  const before = {...data};
+  assert.equal(p.core.fitBody(data), null);
+  assert.deepEqual(data, before, 'every input value is retained');
+  assert.equal(p.core.disabled(), false);
+  assert.deepEqual(p.notices, ['Not saved to Account']);
+  data.file_view = 'progress';
   const body = p.core.fitBody(data);
-  assert.equal(body.data.file_view, undefined, 'escaping makes file_view largest on the wire');
-  assert.equal(body.data.search_history.length, 1500000);
-  assert.equal(body.data.online_view.length, 1000000);
+  assert.deepEqual(clean(body.data), data, 'a fitting document keeps every synced value');
   assert.deepEqual(clean(body.encrypt), realScope.encrypt);
-  assert.ok(Buffer.byteLength(JSON.stringify(body)) <= LIMIT);
-  assert.equal(data.file_view.length, 1100000, 'input retained locally');
 });
 
-test('size includes envelope/encrypt and UTF-8; must-sync overflow blocks upload', () => {
+test('size includes envelope/encrypt and UTF-8; overflow blocks upload', () => {
   const p = page(); p.load();
   const envelope = {schema_version: 2, data: {language: ''}, encrypt: realScope.encrypt};
   const overhead = Buffer.byteLength(JSON.stringify(envelope));
   assert.ok(p.core.fitBody({language: 'x'.repeat(LIMIT - overhead)}));
   assert.equal(p.core.fitBody({language: 'x'.repeat(LIMIT - overhead + 1)}), null);
-  assert.equal(p.core.fitBody({favorite: 'я'.repeat(LIMIT / 2), file_view: 'optional'}), null);
+  assert.equal(p.core.fitBody({favorite: 'я'.repeat(LIMIT / 2), file_view: 'progress'}), null);
   assert.equal(p.core.disabled(), false, 'oversize edits can be corrected without restarting');
   assert.equal(p.core.fitBody({language: 'en'}).data.language, 'en');
   assert.ok(p.notices.every(text => text === 'Not saved to Account'));
@@ -508,7 +509,7 @@ test('invalid scope JSON disables sync and produces a localized notice', () => {
     {...realScope, encrypt: 'secret'}, {...realScope, encrypt: Array(65).fill('key')},
     {...realScope, encrypt: ['bad key']}, {...realScope, encrypt: [42]}];
   for (const change of [
-    s => { delete s.scopes.user_optional; }, s => { s.scopes.extra = []; },
+    s => { delete s.scopes.user; }, s => { s.scopes.extra = []; },
     s => { s.scopes.user = null; }, s => { s.scopes.user = ['bad key']; },
     s => { s.scopes.user = ['*']; }, s => { s.scopes.user = ['key*tail']; },
     s => { s.scopes.user.push('plugins'); }, s => { s.scopes.user.push('language'); }
@@ -729,12 +730,14 @@ test('must-sync storage failure disables uploads and still starts with a deferre
   assert.equal(p.core.fitBody({language: 'ru'}), null);
 });
 
-test('optional quota failure skips that value but boot is ready', () => {
+test('progress quota failure disables uploads while still allowing boot', () => {
   const p = bootPage(); p.faults.quota = 'file_view';
   p.scopeRequest.success(clean(realScope));
   p.dataRequest.success(documentV2({file_view: '{}', language: 'ru'}));
-  assert.equal(p.items.file_view, undefined); assert.equal(p.items.language, 'ru');
-  assert.equal(p.core.bootState().ready, true); assert.equal(p.core.disabled(), false); assert.equal(p.starts(), 1);
+  assert.equal(p.items.file_view, undefined); assert.equal(p.items.language, undefined);
+  assert.equal(p.core.bootState().ready, false); assert.equal(p.core.disabled(), true); assert.equal(p.starts(), 1);
+  p.install(); p.tick(0);
+  assert.deepEqual(p.notices, ['Account sync is unavailable on this device']);
 });
 
 test('storage access and synchronous ajax exceptions cannot hold boot', () => {
@@ -1211,7 +1214,7 @@ const expireCount = p => p.events.filter(e => e.event.type === 'expired').length
 
 function startSave(p, key = 'language', value = 'ru') {
   p.change(key, value);
-  p.tick(key === 'file_view' ? 300000 : 2000);
+  p.tick(2000);
   assert.equal(p.requests.at(-1).config.type, 'GET');
   return p.requests.at(-1);
 }
@@ -1319,7 +1322,7 @@ test('boot omission recovers a previously saved encrypted value through enableUp
   assert.equal(restarted.core.dirty('torrserver_password'), false);
 });
 
-test('live omission schedules one encrypted recovery, retaining plaintext and best-effort optional values', () => {
+test('live omission schedules one encrypted recovery, retaining plaintext and clean progress', () => {
   const p = savingPage({torrserver_password: 'old secret', file_view: 'progress'});
   startSave(p, 'torrserver_password', 'saved secret').success(undefined, 304);
   p.requests.at(-1).success('', 204, '"saved"');
@@ -1405,31 +1408,38 @@ test('edits made during the pre-save GET are included in its PUT without paralle
   p.tick(10000); assert.equal(p.requests.length, p.initialRequests + 2, 'queued work already included needs no extra PUT');
 });
 
-test('optional changes wait five minutes without playback writes postponing the save', () => {
-  const p = savingPage({file_view: '{}'});
-  p.change('file_view', '{"one":1}'); p.tick(120000);
-  p.change('file_view', '{"two":2}'); p.tick(120000);
-  p.change('file_view', '{"three":3}'); p.tick(59999);
-  assert.equal(p.requests.length, p.initialRequests);
-  p.tick(1); p.requests.at(-1).success(undefined, 304);
-  assert.deepEqual(putBody(p.requests.at(-1)).data, {file_view: '{"three":3}'});
-  p.requests.at(-1).success('', 204);
-  p.tick(300000); assert.equal(p.requests.length, p.initialRequests + 2);
+test('all history and progress changes save after two seconds without postponing the timer', () => {
+  for (const key of ['file_view', 'online_last_balanser', 'online_view', 'online_watched_last',
+    'search_history', 'torrents_view', 'user_clarifys']) {
+    const p = savingPage({[key]: '{}'});
+    p.change(key, '{"one":1}'); p.tick(1000);
+    p.change(key, '{"two":2}'); p.tick(999);
+    assert.equal(p.requests.length, p.initialRequests, key);
+    p.tick(1); p.requests.at(-1).success(undefined, 304);
+    assert.deepEqual(putBody(p.requests.at(-1)).data, {[key]: '{"two":2}'}, key);
+    p.requests.at(-1).success('', 204);
+    assert.equal(p.core.dirty(key), false);
+    p.tick(300000); assert.equal(p.requests.length, p.initialRequests + 2);
+  }
 });
 
-test('must-sync dirtiness promotes an optional timer to two seconds', () => {
+test('progress and settings edits share the same two-second save batch', () => {
   const p = savingPage({file_view: '{}', language: 'en'});
-  p.change('file_view', '{"x":1}'); p.tick(10000);
-  p.change('language', 'ru'); p.tick(1999); assert.equal(p.requests.length, p.initialRequests);
+  p.change('file_view', '{"x":1}'); p.tick(1000);
+  p.change('language', 'ru'); p.tick(999); assert.equal(p.requests.length, p.initialRequests);
   p.tick(1); assert.equal(p.requests.length, p.initialRequests + 1);
+  p.requests.at(-1).success(undefined, 304);
+  assert.deepEqual(putBody(p.requests.at(-1)).data, {file_view: '{"x":1}', language: 'ru'});
 });
 
-test('hiding flushes optional edits immediately and further changes can save while hidden', () => {
+test('hiding flushes progress edits immediately and further changes can save while hidden', () => {
   const p = savingPage({file_view: '{}'});
   p.change('file_view', '{"x":1}'); p.tick(1000); p.visibility(true);
   assert.equal(p.requests.length, p.initialRequests + 1);
   p.requests.at(-1).success(undefined, 304); p.requests.at(-1).success('', 204);
-  p.change('file_view', '{"x":2}'); p.tick(300000);
+  p.change('file_view', '{"x":2}'); p.tick(1999);
+  assert.equal(p.requests.length, p.initialRequests + 2);
+  p.tick(1);
   p.requests.at(-1).success(undefined, 304);
   assert.deepEqual(putBody(p.requests.at(-1)).data, {file_view: '{"x":2}'});
   p.requests.at(-1).success('', 204); p.tick(300000);
@@ -1597,10 +1607,11 @@ test('logout, identity switch, cross-tab reload and storage failure cancel timer
 });
 
 test('size failures block PUTs and storage failures after PUT disable further uploads', () => {
-  for (const value of ['x'.repeat(LIMIT), '\ud800']) {
-    const p = savingPage({language: 'en'});
-    startSave(p, 'language', value).success(undefined, 304);
-    assert.equal(p.requests.length, p.initialRequests + 1); assert.equal(p.core.dirty('language'), true);
+  for (const key of ['language', 'file_view', 'search_history']) for (const value of ['x'.repeat(LIMIT), '\ud800']) {
+    const p = savingPage({[key]: 'old'});
+    startSave(p, key, value).success(undefined, 304);
+    assert.equal(p.requests.length, p.initialRequests + 1); assert.equal(p.core.dirty(key), true);
+    assert.equal(p.items[key], value, 'an oversized edit stays local and unsaved');
     assert.deepEqual(p.notices, ['Not saved to Account']);
   }
   const p = savingPage({language: 'en'});
@@ -1633,7 +1644,7 @@ test('visible pages poll every 60s with ETag; 304 leaves storage, base and cache
   assert.deepEqual(p.notices, []); assert.equal(p.reloads.length, 0);
 });
 
-test('live apply updates only differing non-dirty strings, must-sync first, without scheduling saves', () => {
+test('live apply updates only differing non-dirty strings without scheduling saves', () => {
   const p = pollingPage({language: 'en', favorite: '{"book":[1]}', file_view: '{}', tmdb_lang: 'en'});
   // A nolisten edit must be preserved without any event or save timer.
   p.items.language = 'ru';
@@ -1648,8 +1659,8 @@ test('live apply updates only differing non-dirty strings, must-sync first, with
   assert.equal(p.items.plugins, undefined); assert.equal(p.items.file_view_123, undefined);
   assert.equal(p.items.online_view, ''); assert.equal(p.items.mine_reactions, '');
   const keys = p.storageWrites.map(w => w.key);
-  assert.deepEqual(keys, ['favorite', 'torrserver_url', 'file_view']);
-  assert.deepEqual(clean(p.storageWrites[0].value), {book: [2]});
+  assert.deepEqual(keys, ['file_view', 'favorite', 'torrserver_url']);
+  assert.deepEqual(clean(p.storageWrites[1].value), {book: [2]});
   assert.deepEqual(p.refreshes, ['favorite', 'timeline']);
   assert.equal(p.core.dirty('favorite'), false); assert.equal(p.core.dirty('file_view'), false);
   assert.equal(JSON.parse(p.items[BASE]).favorite, p.core.fp(p.items.favorite));
@@ -1763,21 +1774,20 @@ test('logout, identity changes, reload and storage failure cancel polling and di
   }
 });
 
-test('live quota handling skips optional writes and disables sync on must-sync failures', () => {
-  const p = pollingPage({language: 'en', file_view: '{}'}, {upstreamStorage: true});
-  p.faults.quota = 'file_view'; p.tick(60000);
-  p.requests.at(-1).success(documentV2({file_view: '{"x":1}', language: 'ru'}));
-  assert.equal(p.items.language, 'ru'); assert.equal(p.core.disabled(), false);
-  assert.equal(JSON.parse(p.items[BASE]).file_view, p.core.fp('{}'));
-  assert.deepEqual(p.refreshes, [], 'failed optional write does not refresh its cache');
-  const q = pollingPage({language: 'en'}, {upstreamStorage: true});
-  q.faults.quota = 'language'; q.tick(60000);
-  q.requests.at(-1).success(documentV2({language: 'ru', file_view: '{}'}));
-  assert.equal(q.core.disabled(), true); assert.equal(q.core.accountState().uploads, false);
-  assert.deepEqual(q.storageWrites.map(w => w.key), ['language']);
-  const count = q.requests.length; q.tick(600000); q.visibility(false);
-  assert.equal(q.requests.length, count);
-  assert.deepEqual(q.notices, ['Синхронизация Аккаунта недоступна на этом устройстве']);
+test('live quota failures disable sync equally for settings, history and progress', () => {
+  for (const key of ['language', 'file_view', 'search_history']) {
+    const p = pollingPage({language: 'en', [key]: 'old'}, {upstreamStorage: true});
+    p.faults.quota = key; p.tick(60000);
+    p.requests.at(-1).success(documentV2({[key]: 'new', favorite: '{}'}));
+    assert.equal(p.items[key], undefined, 'upstream moves quota-failed writes out of localStorage');
+    assert.equal(JSON.parse(p.items[BASE])[key], p.core.fp('old'));
+    assert.equal(p.core.disabled(), true); assert.equal(p.core.accountState().uploads, false);
+    assert.deepEqual(p.storageWrites.map(w => w.key), [key]);
+    assert.deepEqual(p.refreshes, [], 'a failed write does not refresh module caches');
+    const count = p.requests.length; p.tick(600000); p.visibility(false);
+    assert.equal(p.requests.length, count);
+    assert.deepEqual(p.notices, ['Account sync is unavailable on this device']);
+  }
 });
 
 test('live values round-trip through the actual upstream Storage cache just like fresh reads', () => {
@@ -2418,8 +2428,8 @@ test('a sibling quota removal preserves reserve data for recovery after sync sto
   assert.deepEqual(restarted.notices, []);
 });
 
-test('upstream quota fallback never uploads a must-sync deletion tombstone', () => {
-  for (const key of ['favorite', 'mine_reactions']) {
+test('upstream quota fallback never uploads a synced deletion tombstone', () => {
+  for (const key of ['favorite', 'mine_reactions', 'file_view', 'search_history']) {
     const p = savingPage(undefined, {hidden: true, upstreamStorage: true});
     p.faults.quota = key;
     p.window.Lampa.Storage.set(key, {book: [1, 2]});
@@ -2447,8 +2457,8 @@ test('a restarted device persists a recovered must-sync reserve value before upl
   assert.deepEqual(restarted.notices, []);
 });
 
-test('first login recovers writable must-sync reserve values without omitting them', () => {
-  for (const key of ['favorite', 'torrserver_password', 'torrserver_url', 'torrserver_url_two']) {
+test('first login recovers writable synced reserve values without omitting them', () => {
+  for (const key of ['favorite', 'file_view', 'search_history', 'torrserver_password', 'torrserver_url', 'torrserver_url_two']) {
     const raw = key === 'favorite' ? '{"book":[1,2]}' : 'private credential';
     const p = loginPage({items: {language: 'en'}, reserve: {[key]: raw}, upstreamStorage: true});
     p.dataRequest.fail(404, missingDocument);
@@ -2460,15 +2470,15 @@ test('first login recovers writable must-sync reserve values without omitting th
   }
 });
 
-test('first login disables uploads if must-sync reserve values still cannot be persisted', () => {
-  for (const key of ['favorite', 'torrserver_password', 'torrserver_url', 'torrserver_url_two']) for (const otherLocalData of [false, true]) {
+test('first login disables uploads if synced reserve values still cannot be persisted', () => {
+  for (const key of ['favorite', 'file_view', 'search_history', 'torrserver_password', 'torrserver_url', 'torrserver_url_two']) for (const otherLocalData of [false, true]) {
     const reserveValue = key === 'favorite' ? '{"book":[1,2]}' : 'private credential';
     const p = loginPage({items: otherLocalData ? {language: 'en'} : {},
       reserve: {[key]: reserveValue}, upstreamStorage: true});
     p.faults.quota = key;
     p.dataRequest.fail(404, missingDocument);
     assert.equal(p.items[key], undefined);
-    assert.equal(p.core.disabled(), true, 'a must-sync fallback cannot be silently omitted on first upload');
+    assert.equal(p.core.disabled(), true, 'a synced fallback cannot be silently omitted on first upload');
     assert.equal(p.core.accountState().uploads, false);
     assert.deepEqual(clean(p.window.Lampa.Storage.get(key)), key === 'favorite' ? {book: [1, 2]} : reserveValue);
     p.tick(600000); p.visibility(true);
@@ -2685,12 +2695,12 @@ test('acceptance: progress writes and remote bookmarks converge live on the time
   b.change('file_view', '{"movie":0.5}');
   a.change('favorite', '{"book":[42]}'); a.change('torrserver_url', 'http://new'); a.tick(2000);
   server.respond(a.requests.at(-1)); server.respond(a.requests.at(-1));
-  b.tick(59999); assert.equal(b.requests.length, 2);
+  b.tick(1999); assert.equal(b.requests.length, 2);
   b.tick(1); server.respond(b.requests.at(-1));
   assert.deepEqual(clean(b.window.Lampa.Storage.get('favorite')), {book: [42]});
   assert.equal(b.items.torrserver_url, 'http://new'); assert.equal(b.items.file_view, '{"movie":0.5}');
   assert.deepEqual(b.refreshes, ['favorite']);
-  b.visibility(true); server.respond(b.requests.at(-1)); server.respond(b.requests.at(-1));
+  server.respond(b.requests.at(-1));
   assert.deepEqual(server.data(), {favorite: '{"book":[42]}', file_view: '{"movie":0.5}', torrserver_url: 'http://new'});
   a.visibility(true); a.visibility(false); server.respond(a.requests.at(-1));
   assert.deepEqual(clean(a.window.Lampa.Storage.get('file_view')), {movie: 0.5});
@@ -2703,13 +2713,13 @@ test('acceptance: progress writes and remote bookmarks converge live on the time
 });
 
 test('acceptance: temporary whitelist additions alone enable export, import and encrypt metadata', () => {
-  for (const scopeName of ['user', 'user_optional']) {
+  for (const scopeName of ['user', 'user_connection']) {
     const scope = clean(realScope), key = 'acceptance_setting';
     scope.scopes[scopeName].push(key); scope.encrypt.push(key);
     const server = sharedDocument({});
     const a = acceptanceDevice(server, {hidden: true}, scope);
     const b = acceptanceDevice(server, {hidden: true}, scope);
-    a.change(key, '{ "value": "новое" } '); a.tick(scopeName === 'user' ? 2000 : 300000);
+    a.change(key, '{ "value": "новое" } '); a.tick(2000);
     server.respond(a.requests.at(-1));
     assert.deepEqual(putBody(a.requests.at(-1)).encrypt, scope.encrypt);
     server.respond(a.requests.at(-1));
