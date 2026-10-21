@@ -212,12 +212,27 @@ The existing generic sync implementation satisfies the two-link policy without c
 - Review: files changed in Tasks 1–3
 - Update: relevant test files only if a concrete gap is found
 
-- [ ] Verify both URLs and shared credentials are stored by account sync while selection remains local, persists across reloads and defaults to `one` when absent.
-- [ ] Verify restored core fragments match the original two-link implementation, including its per-path selected-empty behavior; verify add-on membership identity follows the effective `Torserver.ip()` endpoint used by torrent operations.
-- [ ] Run `node --test docs/tests/*.test.cjs backend/pkg/storage/testdata/torrserver-one-link.test.cjs` from the repository root.
-- [ ] Run `npx --yes acorn@8.14.0 --ecma5 --silent svtlv/*.js app.min.js` and `git diff --check`.
-- [ ] From `backend/`, run `go test ./pkg/storage -run 'TestTorrserver|TestStorageScope|TestSensitiveSettings'` and `make lint` if Go guard code changed. Use the available supported Go environment; record any unavailable checks explicitly.
-- [ ] Add a regression test for any new failure discovered during acceptance review and rerun the affected checks before proceeding.
+- [x] Verify both URLs and shared credentials are stored by account sync while selection remains local, persists across reloads and defaults to `one` when absent.
+- [x] Verify restored core fragments match the original two-link implementation, including its per-path selected-empty behavior; verify add-on membership identity follows the effective `Torserver.ip()` endpoint used by torrent operations.
+- [x] Run `node --test docs/tests/*.test.cjs backend/pkg/storage/testdata/torrserver-one-link.test.cjs` from the repository root.
+- [x] Run `npx --yes acorn@8.14.0 --ecma5 --silent svtlv/*.js app.min.js` and `git diff --check`.
+- [x] From `backend/`, run `go test ./pkg/storage -run 'TestTorrserver|TestStorageScope|TestSensitiveSettings'` and `make lint` if Go guard code changed. Use the available supported Go environment; record any unavailable checks explicitly.
+- [x] Add a regression test for any new failure discovered during acceptance review and rerun the affected checks before proceeding. (No new failures or coverage gaps found; existing behavioral tests cover the acceptance criteria.)
+
+Verification: all 444 frontend tests passed with no skips. Pinned Acorn ES5
+parsing passed both the specified command and individual checks of every add-on
+and `app.min.js`; `git diff --check` passed. Targeted Go guards passed, including
+an uncached run, and `make lint` reported zero issues on macOS/arm64 with Go
+1.27.2. No required automated check was unavailable.
+
+Compared against `ed967ae^:app.min.js`: all 14 non-template URL/selector references
+match exactly; complete endpoint, parser, search, speed-test, status-listener and
+authentication fragments match after normalizing shifted bundle identifiers.
+The settings template matches after the separate existing shared-timecode
+control removal. Existing sync and ownership tests confirm local selection,
+reload persistence, shared credentials, per-path selected-empty behavior and
+effective-endpoint membership isolation. Browser/TV and deployment checks remain
+in Post-Completion; no production code changes were needed for acceptance.
 
 ### Task 5: Update documentation and complete the plan
 
