@@ -747,7 +747,12 @@
         if (storage('getItem', USER_KEY) !== accountUser) return;
         // Events can queue behind later edits. Refresh from the current shared value.
         var value = storage('getItem', change.key);
-        if (value === null) return;
+        if (value === null) {
+          // Raw removal and a sibling's quota fallback look identical. Stop
+          // before stale caches can restore it or a tombstone can mask reserve.
+          disable();
+          return;
+        }
         applying = true;
         // Write the raw string unchanged so JSON normalization cannot bounce
         // storage events between tabs. Storage.get parses it for module readers.

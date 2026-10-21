@@ -588,6 +588,12 @@ defaults there too, so their presence alone does not indicate a storage failure.
 A failed write disables uploads for the page and notifies; a recovered value must
 never become a deletion tombstone.
 
+A sibling tab's raw removal of a synced localStorage item also stops sync for
+the receiving page and shows the storage-unavailable notice. This event cannot
+distinguish an intentional removal from upstream's quota fallback. Leave the
+missing item and any IndexedDB reserve untouched, allowing recovery on a later
+load; explicit clears use `''` tombstones instead.
+
 Before saving, poll the latest document and apply clean remote changes. Overlay
 only dirty local keys, including `''` tombstones for cleared or removed values,
 enforce the encoded size rule (§4), and PUT with the
@@ -1440,7 +1446,7 @@ and the ES5 gate. Production deployment, physical browser/TV playback checks and
 rollback verification remain in the plan's Post-Completion list.
 
 Deviations and accepted behavior recorded while implementing Plan 4
-(`docs/plans/20261020-user-data-sync.md`, retained there during active review):
+(`docs/plans/completed/20261020-user-data-sync.md`):
 
 - Any-JSON schema v2 replaces the eight fixed sections. The whitelist and client
   `encrypt` list replace backend secret names; migration `00003` drops

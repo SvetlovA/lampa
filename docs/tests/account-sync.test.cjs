@@ -2369,6 +2369,55 @@ test('synced storage events refresh tab caches without changing raw values or sa
   assert.deepEqual(JSON.parse(server.data().favorite), {book: [1, 2, 3]});
 });
 
+test('a sibling raw removal stops sync without restoring stale cached values', () => {
+  for (const key of ['favorite', 'torrserver_password', 'file_view']) {
+    const raw = key === 'torrserver_password' ? 'secret' : '{"book":[1]}';
+    const server = sharedDocument({language: 'en', [key]: raw});
+    const sharedItems = {[USER]: 'Alice'};
+    const a = acceptanceDevice(server, {sharedItems});
+    const b = acceptanceDevice(server, {sharedItems});
+    b.window.Lampa.Storage.get(key);
+    const savedBase = sharedItems[BASE];
+    a.window.localStorage.removeItem(key);
+    b.storageEvent({key, oldValue: raw, newValue: null});
+    assert.equal(sharedItems[key], undefined, 'do not replace an ambiguous removal with stale data or a tombstone');
+    assert.equal(sharedItems[BASE], savedBase, 'a raw removal is not acknowledged as saved');
+    b.window.Lampa.Storage.set('language', 'ru');
+    b.visibility(true); b.visibility(false); b.tick(600000);
+    assert.equal(sharedItems[key], undefined, 'an unrelated edit cannot recover this tab\'s stale cache');
+    assert.equal(b.requests.length, 2, 'stop polls and uploads after the removal');
+    assert.equal(b.storageWrites.some(write => write.key === key), false);
+    assert.deepEqual(b.notices, ['Account sync is unavailable on this device']);
+    assert.deepEqual(server.data(), {language: 'en', [key]: raw});
+  }
+});
+
+test('a sibling quota removal preserves reserve data for recovery after sync stops', async () => {
+  const server = sharedDocument({language: 'en', favorite: '{"book":[1]}'});
+  const sharedItems = {[USER]: 'Alice'}, reserve = {};
+  const a = acceptanceDevice(server, {sharedItems, reserve});
+  const b = acceptanceDevice(server, {sharedItems});
+  b.window.Lampa.Storage.get('favorite');
+  a.faults.quota = 'favorite';
+  a.window.Lampa.Storage.set('favorite', {book: [1, 2]});
+  await Promise.resolve();
+  assert.equal(reserve.favorite, '{"book":[1,2]}', 'upstream has recovered the failed write in IndexedDB');
+  b.storageEvent({key: 'favorite', oldValue: '{"book":[1]}', newValue: null});
+  b.window.Lampa.Storage.set('language', 'ru');
+  for (const p of [a, b]) {
+    p.visibility(true); p.tick(600000);
+    assert.equal(p.requests.length, 2, 'neither tab can upload a deletion or stale cache');
+  }
+  assert.equal(sharedItems.favorite, undefined, 'leave raw absence so it cannot mask the reserve');
+  const restarted = acceptanceDevice(server, {sharedItems, reserve, hidden: true});
+  assert.equal(sharedItems.favorite, '{"book":[1,2]}');
+  restarted.tick(2000); server.respond(restarted.requests.at(-1));
+  assert.equal(putBody(restarted.requests.at(-1)).data.favorite, '{"book":[1,2]}');
+  server.respond(restarted.requests.at(-1));
+  assert.equal(server.data().favorite, '{"book":[1,2]}');
+  assert.deepEqual(restarted.notices, []);
+});
+
 test('upstream quota fallback never uploads a must-sync deletion tombstone', () => {
   for (const key of ['favorite', 'mine_reactions']) {
     const p = savingPage(undefined, {hidden: true, upstreamStorage: true});

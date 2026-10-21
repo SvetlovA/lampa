@@ -101,6 +101,15 @@ function page(options = {}) {
   };
 }
 
+function switchAwayAndBack(p, name = 'torrserver_use_link') {
+  const original = p.settings[name];
+  const endpoint = p.Lampa.Torserver.ip();
+  p.change(name, name === 'torrserver_use_link' ? (original === 'two' ? 'one' : 'two') : 'http://different');
+  assert.notEqual(p.Lampa.Torserver.ip(), endpoint, 'the intermediate change reaches a different server');
+  p.change(name, original);
+  assert.equal(p.Lampa.Torserver.ip(), endpoint);
+}
+
 test('installs before readiness and protects synchronous first use at API publication', () => {
   const p = page({lateLampa: true, state: null});
   p.install();
@@ -507,6 +516,91 @@ for (const method of ['add', 'hash', 'remove']) for (const failed of [false, tru
     p.select('two');
     if (failed) p.requests[0].fail(401);
     else p.requests[0].success('');
+    assert.equal(success, Number(method === 'hash'), 'playback already started without waiting for membership');
+    assert.equal(fail, 0);
+    assert.equal(p.window.svtlv_account_state.status, 'signed_in');
+    assert.equal(p.notices.length, 0);
+    assert.equal(p.calls.some(call => call.name === 'remove'), false);
+  });
+}
+
+for (const state of [guest, account()]) {
+  for (const name of ['torrserver_use_link', 'torrserver_url', 'torrserver_url_two']) {
+    for (const first of state.status === 'signed_in' ? ['membership', 'torrent'] : ['torrent']) {
+      test('switching away and back cannot revive delayed lists: ' + state.status + '/' + name + '/' + first, () => {
+        const p = page({state, settings: {torrserver_url_two: 'http://other',
+          torrserver_use_link: name === 'torrserver_url_two' ? 'two' : 'one'}});
+        p.seed([X], p.Lampa.Torserver.ip());
+        const result = p.list();
+        switchAwayAndBack(p, name);
+        const membership = () => { if (state.status === 'signed_in') p.requests[0].success({hashes: [X]}); };
+        const torrent = () => p.calls[0].success([{hash: X}]);
+        (first === 'membership' ? membership : torrent)();
+        (first === 'membership' ? torrent : membership)();
+        assert.equal(result.success.length + result.fail.length, 0);
+        assert.equal(p.notices.length, 0);
+        if (state.status === 'guest') p.seed([Y], p.Lampa.Torserver.ip());
+        const fresh = p.list();
+        if (state.status === 'signed_in') p.requests[1].success({hashes: [Y]});
+        p.calls.at(-1).success([{hash: X}, {hash: Y}]);
+        assert.deepEqual(fresh.success, [[[{hash: Y}]]]);
+      });
+    }
+    if (state.status === 'signed_in') test('switching away and back discards stale account-list 401s: ' + name, () => {
+      const p = page({state: account(), settings: {torrserver_url_two: 'http://other',
+        torrserver_use_link: name === 'torrserver_url_two' ? 'two' : 'one'}});
+      const result = p.list();
+      switchAwayAndBack(p, name);
+      p.requests[0].fail(401);
+      p.calls[0].success([{hash: X}]);
+      assert.equal(p.window.svtlv_account_state.status, 'signed_in');
+      assert.equal(result.success.length + result.fail.length, 0);
+      assert.equal(p.events.some(item => item.event.type === 'expired'), false);
+      assert.equal(p.notices.length, 0);
+    });
+  }
+
+  for (const method of ['add', 'hash']) for (const failed of [false, true]) {
+    test('switching away and back before a torrent callback cannot record membership: ' + state.status + '/' + method + '/' + failed, () => {
+      const p = page({state, settings: {torrserver_url_two: 'http://other', torrserver_savedb: true}});
+      let success = 0, fail = 0;
+      p.Lampa.Torserver[method]({}, () => success++, () => fail++);
+      switchAwayAndBack(p);
+      if (failed) p.calls[0].fail('timeout');
+      else p.calls[0].success({hash: X});
+      assert.equal(success, Number(method === 'hash' && !failed));
+      assert.equal(fail, Number(method === 'hash' && failed));
+      assert.equal(p.requests.length, 0);
+      assert.equal(p.items[key], undefined);
+      assert.equal(p.notices.length, 0);
+    });
+  }
+
+  for (const change of ['inactive URL', 'normalized URL', 'normalized selected alias']) {
+    test('same-effective connection changes retain pending lists: ' + state.status + '/' + change, () => {
+      const p = page({state, settings: {torrserver_url_two: ' HTTP://SERVER:8090/// '}});
+      p.seed([X]);
+      const result = p.list();
+      if (change === 'inactive URL') p.change('torrserver_url_two', 'http://other');
+      if (change === 'normalized URL') p.changeURL(' HTTP://SERVER:8090/// ');
+      if (change === 'normalized selected alias') p.select('two');
+      if (state.status === 'signed_in') p.requests[0].success({hashes: [X]});
+      p.calls[0].success([{hash: X}]);
+      assert.deepEqual(result.success, [[[{hash: X}]]]);
+    });
+  }
+}
+
+for (const method of ['add', 'hash', 'remove']) for (const status of [204, 401, 503]) {
+  test('switching away and back ignores pending membership acknowledgements: ' + method + '/' + status, () => {
+    const p = page({state: account(), settings: {torrserver_url_two: 'http://other', torrserver_savedb: true}});
+    let success = 0, fail = 0;
+    p.Lampa.Torserver[method](method === 'remove' ? X : {}, () => success++, () => fail++);
+    if (method !== 'remove') p.calls[0].success({hash: X});
+    assert.equal(p.requests.length, 1);
+    switchAwayAndBack(p);
+    if (status === 204) p.requests[0].success('');
+    else p.requests[0].fail(status);
     assert.equal(success, Number(method === 'hash'), 'playback already started without waiting for membership');
     assert.equal(fail, 0);
     assert.equal(p.window.svtlv_account_state.status, 'signed_in');
