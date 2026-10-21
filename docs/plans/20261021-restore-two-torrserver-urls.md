@@ -162,14 +162,14 @@ the original settings. Login and password retain their existing encryption polic
 - Modify: `docs/settings-sync-backend-design.md`
 - Modify: `docs/tests/ownership-docs.test.cjs`
 
-- [ ] Restore both URL inputs and the selector from the original template and Params registration, preserving names, labels, markup, ordering, events and default `one` exactly.
-- [ ] Restore the original two-link fragments across torrent, parser/search, authentication, speed-test and status paths, including their original per-path fallback semantics and change listeners; adapt only shifted bundle-local identifiers.
-- [ ] Add `torrserver_url_two` to `user_connection` and `torrserver_use_link` to `device`; update policy notes while retaining shared credential encryption.
-- [ ] Rename/adapt the Go single-URL guard to require two inputs and the default selector; retain timecode-removal, unrelated-parser and version-stamp assertions. Update scope expectations and the design scope table/negative documentation fixture together so guards remain valid.
-- [ ] Update the application version and matching assembly metadata using the current stamp convention; leave CSS version unchanged unless CSS changes are actually required.
-- [ ] Update bundle runtime tests for both links, defaults, fallback, empty values, scheme handling, auth, search changes, speed tests and status checks, matching historical upstream behavior rather than imposing new consistency rules.
-- [ ] Compare each restored fragment with `ed967ae^:app.min.js`; add regression coverage for selected-empty cases proving that original `ip()` fallback and direct selected-field consumers remain unchanged.
-- [ ] Run the bundle runtime tests, documentation guards, current frontend tests, targeted Go guards and ES5 checks; all must pass before Task 2.
+- [x] Restore both URL inputs and the selector from the original template and Params registration, preserving names, labels, markup, ordering, events and default `one` exactly.
+- [x] Restore the original two-link fragments across torrent, parser/search, authentication, speed-test and status paths, including their original per-path fallback semantics and change listeners; adapt only shifted bundle-local identifiers.
+- [x] Add `torrserver_url_two` to `user_connection` and `torrserver_use_link` to `device`; update policy notes while retaining shared credential encryption.
+- [x] Rename/adapt the Go single-URL guard to require two inputs and the default selector; retain timecode-removal, unrelated-parser and version-stamp assertions. Update scope expectations and the design scope table/negative documentation fixture together so guards remain valid.
+- [x] Update the application version and matching assembly metadata using the current stamp convention; leave CSS version unchanged unless CSS changes are actually required.
+- [x] Update bundle runtime tests for both links, defaults, fallback, empty values, scheme handling, auth, search changes, speed tests and status checks, matching historical upstream behavior rather than imposing new consistency rules.
+- [x] Compare each restored fragment with `ed967ae^:app.min.js`; add regression coverage for selected-empty cases proving that original `ip()` fallback and direct selected-field consumers remain unchanged.
+- [x] Run the bundle runtime tests, documentation guards, current frontend tests, targeted Go guards and ES5 checks; all must pass before Task 2.
 
 ### Task 2: Bind ownership to the effective selected server
 

@@ -12,7 +12,8 @@
       "torrserver_auth",
       "torrserver_login",
       "torrserver_password",
-      "torrserver_url"
+      "torrserver_url",
+      "torrserver_url_two"
     ],
     "user_optional": [
       "file_view",
@@ -225,6 +226,7 @@
       "tmdb_only_released",
       "torrents_filter",
       "torrents_sort",
+      "torrserver_use_link",
       "video_quality_default",
       "webos_subs_params"
     ]
@@ -272,10 +274,10 @@
     "cub_alive": "Generated last reachable CUB base URL from mirror failover, not a portable endpoint preference.",
     "cub_screensaver": "Selected CUB video wallpaper URL consumed by the device screensaver; remain device-specific despite remote source.",
     "cub_theme": "Device-selected CUB appearance extension; remain local with other rendering options.",
-    "torrserver_url": "Sole TorrServer endpoint synced by Plan 4 with account connection precedence: upload device values only when the server has none; server wins until explicitly edited. No legacy fallback.",
-    "torrserver_auth": "Account connection authentication toggle; sync together with the sole URL and credentials.",
-    "torrserver_login": "Must-sync sole TorrServer username. Listed in encrypt so the API seals it in place; encryption policy is owned only by this file.",
-    "torrserver_password": "Must-sync sole TorrServer password. Listed in encrypt so the API seals it in place; encryption policy is owned only by this file.",
+    "torrserver_url": "Portable primary TorrServer endpoint; both URLs sync while each device selects its active link locally.",
+    "torrserver_auth": "Shared authentication toggle for both portable TorrServer URLs; sync with the shared credentials.",
+    "torrserver_login": "Must-sync shared TorrServer username for both URLs. Listed in encrypt so the API seals it in place; encryption policy is owned only by this file.",
+    "torrserver_password": "Must-sync shared TorrServer password for both URLs. Listed in encrypt so the API seals it in place; encryption policy is owned only by this file.",
     "torrserver_savedb": "Controls whether playback writes a saved torrent into this TorrServer and records ownership. Connection-local behavior, not an account connection field.",
     "torrserver_preload": "Stream preload behavior for the current TorrServer/device path; remain connection-local.",
     "torrserver_gts": "Use TorrServer-provided streaming path when supported; depends on the configured server/client.",
@@ -333,6 +335,8 @@
     "title_comedy_of_*": "Conservative concatenation inventory: translation, notice, metric, transient identifier or commented expression, not user storage. Keep excluded from export.",
     "title_meta_*": "Conservative concatenation inventory: translation, notice, metric, transient identifier or commented expression, not user storage. Keep excluded from export.",
     "tv_status_*": "Conservative concatenation inventory: translation, notice, metric, transient identifier or commented expression, not user storage. Keep excluded from export.",
-    "yt_*": "Conservative concatenation inventory: translation, notice, metric, transient identifier or commented expression, not user storage. Keep excluded from export."
+    "yt_*": "Conservative concatenation inventory: translation, notice, metric, transient identifier or commented expression, not user storage. Keep excluded from export.",
+    "torrserver_url_two": "Portable secondary TorrServer endpoint; follows the same must-sync and account replacement rules as URL 1.",
+    "torrserver_use_link": "Device-local active TorrServer link, default one; never export or import the selector."
   }
 }

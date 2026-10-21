@@ -69,14 +69,11 @@ func TestParseUUID(t *testing.T) {
 	}
 }
 
-// TestTorrserverSingleURL_matchBundle guards the fork patch when upstream rebuilds the bundle.
+// TestTorrserverTwoURLs_matchBundle guards the two-link settings and separate timecode removal.
 // Runtime request tests live in testdata/torrserver-one-link.test.cjs.
-func TestTorrserverSingleURL_matchBundle(t *testing.T) {
+func TestTorrserverTwoURLs_matchBundle(t *testing.T) {
 	bundle := readBundle(t)
 	text := string(bundle)
-	for _, key := range []string{"torrserver_url_two", "torrserver_use_link"} {
-		assert.NotContains(t, text, key, "dropped second TorrServer link %q is back", key)
-	}
 	for _, fragment := range []string{"torrserver_tracktimecode", "'/viewed'", "Torserver.viewed"} {
 		assert.NotContains(t, text, fragment, "removed TrackTimecode code %q is back", fragment)
 	}
@@ -94,9 +91,14 @@ func TestTorrserverSingleURL_matchBundle(t *testing.T) {
 		}
 	}
 	require.NotEmpty(t, serverTemplate, "TorrServer settings template was lost")
-	assert.Equal(t, 1, strings.Count(serverTemplate, `data-name="torrserver_url"`))
+	for _, key := range []string{"torrserver_url", "torrserver_url_two", "torrserver_use_link"} {
+		assert.Equal(t, 1, strings.Count(serverTemplate, `data-name="`+key+`"`), "settings control %s must occur once", key)
+	}
+	assert.Contains(t, text, "select('torrserver_use_link', {\n    'one': '#{settings_param_link_use_one}',\n    'two': '#{settings_param_link_use_two}'\n  }, 'one');")
+	assert.Contains(t, text, "select('torrserver_url_two', '', '');")
 	assert.Equal(t, strings.Count(serverTemplate, "<div"), strings.Count(serverTemplate, "</div>"), "template divs must balance")
-	assert.Contains(t, serverTemplate, "#{settings_main_torrserver}")
+	assert.Contains(t, serverTemplate, "#{settings_server_link_one}")
+	assert.Contains(t, serverTemplate, "#{settings_server_link_two}")
 	for _, key := range []string{"jackett_url_two", "prowlarr_url_two", "parser_use_link"} {
 		assert.Contains(t, text, `data-name=\"`+key+`\"`, "unrelated parser controls must remain")
 	}
@@ -312,7 +314,7 @@ func TestStorageScope_matchBundle(t *testing.T) {
 		{"search_history", "user_optional"}, {"user_clarifys", "user_optional"},
 		{"torrserver_url", "user_connection"}, {"torrserver_auth", "user_connection"},
 		{"torrserver_login", "user_connection"}, {"torrserver_password", "user_connection"},
-		{"torrserver_url_two", ""}, {"torrserver_use_link", ""}, {"torrserver_savedb", "connection"},
+		{"torrserver_url_two", "user_connection"}, {"torrserver_use_link", "device"}, {"torrserver_savedb", "connection"},
 		{"plugins", "device"}, {"plugins_blacklist", "device"}, {"player", "device"},
 		{"menu_sort", "device"}, {"menu_hide", "device"}, {"start_page", "device"},
 		{"content_rows_online", "device"}, {"parental_control_pin", "device"},

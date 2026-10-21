@@ -78,13 +78,15 @@ test('design scope examples and complete portable allowlists match the machine-r
   checkScopes(read(documents[1]), JSON.parse(read('svtlv/storage-scope.json')).scopes);
 });
 
-test('scope guard rejects legacy connection export and missing portable fields', () => {
+test('scope guard rejects local selector export and missing portable fields', () => {
   const document = read(documents[1]);
   const scopes = JSON.parse(read('svtlv/storage-scope.json')).scopes;
   assert.throws(() => checkScopes(document.replace(
-    '| `user_connection` | `torrserver_url`,', '| `user_connection` | `torrserver_url_two`,'), scopes),
-  /torrserver_url_two is not classified as user_connection/);
+    '| `user_connection` | `torrserver_url`,', '| `user_connection` | `torrserver_use_link`,'), scopes),
+  /torrserver_use_link is not classified as user_connection/);
   assert.throws(() => checkScopes(document.replace('`torrserver_auth`, ', ''), scopes),
+    /user_connection allowlist must be complete/);
+  assert.throws(() => checkScopes(document.replace('`torrserver_url_two`, ', ''), scopes),
     /user_connection allowlist must be complete/);
 });
 

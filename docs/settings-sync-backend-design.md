@@ -976,9 +976,9 @@ below summarizes their actual rules. The JSON file is the complete authority.
 | Scope | Examples and rule |
 | --- | --- |
 | `user` | `favorite`, `language`, `mine_reactions`, `person_subscribes_id`, `tmdb_lang`. Portable preferences and personal data must sync. |
-| `user_connection` | `torrserver_url`, `torrserver_auth`, `torrserver_login`, `torrserver_password`. Only the sole TorrServer endpoint, authentication toggle and credentials are portable connection fields. These fields must sync; the top-level encrypt list selects login/password for sealing by the API. |
+| `user_connection` | `torrserver_url`, `torrserver_url_two`, `torrserver_auth`, `torrserver_login`, `torrserver_password`. Both TorrServer endpoints, the shared authentication toggle and credentials are portable connection fields. These fields must sync; the top-level encrypt list selects login/password for sealing by the API. |
 | `user_optional` | `file_view`, `online_last_balanser`, `online_view`, `online_watched_last`, `search_history`, `torrents_view`, `user_clarifys`. History, playback progress and torrent views sync best-effort; optional values may be dropped to fit the upload limit or local quota. |
-| `device` | `player`, `player_iptv`, `player_torrent`, `player_volume`, `interface_size`, `navigation_type`, `plugins`, `plugins_blacklist`, `menu_sort`, `menu_hide`, `start_page`, `content_rows*`, `parental_control_pin`. Hardware, controls, executable plugins and feature-dependent menus never sync. |
+| `device` | `player`, `player_iptv`, `player_torrent`, `player_volume`, `interface_size`, `navigation_type`, `plugins`, `plugins_blacklist`, `menu_sort`, `menu_hide`, `start_page`, `content_rows*`, `parental_control_pin`, `torrserver_use_link`. Hardware, controls, executable plugins, feature-dependent menus and the active TorrServer link selector never sync. The selector defaults to one on each client. |
 | `connection` | `jackett_url`, `jackett_key`, `prowlarr_url`, `prowlarr_key`, `parser_use`, `parser_use_link`, `parse_lang`, `tmdb_proxy`, `proxy_other`, `cub_domain`, `torrserver_savedb`. Other endpoints, credentials and server/device-dependent behavior stay local. |
 | `external` | `file_view_*`, `account`, `account_bookmarks_*`, `account_timeline_sync*`, `account_plugins`, `cloud_token`, `cloud_use`, `terminal_access`. CUB and third-party identity, tokens, cursors and service-owned data never become Keycloak user data. |
 | `cache` | `activity`, `torrents_filter_data`, `recomends_list`, `recomends_scan`, `timetable`, `cub_alive`, `lampa_uid`, `region`, `storage_*`. Generated navigation, cached responses, device identity and sync bookkeeping stay local. |
@@ -989,12 +989,12 @@ best-effort. Exact keys take precedence over prefixes; the longest trailing-aste
 rules are rejected. Unclassified keys, including arbitrary plugin/add-on values,
 remain device-local; they are never implicitly allowed for export.
 
-The four `user_connection` fields follow the same document-level first-login
+The five `user_connection` fields follow the same document-level first-login
 rule as other synced data: guest values upload only if there is no server
 document. An existing document replaces guest values, including clearing absent
-fields. Later explicit local edits are dirty and saved (§7). Converging on one
-URL makes devices use the same membership set; URL aliases still produce
-different server IDs.
+fields. Later explicit local edits are dirty and saved (§7). Each client retains
+its local link selection; changing it does not rewrite either synced URL.
+URL aliases still produce different server IDs.
 
 `language` and `tmdb_lang` were verified as portable interface/content
 preferences. `plugins`, `plugins_blacklist`, `menu_sort`, `menu_hide` and
