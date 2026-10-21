@@ -1,12 +1,14 @@
 // Run with: node --test docs/tests/account-state.test.cjs
 // Runs the actual add-on, with controllable HTTP callbacks, timers and public Lampa APIs.
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const {test} = require('node:test');
 const source = fs.readFileSync(path.join(__dirname, '../../svtlv/account.js'), 'utf8');
 const ownershipSource = fs.readFileSync(path.join(__dirname, '../../svtlv/torrserver-ownership.js'), 'utf8');
+const bundle = fs.readFileSync(path.join(__dirname, '../../app.min.js'), 'utf8');
 const flag = 'svtlv_account_signed_in';
 const signedIn = id => ({authenticated: true, user: {id, name: id, email: id + '@example.test'}});
 const guest = {authenticated: false};
@@ -19,6 +21,8 @@ function page(options = {}) {
   const events = [];
   const listeners = {};
   const items = {...options.storage};
+  const settings = {language: 'en', torrserver_url: 'https://server:8090', torrserver_url_two: '',
+    torrserver_use_link: 'one', torrserver_savedb: true, ...options.settings};
   const notices = [];
   const selections = [];
   const components = [];
@@ -86,8 +90,7 @@ function page(options = {}) {
   };
   const Lampa = {
     Listener: listener,
-    Storage: {get: name => name === 'torrserver_url' ? 'https://server:8090' : 'en',
-      field: () => true, listener},
+    Storage: {get: name => settings[name], field: name => settings[name], listener},
     Torserver: {hash(object, success, fail) { playback.push({object, success, fail}); }},
     Activity: {active: () => null, all: () => []},
     SettingsApi: {addComponent: component => components.push(component)},
@@ -102,6 +105,8 @@ function page(options = {}) {
     Utils: {qrcode() {}},
     Modal: {open() {}, close() {}}
   };
+  const ip = bundle.match(/  function ip\(\) \{[\s\S]*?\n  \}/)[0];
+  Lampa.Torserver.ip = vm.runInNewContext(ip + '\nip;', {Storage: Lampa.Storage});
   const window = {
     location: {protocol: options.protocol || 'https:', hash: '', pathname: '/', search: ''},
     localStorage: storage,
@@ -200,6 +205,23 @@ test('failed signed-in session refresh keeps direct playback available without r
   assert.equal(p.items.svtlv_torrserver_guest_hashes, undefined);
   assert.equal(p.notices.length, 0);
 });
+
+for (const settings of [
+  {torrserver_use_link: 'two', torrserver_url_two: 'http://secondary:8090'},
+  {torrserver_use_link: 'one', torrserver_url: '', torrserver_url_two: 'http://secondary:8090'}
+]) {
+  test('confirmed account playback records membership for the effective secondary endpoint: ' + settings.torrserver_use_link, () => {
+    const p = page({ownership: true, settings});
+    p.requests[0].respond(signedIn('Alice'));
+    let played = 0;
+    p.play(() => played++);
+    p.playback[0].success({hash: 'a'.repeat(40)});
+    const server = crypto.createHash('sha256').update('secondary:8090').digest('hex');
+    assert.equal(p.requests[1].settings.url, '/api/v1/torrservers/' + server + '/hashes/' + 'a'.repeat(40));
+    assert.equal(p.requests[1].settings.headers['X-Lampa-Expected-User'], 'Alice');
+    assert.equal(played, 1);
+  });
+}
 
 test('authenticated response publishes identity and flag; expiry immediately blocks it', () => {
   const p = page();

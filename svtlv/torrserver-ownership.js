@@ -108,7 +108,13 @@
   }
 
   function serverId() {
-    var url = lampa.Storage.get('torrserver_url');
+    var url;
+    // Match torrent operations, including the other-link fallback. Without the
+    // public resolver, leave membership unconfigured rather than guess a server.
+    try {
+      if (typeof lampa.Torserver.ip != 'function') return '';
+      url = lampa.Torserver.ip();
+    } catch (err) { return ''; }
     if (typeof url != 'string') return '';
     url = url.replace(/^\s+|\s+$/g, '').toLowerCase().replace(/^https?:\/\//, '').replace(/\/+$/, '');
     return url ? digest(url) : '';
@@ -355,7 +361,7 @@
       if (event.type == 'state') refresh();
     });
     if (api.Storage.listener) api.Storage.listener.follow('change', function (event) {
-      if (event.name == 'torrserver_url') refresh();
+      if (event.name == 'torrserver_url' || event.name == 'torrserver_url_two' || event.name == 'torrserver_use_link') refresh();
     });
     $(window).on('storage', function (event) {
       var change = event.originalEvent || event;

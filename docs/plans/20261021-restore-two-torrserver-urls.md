@@ -178,12 +178,15 @@ the original settings. Login and password retain their existing encryption polic
 - Modify: `docs/tests/torrserver-ownership.test.cjs`
 - Modify: `docs/tests/account-state.test.cjs` (public API fixture if needed)
 
-- [ ] Resolve the raw effective endpoint through public `Lampa.Torserver.ip()` before applying existing server-ID normalization; preserve graceful behavior when the public API is unavailable.
-- [ ] Refresh the relevant My Torrents activity on either URL or local selector changes, keeping existing account-generation and effective-server checks.
-- [ ] Update public API fixtures to reflect actual endpoint selection and fallback.
-- [ ] Test signed-in and guest membership separation while switching between different servers, then switching back; confirm existing primary-server IDs and rows remain usable.
-- [ ] Test delayed list/add/playback responses after switching servers, fallback endpoint identity, unconfigured behavior and unchanged non-destructive removal.
-- [ ] Run ownership/account-state runtime tests and the ES5 gate; all must pass before Task 3.
+- [x] Resolve the raw effective endpoint through public `Lampa.Torserver.ip()` before applying existing server-ID normalization; preserve graceful behavior when the public API is unavailable.
+- [x] Refresh the relevant My Torrents activity on either URL or local selector changes, keeping existing account-generation and effective-server checks.
+- [x] Update public API fixtures to reflect actual endpoint selection and fallback.
+- [x] Test signed-in and guest membership separation while switching between different servers, then switching back; confirm existing primary-server IDs and rows remain usable.
+- [x] Test delayed list/add/playback responses after switching servers, fallback endpoint identity, unconfigured behavior and unchanged non-destructive removal.
+- [x] Run ownership/account-state runtime tests and the ES5 gate; all must pass before Task 3.
+
+Verification: 163 ownership/account-state tests and all 427 frontend tests passed.
+Pinned Acorn ES5 parsing passed for each add-on and `app.min.js`; `git diff --check` passed.
 
 ### Task 3: Verify both URLs sync independently of local selection
 
