@@ -50,3 +50,13 @@ func (s *Server) authenticate(next http.HandlerFunc) http.HandlerFunc {
 		next(w, r.WithContext(context.WithValue(r.Context(), userIDKey{}, id)))
 	}
 }
+
+// identityMatches is an optional precondition, never a source of identity.
+// it prevents a stale tab from using another tab's newly authenticated cookie.
+func identityMatches(w http.ResponseWriter, r *http.Request, id string) bool {
+	if expected := r.Header.Get("X-Lampa-Expected-User"); expected != "" && expected != id {
+		WriteError(w, http.StatusConflict, "account_changed", "account changed; recheck session")
+		return false
+	}
+	return true
+}

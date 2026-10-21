@@ -1,4 +1,4 @@
-// Run with: node --test docs/tests/torrserver-ownership.test.cjs
+// Run with: node --test tests/torrserver-ownership.test.cjs
 // Execute the actual add-on with controlled public APIs, network and storage.
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
@@ -6,9 +6,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const {test} = require('node:test');
-const source = fs.readFileSync(path.join(__dirname, '../../svtlv/torrserver-ownership.js'), 'utf8');
-const html = fs.readFileSync(path.join(__dirname, '../../index.html'), 'utf8');
-const bundle = fs.readFileSync(path.join(__dirname, '../../app.min.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../svtlv/torrserver-ownership.js'), 'utf8');
+const html = fs.readFileSync(path.join(__dirname, '../index.html'), 'utf8');
+const bundle = fs.readFileSync(path.join(__dirname, '../app.min.js'), 'utf8');
+const ipSource = bundle.match(/  function ip\(\) \{[\s\S]*?\n  \}/)[0];
 const key = 'svtlv_torrserver_guest_hashes';
 const X = 'a'.repeat(40), Y = 'b'.repeat(40), Z = 'c'.repeat(64);
 const id = url => crypto.createHash('sha256').update(url.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/+$/, '')).digest('hex');
@@ -20,7 +21,8 @@ function page(options = {}) {
   const calls = [], requests = [], notices = [], timers = [], events = [], replacements = [];
   const listeners = {}, handlers = {};
   const items = options.items || {};
-  const settings = {torrserver_url: 'https://server:8090/', language: 'en', torrserver_savedb: false, ...options.settings};
+  const settings = {torrserver_url: 'https://server:8090/', torrserver_url_two: '', torrserver_use_link: 'one',
+    language: 'en', torrserver_savedb: false, ...options.settings};
   let activity = options.activity || null;
   const faults = {read: false, write: false, ...options.faults};
   const listener = {
@@ -32,7 +34,8 @@ function page(options = {}) {
   };
   const Lampa = {
     Torserver: {},
-    Storage: {get: name => settings[name], field: name => settings[name] === true || settings[name] === 'true', listener},
+    Storage: {get: name => settings[name],
+      field: name => name === 'torrserver_savedb' ? settings[name] === true || settings[name] === 'true' : settings[name], listener},
     Listener: listener,
     Noty: {show: text => notices.push(text)},
     Activity: {
@@ -42,6 +45,7 @@ function page(options = {}) {
     },
     Utils: {hash() { throw new Error('short hashes must not be used'); }}
   };
+  Lampa.Torserver.ip = vm.runInNewContext(ipSource + '\nip;', {Storage: Lampa.Storage});
   for (const name of ['my', 'add', 'hash', 'remove', 'drop']) {
     Lampa.Torserver[name] = function (...args) {
       const operation = {
@@ -81,7 +85,9 @@ function page(options = {}) {
     install() { window.Lampa = Lampa; },
     reload() { vm.runInContext(source, context); },
     setState(state) { window.svtlv_account_state = state; listener.send('svtlv_account', {type: 'state', state}); },
-    changeURL(url) { settings.torrserver_url = url; listener.send('change', {name: 'torrserver_url'}); },
+    change(name, value) { settings[name] = value; listener.send('change', {name, value}); },
+    changeURL(url) { this.change('torrserver_url', url); },
+    select(link) { this.change('torrserver_use_link', link); },
     navigate(next) { activity = next; },
     storageEvent(name = key) { handlers.storage({originalEvent: {key: name}}); },
     flush() { const pending = timers.splice(0); for (const fn of pending) fn(); },
@@ -93,6 +99,15 @@ function page(options = {}) {
       return {success, fail};
     }
   };
+}
+
+function switchAwayAndBack(p, name = 'torrserver_use_link') {
+  const original = p.settings[name];
+  const endpoint = p.Lampa.Torserver.ip();
+  p.change(name, name === 'torrserver_use_link' ? (original === 'two' ? 'one' : 'two') : 'http://different');
+  assert.notEqual(p.Lampa.Torserver.ip(), endpoint, 'the intermediate change reaches a different server');
+  p.change(name, original);
+  assert.equal(p.Lampa.Torserver.ip(), endpoint);
 }
 
 test('installs before readiness and protects synchronous first use at API publication', () => {
@@ -153,6 +168,26 @@ test('late installation replaces an already active My Torrents activity', () => 
   p.flush();
   assert.equal(p.replacements.length, 3);
 });
+
+for (const name of ['torrserver_url', 'torrserver_url_two', 'torrserver_use_link']) {
+  test('connection changes refresh My Torrents and discard retained lists: ' + name, () => {
+    const stack = [];
+    const p = page({activity: {component: 'mytorrents'}, stack});
+    p.flush();
+    let destroyed = 0;
+    const retained = {component: 'mytorrents', activity: {destroy() { destroyed++; }}};
+    stack.push(retained);
+    p.change(name, name === 'torrserver_use_link' ? 'two' : 'http://other');
+    assert.equal(destroyed, 1);
+    assert.equal(retained.activity, null);
+    p.flush();
+    assert.equal(p.replacements.length, 2);
+    p.navigate({component: 'full'});
+    p.change(name, '');
+    p.flush();
+    assert.equal(p.replacements.length, 2, 'details stay open');
+  });
+}
 
 for (const protocol of ['file:', 'app:']) test('non-HTTP origin leaves all original methods intact: ' + protocol, () => {
   const p = page({protocol});
@@ -395,6 +430,212 @@ test('URL changes drop pending responses and restoring the URL restores its memb
   assert.equal(restored.success.length, 1);
 });
 
+for (const state of [guest, account()]) {
+  for (const [one, two, selection, effective] of [
+    ['http://primary', 'https://secondary/path', 'one', 'http://primary'],
+    ['http://primary', 'https://secondary/path', 'two', 'https://secondary/path'],
+    ['http://primary', 'http://secondary', undefined, 'http://primary'],
+    ['http://primary', 'http://secondary', 'invalid', 'http://primary'],
+    ['', 'http://secondary', 'one', 'http://secondary'],
+    ['http://primary', '', 'two', 'http://primary'],
+    ['', 'http://secondary', 'invalid', 'http://secondary']
+  ]) {
+    test('membership follows the actual bundle endpoint: ' + state.status + '/' + [one, two, selection].join('/'), () => {
+      const p = page({state, settings: {torrserver_url: one, torrserver_url_two: two, torrserver_use_link: selection}});
+      p.seed([X], effective);
+      const result = p.list();
+      if (state.status === 'signed_in') {
+        assert.equal(p.requests[0].config.url, '/api/v1/torrservers/' + id(effective) + '/hashes');
+        p.requests[0].success({hashes: [X]});
+      }
+      p.calls[0].success([{hash: X}, {hash: Y}]);
+      assert.deepEqual(result.success, [[[{hash: X}]]]);
+      p.Lampa.Torserver.remove(X);
+      if (state.status === 'signed_in') {
+        assert.equal(p.requests[1].config.url, '/api/v1/torrservers/' + id(effective) + '/hashes/' + X);
+        assert.equal(p.requests[1].config.type, 'DELETE');
+        p.requests[1].success('');
+      } else assert.deepEqual(p.hashes(effective), []);
+      assert.equal(p.calls.some(call => call.name === 'remove'), false);
+      assert.equal(p.settings.torrserver_url, one);
+      assert.equal(p.settings.torrserver_url_two, two);
+    });
+  }
+
+  test('switching to an empty link retains the effective server and its pending list: ' + state.status, () => {
+    const p = page({state});
+    p.seed([X]);
+    const result = p.list();
+    p.select('two');
+    if (state.status === 'signed_in') p.requests[0].success({hashes: [X]});
+    p.calls[0].success([{hash: X}]);
+    assert.deepEqual(result.success, [[[{hash: X}]]]);
+  });
+
+  for (const first of state.status === 'signed_in' ? ['membership', 'torrent', 'neither'] : ['neither']) {
+    test('switching servers ignores delayed list responses: ' + state.status + '/' + first, () => {
+      const p = page({state, settings: {torrserver_url_two: 'http://other'}});
+      p.seed([X]);
+      const result = p.list();
+      if (first === 'membership' && state.status === 'signed_in') p.requests[0].success({hashes: [X]});
+      if (first === 'torrent') p.calls[0].success([{hash: X}]);
+      p.select('two');
+      if (first !== 'membership' && state.status === 'signed_in') p.requests[0].success({hashes: [X]});
+      if (first !== 'torrent') p.calls[0].success([{hash: X}]);
+      assert.equal(result.success.length + result.fail.length, 0);
+      if (state.status === 'signed_in') p.requests[0].fail(401);
+      assert.equal(p.window.svtlv_account_state.status, state.status);
+      assert.equal(p.notices.length, 0);
+    });
+  }
+
+  for (const method of ['add', 'hash']) for (const failed of [false, true]) {
+    test('switching servers before a torrent response cannot record membership: ' + state.status + '/' + method + '/' + failed, () => {
+      const p = page({state, settings: {torrserver_url_two: 'http://other', torrserver_savedb: true}});
+      let success = 0, fail = 0;
+      p.Lampa.Torserver[method]({}, () => success++, () => fail++);
+      p.select('two');
+      if (failed) p.calls[0].fail('timeout');
+      else p.calls[0].success({hash: X});
+      assert.equal(success, Number(method === 'hash' && !failed));
+      assert.equal(fail, Number(method === 'hash' && failed));
+      assert.equal(p.requests.length, 0);
+      assert.equal(p.items[key], undefined);
+      assert.equal(p.notices.length, 0);
+    });
+  }
+}
+
+for (const method of ['add', 'hash', 'remove']) for (const failed of [false, true]) {
+  test('switching servers ignores pending membership acknowledgements: ' + method + '/' + failed, () => {
+    const p = page({state: account(), settings: {torrserver_url_two: 'http://other', torrserver_savedb: true}});
+    let success = 0, fail = 0;
+    p.Lampa.Torserver[method](method === 'remove' ? X : {}, () => success++, () => fail++);
+    if (method !== 'remove') p.calls[0].success({hash: X});
+    assert.equal(p.requests[0].config.url, '/api/v1/torrservers/' + id(p.settings.torrserver_url) + '/hashes/' + X);
+    p.select('two');
+    if (failed) p.requests[0].fail(401);
+    else p.requests[0].success('');
+    assert.equal(success, Number(method === 'hash'), 'playback already started without waiting for membership');
+    assert.equal(fail, 0);
+    assert.equal(p.window.svtlv_account_state.status, 'signed_in');
+    assert.equal(p.notices.length, 0);
+    assert.equal(p.calls.some(call => call.name === 'remove'), false);
+  });
+}
+
+for (const state of [guest, account()]) {
+  for (const name of ['torrserver_use_link', 'torrserver_url', 'torrserver_url_two']) {
+    for (const first of state.status === 'signed_in' ? ['membership', 'torrent'] : ['torrent']) {
+      test('switching away and back cannot revive delayed lists: ' + state.status + '/' + name + '/' + first, () => {
+        const p = page({state, settings: {torrserver_url_two: 'http://other',
+          torrserver_use_link: name === 'torrserver_url_two' ? 'two' : 'one'}});
+        p.seed([X], p.Lampa.Torserver.ip());
+        const result = p.list();
+        switchAwayAndBack(p, name);
+        const membership = () => { if (state.status === 'signed_in') p.requests[0].success({hashes: [X]}); };
+        const torrent = () => p.calls[0].success([{hash: X}]);
+        (first === 'membership' ? membership : torrent)();
+        (first === 'membership' ? torrent : membership)();
+        assert.equal(result.success.length + result.fail.length, 0);
+        assert.equal(p.notices.length, 0);
+        if (state.status === 'guest') p.seed([Y], p.Lampa.Torserver.ip());
+        const fresh = p.list();
+        if (state.status === 'signed_in') p.requests[1].success({hashes: [Y]});
+        p.calls.at(-1).success([{hash: X}, {hash: Y}]);
+        assert.deepEqual(fresh.success, [[[{hash: Y}]]]);
+      });
+    }
+    if (state.status === 'signed_in') test('switching away and back discards stale account-list 401s: ' + name, () => {
+      const p = page({state: account(), settings: {torrserver_url_two: 'http://other',
+        torrserver_use_link: name === 'torrserver_url_two' ? 'two' : 'one'}});
+      const result = p.list();
+      switchAwayAndBack(p, name);
+      p.requests[0].fail(401);
+      p.calls[0].success([{hash: X}]);
+      assert.equal(p.window.svtlv_account_state.status, 'signed_in');
+      assert.equal(result.success.length + result.fail.length, 0);
+      assert.equal(p.events.some(item => item.event.type === 'expired'), false);
+      assert.equal(p.notices.length, 0);
+    });
+  }
+
+  for (const method of ['add', 'hash']) for (const failed of [false, true]) {
+    test('switching away and back before a torrent callback cannot record membership: ' + state.status + '/' + method + '/' + failed, () => {
+      const p = page({state, settings: {torrserver_url_two: 'http://other', torrserver_savedb: true}});
+      let success = 0, fail = 0;
+      p.Lampa.Torserver[method]({}, () => success++, () => fail++);
+      switchAwayAndBack(p);
+      if (failed) p.calls[0].fail('timeout');
+      else p.calls[0].success({hash: X});
+      assert.equal(success, Number(method === 'hash' && !failed));
+      assert.equal(fail, Number(method === 'hash' && failed));
+      assert.equal(p.requests.length, 0);
+      assert.equal(p.items[key], undefined);
+      assert.equal(p.notices.length, 0);
+    });
+  }
+
+  for (const change of ['inactive URL', 'normalized URL', 'normalized selected alias']) {
+    test('same-effective connection changes retain pending lists: ' + state.status + '/' + change, () => {
+      const p = page({state, settings: {torrserver_url_two: ' HTTP://SERVER:8090/// '}});
+      p.seed([X]);
+      const result = p.list();
+      if (change === 'inactive URL') p.change('torrserver_url_two', 'http://other');
+      if (change === 'normalized URL') p.changeURL(' HTTP://SERVER:8090/// ');
+      if (change === 'normalized selected alias') p.select('two');
+      if (state.status === 'signed_in') p.requests[0].success({hashes: [X]});
+      p.calls[0].success([{hash: X}]);
+      assert.deepEqual(result.success, [[[{hash: X}]]]);
+    });
+  }
+}
+
+for (const method of ['add', 'hash', 'remove']) for (const status of [204, 401, 503]) {
+  test('switching away and back ignores pending membership acknowledgements: ' + method + '/' + status, () => {
+    const p = page({state: account(), settings: {torrserver_url_two: 'http://other', torrserver_savedb: true}});
+    let success = 0, fail = 0;
+    p.Lampa.Torserver[method](method === 'remove' ? X : {}, () => success++, () => fail++);
+    if (method !== 'remove') p.calls[0].success({hash: X});
+    assert.equal(p.requests.length, 1);
+    switchAwayAndBack(p);
+    if (status === 204) p.requests[0].success('');
+    else p.requests[0].fail(status);
+    assert.equal(success, Number(method === 'hash'), 'playback already started without waiting for membership');
+    assert.equal(fail, 0);
+    assert.equal(p.window.svtlv_account_state.status, 'signed_in');
+    assert.equal(p.notices.length, 0);
+    assert.equal(p.calls.some(call => call.name === 'remove'), false);
+  });
+}
+
+test('membership uses the public resolver rather than independently reading configured fields', () => {
+  const p = page({state: account()});
+  p.Lampa.Torserver.ip = () => 'https://effective/path';
+  p.list();
+  assert.equal(p.requests[0].config.url, '/api/v1/torrservers/' + id('https://effective/path') + '/hashes');
+});
+
+for (const resolver of [undefined, () => { throw new Error('unavailable'); }, () => null]) {
+  test('an unavailable endpoint resolver leaves ownership unconfigured and playback usable: ' + String(resolver), () => {
+    const p = page({state: account(), settings: {torrserver_savedb: true}});
+    p.Lampa.Torserver.ip = resolver;
+    const result = p.list();
+    p.calls[0].success([{hash: X}]);
+    assert.equal(result.success.length, 0);
+    assert.equal(result.fail.length, 1);
+    let played = 0, removed = 0;
+    p.Lampa.Torserver.hash({}, () => played++);
+    p.calls[1].success({hash: X});
+    p.Lampa.Torserver.remove(X, () => removed++);
+    assert.equal(played, 1);
+    assert.equal(removed, 0);
+    assert.equal(p.requests.length, 0);
+    assert.equal(p.items[key], undefined);
+    assert.equal(p.calls.some(call => call.name === 'remove'), false);
+  });
+}
+
 test('guest lists are profile-local; removal preserves other profiles and server torrents', () => {
   const a = page(), b = page();
   a.seed([X]); b.seed([X, Y]);
@@ -411,11 +652,12 @@ test('guest lists are profile-local; removal preserves other profiles and server
 test('shared-server acceptance flow isolates accounts, guests and retained memberships', () => {
   // Controlled external services; every client runs the actual ownership add-on.
   const memberships = new Map(), servers = new Map();
-  const clients = [page({state: account('Alice')}), page({state: account('Bob')}), page(), page()];
+  const clients = [account('Alice'), account('Bob'), guest, guest].map(state =>
+    page({state, settings: {torrserver_url_two: 'http://other-server:8090'}}));
   const [a, b, g, otherGuest] = clients;
   const cursors = new Map(clients.map(client => [client, {calls: 0, requests: 0}]));
   const server = client => {
-    const name = id(client.settings.torrserver_url);
+    const name = id(client.Lampa.Torserver.ip());
     if (!servers.has(name)) servers.set(name, new Set());
     return servers.get(name);
   };
@@ -479,13 +721,26 @@ test('shared-server acceptance flow isolates accounts, guests and retained membe
   visible(g, [X]); visible(otherGuest, []);
   remove(g, X);
   visible(g, []); visible(a, [X]); visible(b, [X, Y]);
+  add(g, X);
 
-  a.changeURL('http://other-server:8090');
+  a.select('two');
   visible(a, []);
   add(a, Z);
   visible(a, [Z]);
-  a.changeURL('http://server:8090');
+  g.select('two');
+  visible(g, []);
+  add(g, Y);
+  visible(g, [Y]); visible(a, [Z]);
+  remove(a, Z);
+  visible(a, []); visible(g, [Y]);
+  a.select('one');
+  g.select('one');
   visible(a, [X]);
+  visible(g, [X]);
+  assert.ok(memberships.get('Alice/' + id('server:8090')).has(X), 'existing primary rows retain their IDs');
+  g.select('two');
+  visible(g, [Y]);
+  g.select('one');
   remove(a, X);
   visible(a, []); visible(b, [X, Y]);
   remove(b, X); // Last account row also leaves X on TorrServer.
@@ -772,19 +1027,21 @@ test('removal 401 rechecks identity; stale removal cannot affect the new screen'
   assert.equal(p.items[key], undefined);
 });
 
-test('missing URL retains upstream add/playback path but never exposes list or physically removes', () => {
-  const p = page({settings: {torrserver_url: ''}});
-  const result = p.list();
-  p.calls[0].success([{hash: X}]);
-  assert.equal(result.success.length, 0); assert.equal(result.fail.length, 1);
-  p.Lampa.Torserver.add({}); p.calls[1].success({hash: X});
-  p.Lampa.Torserver.hash({}); p.calls[2].success({hash: X});
-  p.Lampa.Torserver.remove(X);
-  assert.equal(p.requests.length, 0);
-  assert.equal(p.items[key], undefined);
-  assert.equal(p.calls.some(call => call.name === 'remove'), false);
-  assert.ok(p.notices.at(-1).includes('Configure'));
-});
+for (const state of [guest, account()]) for (const selection of ['one', 'two']) {
+  test('empty URLs retain upstream add/playback but never expose list or physically remove: ' + state.status + '/' + selection, () => {
+    const p = page({state, settings: {torrserver_url: '', torrserver_url_two: '', torrserver_use_link: selection}});
+    const result = p.list();
+    p.calls[0].success([{hash: X}]);
+    assert.equal(result.success.length, 0); assert.equal(result.fail.length, 1);
+    p.Lampa.Torserver.add({}); p.calls[1].success({hash: X});
+    p.Lampa.Torserver.hash({}); p.calls[2].success({hash: X});
+    p.Lampa.Torserver.remove(X);
+    assert.equal(p.requests.length, 0);
+    assert.equal(p.items[key], undefined);
+    assert.equal(p.calls.some(call => call.name === 'remove'), false);
+    assert.ok(p.notices.at(-1).includes('Configure'));
+  });
+}
 
 test('drop remains original for every identity', () => {
   for (const state of [guest, account(), null]) {
@@ -818,35 +1075,57 @@ test('synchronous API exceptions fail closed and unexpected mutation status neve
   assert.equal(q.notices.length, 1);
 });
 
-test('loader waits for ownership load or missing-file fallback and starts each bundle once', () => {
+test('loader orders ownership then sync, tolerates missing/throwing add-ons, and starts once', () => {
   const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].map(match => match[1]).filter(Boolean);
-  for (const missing of [false, true]) for (const remote of [false, true]) {
+  for (const missingOwnership of [false, true]) for (const missingSync of [false, true])
+    for (const remote of [false, true]) for (const hook of ['absent', 'throw', 'delayed']) {
     const appended = [];
     const window = {location: {href: remote ? 'file:///index.html' : 'https://lampa/'}};
+    let bootCalls = 0, resume;
+    if (hook !== 'absent') window.svtlv_sync_boot = done => {
+      bootCalls++;
+      if (hook === 'throw') throw new Error('broken add-on');
+      resume = done;
+    };
     const context = vm.createContext({window, location: window.location, console: {log() {}},
       AndroidJS: remote ? {getLampaURL: () => 'https://remote/'} : undefined,
       $: () => ({append() {}, removeClass() { assert.fail('network overlay'); }, text() {}}),
       document: {createElement: () => ({}), getElementsByTagName: () => [{appendChild: script => appended.push(script)}]}});
     for (const script of scripts) vm.runInContext(script, context);
-    assert.equal(appended.some(script => script.src.includes('app.min.js')), false);
+    const countMain = () => appended.filter(script => script.src.includes('app.min.js')).length;
+    const countSync = () => appended.filter(script => script.src.includes('account-sync.js')).length;
+    function missing(script) { script.onerror(); appended.at(-1).onerror(); appended.at(-1).onerror(); }
+    assert.equal(countMain(), 0); assert.equal(countSync(), 0);
     const ownership = appended.find(script => script.src.includes('torrserver-ownership.js'));
-    ownership.readyState = 'loading';
-    ownership.onreadystatechange();
-    assert.equal(appended.some(script => script.src.includes('app.min.js')), false);
+    ownership.readyState = 'loading'; ownership.onreadystatechange();
+    assert.equal(countMain(), 0); assert.equal(countSync(), 0);
     ownership.readyState = 'loaded';
-    if (missing) {
-      ownership.onerror(); appended.at(-1).onerror(); appended.at(-1).onerror();
-    } else {
-      ownership.onload(); ownership.onreadystatechange();
+    if (missingOwnership) missing(ownership);
+    else { ownership.onload(); ownership.onreadystatechange(); }
+    assert.equal(countMain(), 0); assert.equal(countSync(), 1, 'duplicate ownership callbacks load sync only once');
+    const sync = appended.find(script => script.src.includes('account-sync.js'));
+    sync.readyState = 'loading'; sync.onreadystatechange();
+    assert.equal(countMain(), 0);
+    sync.readyState = 'loaded';
+    if (missingSync) missing(sync);
+    else {
+      sync.onload();
+      if (hook === 'delayed') {
+        assert.equal(countMain(), 0, 'bundle waits for the sync hook');
+        resume(); resume();
+      }
+      sync.onreadystatechange();
+      if (hook === 'delayed') resume();
     }
-    assert.equal(appended.filter(script => script.src.includes('app.min.js')).length, 1);
+    assert.equal(countMain(), 1);
+    assert.equal(bootCalls > 0, !missingSync && hook !== 'absent');
     const main = appended.find(script => script.src.includes('app.min.js'));
     assert.equal(main.src, remote ? 'https://remote/app.min.js?v=' + context.cache_version : 'app.min.js?v=' + context.cache_version);
     if (remote) {
-      main.onerror(); appended.at(-1).onerror(); appended.at(-1).onerror();
+      missing(main);
       const fallback = appended.at(-1);
       assert.ok(fallback.src.includes('lampa-main/app.min.js'));
-      fallback.onerror(); appended.at(-1).onerror(); appended.at(-1).onerror();
+      missing(fallback);
       assert.ok(appended.at(-1).src.startsWith('app.min.js'));
     }
   }

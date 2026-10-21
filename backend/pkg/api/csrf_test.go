@@ -104,7 +104,7 @@ func TestServer_csrfBeforeAuthentication(t *testing.T) {
 	srv, logs := newTestServer(t, svc, auth)
 	for _, method := range []string{http.MethodPut, http.MethodDelete} {
 		t.Run(method, func(t *testing.T) {
-			req := httptest.NewRequest(method, userDataPath, strings.NewReader(`{"schema_version":1,"data":{}}`))
+			req := httptest.NewRequest(method, userDataPath, strings.NewReader(`{"schema_version":2,"data":{}}`))
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("Origin", "https://evil.example")
 			req.Header.Set(CSRFHeader, "1")

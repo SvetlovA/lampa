@@ -24,7 +24,7 @@ const (
 
 // baseJSON is a self-contained fixture for the config loader tests.
 const baseJSON = `{
-  "Api": {"Listen": ":5800", "MaxBodyBytes": 2097152},
+  "Api": {"Listen": ":5800", "MaxBodyBytes": 4194304},
   "Health": {"Listen": ":8081"},
   "Database": {"Host": "localhost", "Port": 5434, "Name": "lampa", "User": "lampa",
                "Password": "{LAMPA_DB_PASSWORD}", "SSLMode": "disable"},
@@ -80,7 +80,7 @@ func TestLoad_base(t *testing.T) {
 	assert.Equal(t, ":8081", cfg.HealthListen)
 	assert.Equal(t, "postgres://lampa:"+testPassword+"@localhost:5434/lampa?sslmode=disable", cfg.DBDSN)
 	assert.Equal(t, testKey, cfg.DataKey[:])
-	assert.Equal(t, int64(2097152), cfg.MaxBodyBytes)
+	assert.Equal(t, int64(4194304), cfg.MaxBodyBytes)
 	assert.Equal(t, Auth{Issuer: testIssuer, ClientID: "svtlv-lampa", ClientSecret: testClient},
 		cfg.Auth)
 }
@@ -156,7 +156,7 @@ func TestLoad_layering(t *testing.T) {
 				assert.Equal(t, "postgres://lampa:"+testPassword+"@other:5434/lampa?sslmode=disable", cfg.DBDSN)
 				assert.Equal(t, ":5800", cfg.Listen)
 				assert.Equal(t, ":8081", cfg.HealthListen)
-				assert.Equal(t, int64(2097152), cfg.MaxBodyBytes)
+				assert.Equal(t, int64(4194304), cfg.MaxBodyBytes)
 			}},
 		{name: "one key of a section", override: `{"Api": {"MaxBodyBytes": 1024}}`,
 			check: func(t *testing.T, cfg Config) {

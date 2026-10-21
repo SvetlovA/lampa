@@ -548,10 +548,10 @@ func TestNewAPI_sessionRevalidation(t *testing.T) {
 			}
 			return stored, nil
 		},
-		ReplaceFunc: func(_ context.Context, userID string, raw []byte) (storage.Document, error) {
+		ReplaceFunc: func(_ context.Context, userID string, raw []byte, expectedETag *string) (storage.Document, error) {
 			assert.Equal(t, testUserID, userID)
 			assert.Contains(t, string(raw), `"language":"ru"`)
-			stored = storage.Document{SchemaVersion: 1, Data: map[string]json.RawMessage{"settings": json.RawMessage(`{"language":"ru"}`)}}
+			stored = storage.Document{SchemaVersion: 2, Data: map[string]json.RawMessage{"settings": json.RawMessage(`{"language":"ru"}`)}}
 			return stored, nil
 		},
 	}
@@ -570,8 +570,8 @@ func TestNewAPI_sessionRevalidation(t *testing.T) {
 	assert.Zero(t, kc.introspects.Load(), "no cookie, no keycloak call")
 
 	cookie := sessionCookie(t, cfg)
-	r = send(t, http.MethodPut, userData, cookie, `{"schema_version":1,"data":{"settings":{"language":"ru"}}}`)
-	require.Equal(t, http.StatusOK, r.code, r.body)
+	r = send(t, http.MethodPut, userData, cookie, `{"schema_version":2,"data":{"settings":{"language":"ru"}}}`)
+	require.Equal(t, http.StatusNoContent, r.code, r.body)
 	r = send(t, http.MethodGet, userData, cookie, "")
 	assert.Equal(t, http.StatusOK, r.code)
 	assert.Contains(t, r.body, `"language":"ru"`)

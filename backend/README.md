@@ -1,14 +1,16 @@
 # lampa-api
 
-Go service for Lampa accounts, user data and TorrServer membership (Plans 1–3 of
+Go service for Lampa accounts, user data and TorrServer membership (Plans 1–4 of
 [`docs/settings-sync-backend-design.md`](../docs/settings-sync-backend-design.md)). It signs
 users in with the Svtlv Keycloak realm, keeps their session in a sealed cookie, stores one
-JSONB document per user in PostgreSQL, seals TorrServer, Jackett and Prowlarr credentials with
-AES-256-GCM, records per-user torrent membership, and exposes the Svtlv two-tier health contract.
+JSONB document per user in PostgreSQL, seals client-selected values with AES-256-GCM,
+records per-user torrent membership, and exposes the Svtlv two-tier health contract.
 
 The API is reached only through `lampa-web`'s same-origin `/api/v1/` proxy; its port is not
-published. No client calls the user-data routes yet (Plan 4); the `svtlv/account.js` add-on
-uses only the session and auth routes.
+published. The `svtlv/account.js` add-on uses the session and auth routes;
+`svtlv/account-sync.js` applies user data before boot, polls with ETags for live changes
+and saves dirty local keys with `If-Match`. Its whitelist and encryption policy come from
+`svtlv/storage-scope.json`.
 The `svtlv/torrserver-ownership.js` add-on uses the membership routes while continuing to
 call TorrServer directly for adding, listing and playback. The API never contacts TorrServer
 and receives neither its URL nor its credentials through the membership routes.
@@ -42,7 +44,7 @@ the files are the single source of non-secret settings.
 | Key | Default | Rule |
 | --- | --- | --- |
 | `Api.Listen` | `:5800` | API listener, host:port |
-| `Api.MaxBodyBytes` | `2097152` | request body limit, > 0 |
+| `Api.MaxBodyBytes` | `4194304` | request body limit, > 0 |
 | `Health.Listen` | `:8081` | health listener, must differ from the API one |
 | `Database.Host` / `Port` | `localhost` / `5434` | `lampa-db` / `5432` in Test and Production |
 | `Database.Name` / `User` | `lampa` / `lampa` | required |
@@ -79,25 +81,58 @@ startup log prints the environment and redacts the DSN, the data key and the cli
 Generate secrets with `openssl rand -hex 32` (`LAMPA_DB_PASSWORD`) and
 `openssl rand -base64 32` (`LAMPA_API_DATA_KEY`).
 
-### Sealed settings
+### Sealed values and sync policy
 
-`storage.SensitiveSettings` mirrors the secret inputs of the Lampa settings UI:
-`torrserver_login`, `torrserver_password`, `jackett_key`, `jackett_key_two`, `prowlarr_key`
-and `prowlarr_key_two`. They are removed from the `settings` section, sealed with AES-256-GCM
-(bound to the user ID) into `encrypted_connections`, and merged back on read. Settings that
-plugins register through `SettingsApi` are unknown to the backend and are stored as plain
-settings.
+Schema v2 stores arbitrary JSON values under top-level `data` keys. Each PUT may include
+an `encrypt` array of at most 64 keys. Present values on that list are sealed in place as
+`{"$sealed":"base64(nonce+ciphertext)"}` with AES-256-GCM and `LAMPA_API_DATA_KEY`, bound
+to the user ID; missing keys are ignored. GET decrypts them and omits unreadable values
+with a `[WARN]` log and lists their names in `unreadable_keys` while returning the rest.
+The field is omitted when all values are readable. Such a response is `200` even when
+`If-None-Match` matches; it keeps the stored ETag so a client can restore surviving
+local plaintext with a conditional PUT. Previously synchronized local values in the
+frontend's `encrypt` list become dirty when omitted, and a live refresh schedules
+their recovery save. While a cached response has unreadable keys, the client omits
+`If-None-Match` on refresh and blocks replacement PUTs unless it can supply every
+omitted synced value. This also detects repairs that preserve the plaintext ETag.
+Client input containing `$sealed` objects is
+reserved and rejected. There is no backend list of secret setting names or UI-input guard.
 
-`TestSensitiveSettings_matchUI` parses `../app.min.js` and fails when the UI gains a settings
-input that is neither in `SensitiveSettings` nor in the test's list of plain inputs, or loses a
-sealed one. An upstream pull that adds a settings input therefore fails CI until it is
-classified as sealed or plain. The test
-skips when `app.min.js` is absent (a `backend/`-only checkout).
+The frontend reads [`svtlv/storage-scope.json`](../svtlv/storage-scope.json) at runtime.
+`user` and `user_connection` sync with the same persistence rules. Exact keys beat
+prefixes and the longest prefix wins. Unknown keys, player settings, plugins and other
+connection credentials remain local. Both TorrServer URLs (`torrserver_url`,
+`torrserver_url_two`), the shared authentication toggle (`torrserver_auth`), login and
+password are portable connection fields; the shipped `encrypt` list selects login/password. Add a key to `user` to sync it and also to `encrypt`
+if it should be sealed. No JS or Go change is required.
 
-`TestStorageScope_matchBundle` shares the bundle reader and checks every extracted storage
-key against [`svtlv/storage-scope.json`](../svtlv/storage-scope.json). An upstream pull that
-adds an unclassified key fails CI; missing or invalid scope data and stale rules also fail.
-Plan 4 exports only `user` and `user_connection` keys; unknown keys remain local.
+The active-link selector `torrserver_use_link` is device-local: `one` (URL 1) by
+default, or `two` (URL 2). Each client preserves its stored selection across reloads,
+imports, polling, save retries, account replacement and logout. A selector-only change
+sends no user-data PUT and never swaps or rewrites either URL. Both URLs share the same
+authentication toggle and username/password pair. Logout clears the synced connection
+values under the existing ownership rules while leaving the local selector intact.
+
+Older schema-version-2 documents without URL 2 remain valid. The existing document-level
+first-login rule still applies: guest values upload only if no account document exists;
+an existing document replaces them, including clearing absent synced fields. Later URL
+edits and explicit secondary clears sync normally as values and empty-string tombstones.
+Refresh older clients after deployment before relying on durable URL-2 sync: their
+whole-document writes can omit URL 2 because their allowlist excludes it. Mixed-version
+preservation is outside this change.
+
+Clearing or removing a synchronized setting sends an empty-string tombstone. Other
+devices apply that empty value, hiding any IndexedDB reserve copy; a successful save
+removes its dirty fingerprint. An explicit tombstone never triggers credential recovery.
+Fingerprints are refreshed from shared localStorage before dirty checks so other tabs'
+saves cannot make clean values appear dirty. A missing synced item still available
+through Lampa's memory/IndexedDB fallback is persisted before export. This also handles
+normal cached defaults. Only a failed write disables uploads, preventing false deletions.
+
+`TestStorageScope_matchBundle` checks extracted bundle storage keys against that inventory.
+New unclassified keys, missing/invalid scope data and stale rules fail CI; only a
+backend-only checkout without `app.min.js` skips the guard. The backend validates the
+shape of `encrypt`, not the frontend's choice of secrets.
 
 ## Build, test, lint
 
@@ -145,8 +180,10 @@ they can never silently skip there. Dependencies are vendored: after changing th
 Run the frontend runtime and documentation checks from the repository root:
 
 ```sh
-node --test docs/tests/*.test.cjs backend/pkg/storage/testdata/torrserver-one-link.test.cjs
-npx --yes acorn@8.14.0 --ecma5 --silent svtlv/*.js
+node --test tests/*.test.cjs
+for file in svtlv/*.js app.min.js; do
+  npx --yes acorn@8.14.0 --ecma5 --silent "$file"
+done
 ```
 
 WSL `git` cannot resolve this worktree's Windows `.git` path, so `make build` in WSL reports
@@ -293,9 +330,9 @@ phones and browsers.
 | `POST /api/v1/auth/device/poll` | `202` `{status, interval}` (`pending` or `slow_down`); `200` signed-in body + session cookie | `400 no_device_login`, `403 access_denied`, `410 expired`, `500 login_failed`, `503 keycloak_unavailable` |
 | `POST /api/v1/auth/logout` | `204`, local cookies cleared, `lampa_logout` set | — |
 | `POST /api/v1/auth/logout?sso=1` | `200` `{sso_logged_out,logout_url?}`, local cookies cleared; browser follows `logout_url` | — |
-| `GET /api/v1/user-data` | `200` `{schema_version, data, updated_at}` | `401`, `404 user_data_not_found`, `500 connections_unreadable`, `503 storage_unavailable` / `session_unavailable` |
-| `PUT /api/v1/user-data` `{schema_version, data}` | `200` stored document | `400 invalid_document` / `unsupported_schema_version` / `invalid_json`, `401`, `413 request_too_large`, `415 unsupported_media_type`, `503` |
-| `DELETE /api/v1/user-data` | `204`, idempotent | `401`, `503` |
+| `GET /api/v1/user-data` | `200` v2 `{schema_version, data, updated_at}` + `ETag`, or `304` on matching `If-None-Match` | `401`, `404 user_data_not_found`, `409 account_changed`, `503 storage_unavailable` / `session_unavailable` |
+| `PUT /api/v1/user-data` `{schema_version, data, encrypt?}` | `204`, no body, new `ETag`; conditional update with `If-Match`, otherwise upsert | `400 invalid_document` / `unsupported_schema_version` / `invalid_json`, `401`, `409 account_changed`, `412 precondition_failed`, `413 request_too_large`, `415 unsupported_media_type`, `503` |
+| `DELETE /api/v1/user-data` | `204`, idempotent | `401`, `409 account_changed`, `503` |
 | `GET /api/v1/torrservers/{server_id}/hashes` | `200` `{"hashes":[...]}`; sorted, empty array when no claims exist | `400 invalid_server_id`, `401`, `503 storage_unavailable` / `session_unavailable` |
 | `PUT /api/v1/torrservers/{server_id}/hashes/{hash}` | `204`, idempotent claim, no body required | `400 invalid_server_id` / `invalid_hash`, `401`, `503` |
 | `DELETE /api/v1/torrservers/{server_id}/hashes/{hash}` | `204`, idempotent removal of only this user's claim | `400 invalid_server_id` / `invalid_hash`, `401`, `503` |
@@ -307,9 +344,49 @@ Other methods get `405 method_not_allowed` with `Allow`, other paths `404 not_fo
 `500 internal_error`. Errors are `{"error": {"code": "...", "message": "..."}}` with short,
 generic messages.
 
-`data` holds exactly the sections `settings, favorites, bookmarks, scores, subscriptions,
-progress, history, other` (missing ones are stored as `{}`), each a JSON object; only
-`schema_version` 1 is accepted. Sections are capped at 1 MiB and nesting at depth 32.
+### User-data document v2
+
+Example PUT body (`Content-Type: application/json`, `X-Lampa-Csrf: 1`):
+
+```json
+{
+  "schema_version": 2,
+  "data": {
+    "language": "ru",
+    "torrserver_url": "http://ts:8090",
+    "torrserver_url_two": "http://192.168.1.10:8090",
+    "torrserver_auth": "true",
+    "torrserver_login": "user",
+    "torrserver_password": "secret",
+    "favorite": "{\"book\":[],\"history\":[]}"
+  },
+  "encrypt": ["torrserver_login", "torrserver_password"]
+}
+```
+
+Only `schema_version` 2 is accepted. `data` must be an object; top-level keys match
+`^[A-Za-z0-9_.:-]{1,128}$`. Values may be any JSON type except objects containing a
+reserved `$sealed` member, even nested. `encrypt` is optional and contains at most 64
+keys matching the same pattern. There are no fixed sections or per-section size limits.
+The whole encoded body is capped at 4194304 bytes (4 MiB), nesting at depth 32 including
+the envelope. Invalid UTF-8, NUL escapes and unpaired surrogates are rejected.
+
+Migration `00003_user_data_v2.sql` drops `encrypted_connections` and adds
+`etag text not null default ''`. Version-1 rows read as `404 user_data_not_found`.
+GET returns the decrypted `data`, `schema_version` and `updated_at`, without `encrypt`.
+
+GET and PUT return a quoted `ETag` containing SHA-256 of canonical plaintext `data`
+before sealing (sorted nested object keys, compact JSON and normalized string escapes).
+`encrypt` and timestamps do not affect it. GET with matching `If-None-Match` returns
+`304` with no body; GET retains `Cache-Control: no-store`. Tag comparison ignores `W/`.
+
+PUT with `If-Match` updates only the existing row with that tag, atomically. An absent
+or changed row returns `412 precondition_failed` without a write. Without `If-Match`,
+PUT upserts. Success is `204` with no response body and the new ETag. The add-on polls
+before saving, overlays dirty local keys on the latest server document and retries one
+412 after polling again; unrelated keys survive concurrent edits. The same key uses last
+successful save wins. A first save after a 404 exports all local synced data without
+`If-Match` and does not perform a read-back GET.
 
 A value PostgreSQL still refuses to store (a SQLSTATE class 22 data exception, for example a
 number outside jsonb's numeric range) is also `400 invalid_document`, not `503`. Every request
@@ -319,20 +396,26 @@ runs under a 10 s deadline, so a stalled database answers `503 storage_unavailab
 The user ID comes only from the `Authenticator` (the session's Keycloak `sub`); no header,
 query or body can set it.
 
-Membership requests may send `X-Lampa-Expected-User` as an identity precondition. The
-add-on always sends its captured user ID. If it differs from the cookie-authenticated
+User-data GET/PUT/DELETE and membership requests may send `X-Lampa-Expected-User` as
+an identity precondition. Both add-ons always send their captured user ID. If it differs from the cookie-authenticated
 identity (for example, another tab signed in as someone else), the API returns
-`409 account_changed` before accessing storage. The add-on fails closed and rechecks
-`/api/v1/session` without retrying the operation. Omitting the header preserves the
+`409 account_changed` before accessing storage. Ownership fails closed and rechecks
+`/api/v1/session` without retrying the operation; sync stops saves and polling and sends
+the Account `expired` event for the same session recheck on 401/409. Omitting the header preserves the
 existing API behavior; the header never authenticates a caller or selects another user.
-Identity, URL and guest-storage changes also discard inactive My Torrents screens so
+Identity, either URL, local selector and guest-storage changes also discard inactive My Torrents screens so
 returning from a detail screen fetches a newly filtered list.
 
 Membership routes accept an opaque `server_id` of 1–64 ASCII letters, digits, underscores
-or hyphens. The add-on derives a 64-character lowercase SHA-256 ID from the sole
-`torrserver_url`, trimmed, lowercased, stripped of its HTTP(S) scheme and trailing slashes.
-The page's scheme does not affect the ID. Different URL aliases produce different IDs;
-changing the URL hides existing memberships and restoring it reveals them. The backend
+or hyphens. The add-on derives a 64-character lowercase SHA-256 ID from the effective raw
+endpoint returned by public `Lampa.Torserver.ip()`, trimmed, lowercased, stripped of its
+HTTP(S) scheme and trailing slashes. The page's scheme does not affect the ID, and existing
+URL-1 memberships keep their IDs. Different normalized hosts, paths or ports produce
+different IDs even when both links reach the same physical server. Switching links hides
+one membership set and switching back restores it; adding under one address never claims
+ownership under the other. Missing public API or both URLs empty leaves ownership
+unconfigured. Changes to either URL or the local selector refresh My Torrents; pending
+responses remain bound to the captured account and effective server. The backend
 trims and lowercases a `hash`, then requires 40 or 64 hexadecimal characters.
 
 ### Torrent membership storage and logging
@@ -380,9 +463,9 @@ and torrent membership need the database. The critical database check probes bot
 
 ## Operational caveats
 
-- **Back up `LAMPA_API_DATA_KEY` outside GitHub.** It seals every stored TorrServer, Jackett
-  and Prowlarr credential; losing or changing it makes them unreadable (`500 connections_unreadable`).
-  Key rotation is not implemented.
+- **Back up `LAMPA_API_DATA_KEY` outside GitHub.** It seals values selected by the client's
+  `encrypt` list; losing or changing it causes those values to be omitted on GET with a
+  warning. Remaining values are still readable. Key rotation is not implemented.
 - `POSTGRES_PASSWORD` applies only when the `lampa_db_data` volume is first initialized.
   To rotate `LAMPA_DB_PASSWORD`, run `ALTER ROLE lampa PASSWORD '...'` inside the database
   first, then update the secret and redeploy.
@@ -406,14 +489,40 @@ and torrent membership need the database. The critical database check probes bot
   switch account operations into guest writes. Direct playback remains available while
   identity is unresolved or the API is down; membership recording is skipped if identity
   was unresolved at invocation or changed before TorrServer answered.
-- The marked bundle patch drops the second TorrServer input and selector without migrating
-  them: every runtime path uses only `torrserver_url`, so a device that used the second link
-  must re-enter it. The same patch removes TrackTimecode (the toggle and all shared `/viewed`
-  reads/writes); playback progress stays in Lampa's local `file_view*`. Reapply the patch and its
-  version/build stamp after upstream bundle updates. Plan 4 will sync the sole URL,
-  authentication toggle and credentials: upload device values only if the server has none;
-  otherwise server values win until explicitly edited. Until then, different URLs select
-  different membership sets.
+- Preserve the original upstream two-link settings and per-path URL behavior after bundle
+  updates. Torrent operations, streams and speed tests use `Torserver.ip()` / `url()`: the
+  selected nonempty URL wins, otherwise the other nonempty URL is used; both empty means
+  unconfigured. Parser/search and generic authentication use the selected field directly.
+  With an empty selected field, search reports an unconfigured TorrServer and generic
+  requests receive no Basic auth even if torrent operations fall back. Status checks use
+  the changed field on either URL edit and the selected field on selector changes/settings
+  open, with no fallback; they send the shared credentials explicitly when auth is enabled.
+  Explicit URL schemes retain upstream `Utils.checkEmptyUrl` behavior. These are the original
+  upstream differences, not a common routing policy. The separate marked patch still removes
+  TrackTimecode (the toggle and all shared `/viewed` reads/writes); playback progress stays in
+  Lampa's local `file_view*`. Reapply that removal and its version/build stamp after upstream
+  updates without removing the two-link controls or changing their routing.
+- Account sync polls every 60 seconds while visible and on screen return, applying clean
+  remote changes live, including during playback. A normal save costs a poll GET plus a PUT;
+  each authenticates against Keycloak, even a 304 (no cache). Dirty fingerprints in
+  `svtlv_sync_base` survive reload and network failures; `svtlv_sync_user` identifies their
+  owner. A local `svtlv_sync_revision` changes on each baseline write or clear to reject
+  delayed responses even when fingerprint contents repeat. Imports persist the owner
+  before writing account values, so partial failures still permit cleanup. Equal-data
+  login and the successful pre-boot shortcut refresh this tab's caches before enabling
+  uploads. Logout/confirmed expiry
+  clears synced keys with empty strings to mask IndexedDB reserve copies and drops
+  the owner and fingerprints, retaining a fresh local revision. The last validated
+  scopes in `svtlv_sync_scope` allow cleanup after a scope fetch failure; this cached
+  policy never authorizes synchronization. Device settings and
+  cloud data remain. Boot with a marker waits at most 3 seconds before starting Lampa;
+  no marker sends no user-data request.
+- All synced changes, including history and progress, use the same 2-second save timer.
+  An encoded request over 4 MiB is rejected locally without dropping values; local edits stay dirty.
+  Any storage write failure disables sync for the page. CUB writers, Clear cache and manual backup restore are not coordinated with
+  account sync; the next boot GET may restore server values. `file_view_*` belongs to CUB
+  and never syncs; plain `file_view` syncs as regular user data. Browser/TV deployment checks remain
+  in the completed Plan 4 checklist.
 - On Android with the external torrent client (`internal_torrclient` disabled), playback
   bypasses `Lampa.Torserver.hash` and cannot record membership. Only explicit Add to My
   Torrents records it. With the internal client, playback records membership only when
@@ -424,7 +533,7 @@ and torrent membership need the database. The critical database check probes bot
 `.github/workflows/tests.yaml` runs lint, `make test` and `make race` (with
 `LAMPA_API_REQUIRE_DOCKER=1`), a compose `config` check against `devops/.env.example` and an
 ES5 syntax parse of the `svtlv/*.js` add-ons (pinned `acorn@8.14.0 --ecma5`) on every PR and on
-pushes to `svtlvtv`. The frontend job also runs account-state and ownership runtime tests,
+pushes to `svtlvtv`. The frontend job also runs account-state, account-sync and ownership runtime tests,
 including documentation checks against the routes, migration SQL and scope inventory.
 
 `.github/workflows/deploy-docker.yaml` (`workflow_dispatch` only, default branch only) has one

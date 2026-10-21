@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"slices"
 	"strconv"
 	"time"
@@ -14,16 +15,12 @@ import (
 )
 
 // SchemaVersion is the only document schema version accepted by ParseDocument.
-const SchemaVersion = 1
+const SchemaVersion = 2
 
-// defaults for Limits fields that have no env knob
-const (
-	DefaultMaxSectionBytes = 1 << 20 // 1 MiB
-	DefaultMaxDepth        = 32
-)
+// DefaultMaxDepth bounds object/array nesting in incoming documents.
+const DefaultMaxDepth = 32
 
-// Sections lists the allowed top-level keys of Document.Data, in response order.
-var Sections = []string{"settings", "favorites", "bookmarks", "scores", "subscriptions", "progress", "history", "other"}
+var dataKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
 
 // validation error codes, returned to API clients as-is
 const (
@@ -51,26 +48,29 @@ func invalid(code, reason string) *ValidationError {
 
 // Limits bounds the size and shape of an incoming document.
 type Limits struct {
-	MaxBodyBytes    int64 // whole request body, bytes
-	MaxSectionBytes int   // single section of data, bytes
-	MaxDepth        int   // object/array nesting of the whole body, the envelope object counts as 1
+	MaxBodyBytes int64 // whole request body, bytes
+	MaxDepth     int   // object/array nesting of the whole body, the envelope object counts as 1
 }
 
-// Document is the logical per-user document: all eight sections are always present in Data.
+// Document is the logical per-user document with arbitrary JSON values.
 type Document struct {
-	SchemaVersion int
-	Data          map[string]json.RawMessage
-	UpdatedAt     time.Time
+	SchemaVersion  int
+	Data           map[string]json.RawMessage
+	UnreadableKeys []string // unreadable sealed values omitted from Data
+	ETag           string   // sha256 of canonical plaintext data, without quotes
+	Encrypt        []string // keys selected by the client for encryption at rest
+	UpdatedAt      time.Time
 }
 
 // envelope is the wire shape of a PUT body.
 type envelope struct {
 	SchemaVersion *int            `json:"schema_version"`
 	Data          json.RawMessage `json:"data"`
+	Encrypt       json.RawMessage `json:"encrypt"`
 }
 
-// ParseDocument validates raw as a PUT body {schema_version, data} and returns the document
-// with missing sections filled with {}. every rejection is a *ValidationError.
+// ParseDocument validates raw as a PUT body {schema_version, data, encrypt}.
+// every rejection is a *ValidationError.
 // it also rejects input postgres jsonb cannot store (invalid UTF-8, \u0000, unpaired surrogates),
 // so such bodies surface as client errors instead of storage failures.
 func ParseDocument(raw []byte, limits Limits) (Document, error) {
@@ -95,7 +95,7 @@ func ParseDocument(raw []byte, limits Limits) (Document, error) {
 		if errors.As(err, &syntaxErr) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 			return Document{}, invalid(CodeInvalidJSON, "body is not valid json")
 		}
-		return Document{}, invalid(CodeInvalidDocument, "body must be an object with schema_version and data only")
+		return Document{}, invalid(CodeInvalidDocument, "body must be an object with schema_version, data and optional encrypt")
 	}
 	if dec.More() {
 		return Document{}, invalid(CodeInvalidJSON, "body is not valid json")
@@ -105,41 +105,77 @@ func ParseDocument(raw []byte, limits Limits) (Document, error) {
 		return Document{}, invalid(CodeUnsupportedSchemaVersion, "schema_version must be "+strconv.Itoa(SchemaVersion))
 	}
 
-	data, err := parseData(env.Data, limits.MaxSectionBytes)
+	data, err := parseData(env.Data)
 	if err != nil {
 		return Document{}, err
 	}
-	return Document{SchemaVersion: SchemaVersion, Data: data}, nil
+	encrypt, err := parseEncrypt(env.Encrypt)
+	if err != nil {
+		return Document{}, err
+	}
+	return Document{SchemaVersion: SchemaVersion, Data: data, Encrypt: encrypt}, nil
 }
 
-// parseData checks that data is an object of known object-valued sections and fills the missing ones.
-func parseData(raw json.RawMessage, maxSectionBytes int) (map[string]json.RawMessage, error) {
+// parseData accepts arbitrary values, reserving $sealed objects for stored ciphertext.
+func parseData(raw json.RawMessage) (map[string]json.RawMessage, error) {
 	if !isObject(raw) {
 		return nil, invalid(CodeInvalidDocument, "data must be an object")
 	}
-	var sections map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &sections); err != nil {
+	data, err := decodeObject(raw)
+	if err != nil {
 		return nil, invalid(CodeInvalidDocument, "data must be an object")
 	}
-
-	for name, value := range sections {
-		if !slices.Contains(Sections, name) {
-			return nil, invalid(CodeInvalidDocument, "data contains an unknown section")
+	for key, rawValue := range data {
+		if !dataKeyPattern.MatchString(key) {
+			return nil, invalid(CodeInvalidDocument, "data contains an invalid key")
 		}
-		if !isObject(value) {
-			return nil, invalid(CodeInvalidDocument, "every section must be an object")
+		dec := json.NewDecoder(bytes.NewReader(rawValue))
+		dec.UseNumber()
+		var value any
+		if err := dec.Decode(&value); err != nil {
+			return nil, invalid(CodeInvalidDocument, "data contains an invalid value")
 		}
-		if len(value) > maxSectionBytes {
-			return nil, invalid(CodeInvalidDocument, "section exceeds size limit")
-		}
-	}
-
-	for _, name := range Sections {
-		if _, ok := sections[name]; !ok {
-			sections[name] = json.RawMessage(`{}`)
+		if containsSealed(value) {
+			return nil, invalid(CodeInvalidDocument, "data contains a reserved $sealed object")
 		}
 	}
-	return sections, nil
+	return data, nil
+}
+
+func containsSealed(value any) bool {
+	switch v := value.(type) {
+	case map[string]any:
+		if _, found := v["$sealed"]; found {
+			return true
+		}
+		for _, child := range v {
+			if containsSealed(child) {
+				return true
+			}
+		}
+	case []any:
+		return slices.ContainsFunc(v, containsSealed)
+	}
+	return false
+}
+
+func parseEncrypt(raw json.RawMessage) ([]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var keys []string
+	if trimmed := bytes.TrimSpace(raw); len(trimmed) == 0 || trimmed[0] != '[' {
+		return nil, invalid(CodeInvalidDocument, "encrypt must be an array of keys")
+	}
+	if err := json.Unmarshal(raw, &keys); err != nil || len(keys) > 64 {
+		return nil, invalid(CodeInvalidDocument, "encrypt must contain at most 64 keys")
+	}
+	for _, key := range keys {
+		if !dataKeyPattern.MatchString(key) {
+			return nil, invalid(CodeInvalidDocument, "encrypt contains an invalid key")
+		}
+	}
+	return keys, nil
 }
 
 // checkDepth walks raw token by token, without recursion, so hostile nesting cannot exhaust the stack.
@@ -218,5 +254,5 @@ func isObject(raw json.RawMessage) bool {
 
 // String returns a short description without document content.
 func (d Document) String() string {
-	return fmt.Sprintf("{SchemaVersion:%d Sections:%d UpdatedAt:%s}", d.SchemaVersion, len(d.Data), d.UpdatedAt.Format(time.RFC3339))
+	return fmt.Sprintf("{SchemaVersion:%d Keys:%d UpdatedAt:%s}", d.SchemaVersion, len(d.Data), d.UpdatedAt.Format(time.RFC3339))
 }

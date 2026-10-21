@@ -22,7 +22,7 @@ import (
 //			GetFunc: func(ctx context.Context, userID string) (storage.Document, error) {
 //				panic("mock out the Get method")
 //			},
-//			ReplaceFunc: func(ctx context.Context, userID string, raw []byte) (storage.Document, error) {
+//			ReplaceFunc: func(ctx context.Context, userID string, raw []byte, expectedETag *string) (storage.Document, error) {
 //				panic("mock out the Replace method")
 //			},
 //		}
@@ -39,7 +39,7 @@ type UserDataMock struct {
 	GetFunc func(ctx context.Context, userID string) (storage.Document, error)
 
 	// ReplaceFunc mocks the Replace method.
-	ReplaceFunc func(ctx context.Context, userID string, raw []byte) (storage.Document, error)
+	ReplaceFunc func(ctx context.Context, userID string, raw []byte, expectedETag *string) (storage.Document, error)
 
 	// calls tracks calls to the methods.
 	calls struct {
@@ -65,6 +65,8 @@ type UserDataMock struct {
 			UserID string
 			// Raw is the raw argument value.
 			Raw []byte
+			// ExpectedETag is the expectedETag argument value.
+			ExpectedETag *string
 		}
 	}
 	lockDelete  sync.RWMutex
@@ -145,23 +147,25 @@ func (mock *UserDataMock) GetCalls() []struct {
 }
 
 // Replace calls ReplaceFunc.
-func (mock *UserDataMock) Replace(ctx context.Context, userID string, raw []byte) (storage.Document, error) {
+func (mock *UserDataMock) Replace(ctx context.Context, userID string, raw []byte, expectedETag *string) (storage.Document, error) {
 	if mock.ReplaceFunc == nil {
 		panic("UserDataMock.ReplaceFunc: method is nil but UserData.Replace was just called")
 	}
 	callInfo := struct {
-		Ctx    context.Context
-		UserID string
-		Raw    []byte
+		Ctx          context.Context
+		UserID       string
+		Raw          []byte
+		ExpectedETag *string
 	}{
-		Ctx:    ctx,
-		UserID: userID,
-		Raw:    raw,
+		Ctx:          ctx,
+		UserID:       userID,
+		Raw:          raw,
+		ExpectedETag: expectedETag,
 	}
 	mock.lockReplace.Lock()
 	mock.calls.Replace = append(mock.calls.Replace, callInfo)
 	mock.lockReplace.Unlock()
-	return mock.ReplaceFunc(ctx, userID, raw)
+	return mock.ReplaceFunc(ctx, userID, raw, expectedETag)
 }
 
 // ReplaceCalls gets all the calls that were made to Replace.
@@ -169,14 +173,16 @@ func (mock *UserDataMock) Replace(ctx context.Context, userID string, raw []byte
 //
 //	len(mockedUserData.ReplaceCalls())
 func (mock *UserDataMock) ReplaceCalls() []struct {
-	Ctx    context.Context
-	UserID string
-	Raw    []byte
+	Ctx          context.Context
+	UserID       string
+	Raw          []byte
+	ExpectedETag *string
 } {
 	var calls []struct {
-		Ctx    context.Context
-		UserID string
-		Raw    []byte
+		Ctx          context.Context
+		UserID       string
+		Raw          []byte
+		ExpectedETag *string
 	}
 	mock.lockReplace.RLock()
 	calls = mock.calls.Replace

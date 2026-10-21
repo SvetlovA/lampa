@@ -6,51 +6,46 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/SvetlovA/lampa/backend/pkg/storage"
 )
 
-// documentResponse is the wire shape of a stored document, returned by GET and PUT.
+// documentResponse is the wire shape of a stored document, returned by GET.
 type documentResponse struct {
-	SchemaVersion int         `json:"schema_version"`
-	Data          orderedData `json:"data"`
-	UpdatedAt     time.Time   `json:"updated_at"`
-}
-
-// orderedData encodes document sections in storage.Sections order instead of map key order.
-type orderedData map[string]json.RawMessage
-
-// MarshalJSON writes the known sections in response order and skips missing ones.
-func (d orderedData) MarshalJSON() ([]byte, error) {
-	out := []byte{'{'}
-	for _, name := range storage.Sections {
-		raw, ok := d[name]
-		if !ok {
-			continue
-		}
-		if len(out) > 1 {
-			out = append(out, ',')
-		}
-		out = append(out, '"')
-		out = append(out, name...)
-		out = append(out, '"', ':')
-		out = append(out, raw...)
-	}
-	return append(out, '}'), nil
+	SchemaVersion  int                        `json:"schema_version"`
+	Data           map[string]json.RawMessage `json:"data"`
+	UpdatedAt      time.Time                  `json:"updated_at"`
+	UnreadableKeys []string                   `json:"unreadable_keys,omitempty"`
 }
 
 func (s *Server) getUserData(w http.ResponseWriter, r *http.Request) {
 	id, _ := UserID(r.Context())
+	if !identityMatches(w, r, id) {
+		return
+	}
 	doc, err := s.svc.Get(r.Context(), id)
 	if err != nil {
 		s.writeServiceError(w, r, err)
+		return
+	}
+	w.Header().Set("ETag", strconv.Quote(doc.ETag))
+	// clients must see omitted values so a surviving local copy can repair them with this ETag.
+	if len(doc.UnreadableKeys) == 0 && stripWeakETag(r.Header.Get("If-None-Match")) == strconv.Quote(doc.ETag) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusNotModified)
 		return
 	}
 	writeDocument(w, doc)
 }
 
 func (s *Server) putUserData(w http.ResponseWriter, r *http.Request) {
+	id, _ := UserID(r.Context())
+	if !identityMatches(w, r, id) {
+		return
+	}
 	if !isJSON(r.Header.Get("Content-Type")) {
 		WriteError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "content type must be application/json")
 		return
@@ -65,17 +60,29 @@ func (s *Server) putUserData(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, storage.CodeInvalidJSON, "body could not be read")
 		return
 	}
-	id, _ := UserID(r.Context())
-	doc, err := s.svc.Replace(r.Context(), id, raw)
+	var expectedETag *string
+	if values, present := r.Header["If-Match"]; present {
+		// even an empty or malformed header is a precondition, never an upsert.
+		tag := stripWeakETag(strings.Join(values, ","))
+		if len(tag) >= 2 && tag[0] == '"' && tag[len(tag)-1] == '"' {
+			tag = tag[1 : len(tag)-1]
+		}
+		expectedETag = &tag
+	}
+	doc, err := s.svc.Replace(r.Context(), id, raw, expectedETag)
 	if err != nil {
 		s.writeServiceError(w, r, err)
 		return
 	}
-	writeDocument(w, doc)
+	w.Header().Set("ETag", strconv.Quote(doc.ETag))
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) deleteUserData(w http.ResponseWriter, r *http.Request) {
 	id, _ := UserID(r.Context())
+	if !identityMatches(w, r, id) {
+		return
+	}
 	if err := s.svc.Delete(r.Context(), id); err != nil {
 		s.writeServiceError(w, r, err)
 		return
@@ -94,12 +101,12 @@ func (s *Server) writeServiceError(w http.ResponseWriter, r *http.Request, err e
 			status = http.StatusRequestEntityTooLarge
 		}
 		WriteError(w, status, verr.Code, verr.Reason)
+	case errors.Is(err, storage.ErrPreconditionFailed):
+		WriteError(w, http.StatusPreconditionFailed, "precondition_failed", "user data changed; fetch it again")
 	case errors.Is(err, storage.ErrNotFound):
 		WriteError(w, http.StatusNotFound, "user_data_not_found", "user data not found")
 	case errors.Is(err, storage.ErrUnavailable):
 		WriteError(w, http.StatusServiceUnavailable, "storage_unavailable", "storage unavailable")
-	case errors.Is(err, storage.ErrConnectionsUnreadable):
-		WriteError(w, http.StatusInternalServerError, "connections_unreadable", "stored connections cannot be read")
 	default:
 		s.logger.Printf("[ERROR] %q %q: %v", r.Method, logPath(r.URL.Path), err)
 		WriteError(w, http.StatusInternalServerError, "internal_error", "internal error")
@@ -108,9 +115,10 @@ func (s *Server) writeServiceError(w http.ResponseWriter, r *http.Request, err e
 
 func writeDocument(w http.ResponseWriter, doc storage.Document) {
 	WriteJSON(w, http.StatusOK, documentResponse{
-		SchemaVersion: doc.SchemaVersion,
-		Data:          orderedData(doc.Data),
-		UpdatedAt:     doc.UpdatedAt.UTC(),
+		SchemaVersion:  doc.SchemaVersion,
+		Data:           doc.Data,
+		UpdatedAt:      doc.UpdatedAt.UTC(),
+		UnreadableKeys: doc.UnreadableKeys,
 	})
 }
 
@@ -118,4 +126,9 @@ func writeDocument(w http.ResponseWriter, doc storage.Document) {
 func isJSON(contentType string) bool {
 	mediaType, _, err := mime.ParseMediaType(contentType)
 	return err == nil && mediaType == "application/json"
+}
+
+// stripWeakETag compares tags without the optional weak validator prefix.
+func stripWeakETag(tag string) string {
+	return strings.TrimPrefix(strings.TrimSpace(tag), "W/")
 }

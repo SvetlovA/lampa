@@ -22,6 +22,9 @@ import (
 //			GetFunc: func(ctx context.Context, userID string) (storage.Record, error) {
 //				panic("mock out the Get method")
 //			},
+//			UpdateFunc: func(ctx context.Context, rec storage.Record, expectedETag string) (storage.Record, error) {
+//				panic("mock out the Update method")
+//			},
 //			UpsertFunc: func(ctx context.Context, rec storage.Record) (storage.Record, error) {
 //				panic("mock out the Upsert method")
 //			},
@@ -37,6 +40,9 @@ type StoreMock struct {
 
 	// GetFunc mocks the Get method.
 	GetFunc func(ctx context.Context, userID string) (storage.Record, error)
+
+	// UpdateFunc mocks the Update method.
+	UpdateFunc func(ctx context.Context, rec storage.Record, expectedETag string) (storage.Record, error)
 
 	// UpsertFunc mocks the Upsert method.
 	UpsertFunc func(ctx context.Context, rec storage.Record) (storage.Record, error)
@@ -57,6 +63,15 @@ type StoreMock struct {
 			// UserID is the userID argument value.
 			UserID string
 		}
+		// Update holds details about calls to the Update method.
+		Update []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Rec is the rec argument value.
+			Rec storage.Record
+			// ExpectedETag is the expectedETag argument value.
+			ExpectedETag string
+		}
 		// Upsert holds details about calls to the Upsert method.
 		Upsert []struct {
 			// Ctx is the ctx argument value.
@@ -67,6 +82,7 @@ type StoreMock struct {
 	}
 	lockDelete sync.RWMutex
 	lockGet    sync.RWMutex
+	lockUpdate sync.RWMutex
 	lockUpsert sync.RWMutex
 }
 
@@ -139,6 +155,46 @@ func (mock *StoreMock) GetCalls() []struct {
 	mock.lockGet.RLock()
 	calls = mock.calls.Get
 	mock.lockGet.RUnlock()
+	return calls
+}
+
+// Update calls UpdateFunc.
+func (mock *StoreMock) Update(ctx context.Context, rec storage.Record, expectedETag string) (storage.Record, error) {
+	if mock.UpdateFunc == nil {
+		panic("StoreMock.UpdateFunc: method is nil but Store.Update was just called")
+	}
+	callInfo := struct {
+		Ctx          context.Context
+		Rec          storage.Record
+		ExpectedETag string
+	}{
+		Ctx:          ctx,
+		Rec:          rec,
+		ExpectedETag: expectedETag,
+	}
+	mock.lockUpdate.Lock()
+	mock.calls.Update = append(mock.calls.Update, callInfo)
+	mock.lockUpdate.Unlock()
+	return mock.UpdateFunc(ctx, rec, expectedETag)
+}
+
+// UpdateCalls gets all the calls that were made to Update.
+// Check the length with:
+//
+//	len(mockedStore.UpdateCalls())
+func (mock *StoreMock) UpdateCalls() []struct {
+	Ctx          context.Context
+	Rec          storage.Record
+	ExpectedETag string
+} {
+	var calls []struct {
+		Ctx          context.Context
+		Rec          storage.Record
+		ExpectedETag string
+	}
+	mock.lockUpdate.RLock()
+	calls = mock.calls.Update
+	mock.lockUpdate.RUnlock()
 	return calls
 }
 

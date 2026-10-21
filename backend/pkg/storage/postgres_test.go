@@ -34,8 +34,8 @@ func newTestStore(t *testing.T, p *pgxpool.Pool) *storage.PgStore {
 	return s
 }
 
-func testRecord(userID, data string, blob []byte) storage.Record {
-	return storage.Record{UserID: userID, SchemaVersion: 1, Data: json.RawMessage(data), EncryptedConnections: blob}
+func testRecord(userID, data string) storage.Record {
+	return storage.Record{UserID: userID, SchemaVersion: 2, Data: json.RawMessage(data)}
 }
 
 func TestNewPgStore_nilPool(t *testing.T) {
@@ -54,33 +54,20 @@ func TestPgStore_InsertThenGet(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t, pgtest.DB(t))
 
-	tests := []struct {
-		name string
-		blob []byte
-	}{
-		{name: "with connections", blob: []byte{0x01, 0x02, 0x03}},
-		{name: "without connections", blob: nil},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			userID := newUserID(t)
-			stored, err := s.Upsert(t.Context(), testRecord(userID, `{"settings": {"a": 1}, "other": {}}`, tc.blob))
-			require.NoError(t, err)
-			assert.Equal(t, userID, stored.UserID)
-			assert.False(t, stored.CreatedAt.IsZero())
-			assert.True(t, stored.CreatedAt.Equal(stored.UpdatedAt))
-
-			got, err := s.Get(t.Context(), userID)
-			require.NoError(t, err)
-			assert.Equal(t, userID, got.UserID)
-			assert.Equal(t, 1, got.SchemaVersion)
-			assert.JSONEq(t, `{"settings": {"a": 1}, "other": {}}`, string(got.Data))
-			assert.Equal(t, tc.blob, got.EncryptedConnections)
-			assert.True(t, stored.CreatedAt.Equal(got.CreatedAt))
-			assert.True(t, stored.UpdatedAt.Equal(got.UpdatedAt))
-		})
-	}
+	userID := newUserID(t)
+	const data = `{"string":"x","null":null,"list":[1,true],"object":{"a":1},"secret":{"$sealed":"encoded"}}`
+	stored, err := s.Upsert(t.Context(), testRecord(userID, data))
+	require.NoError(t, err)
+	assert.Equal(t, userID, stored.UserID)
+	assert.False(t, stored.CreatedAt.IsZero())
+	assert.True(t, stored.CreatedAt.Equal(stored.UpdatedAt))
+	got, err := s.Get(t.Context(), userID)
+	require.NoError(t, err)
+	assert.Equal(t, userID, got.UserID)
+	assert.Equal(t, 2, got.SchemaVersion)
+	assert.JSONEq(t, data, string(got.Data))
+	assert.True(t, stored.CreatedAt.Equal(got.CreatedAt))
+	assert.True(t, stored.UpdatedAt.Equal(got.UpdatedAt))
 }
 
 func TestPgStore_UpsertReplaces(t *testing.T) {
@@ -88,9 +75,9 @@ func TestPgStore_UpsertReplaces(t *testing.T) {
 	s := newTestStore(t, pgtest.DB(t))
 	userID := newUserID(t)
 
-	first, err := s.Upsert(t.Context(), testRecord(userID, `{"settings": {"a": 1}}`, []byte{0x01}))
+	first, err := s.Upsert(t.Context(), testRecord(userID, `{"settings": {"a": 1}}`))
 	require.NoError(t, err)
-	second, err := s.Upsert(t.Context(), testRecord(userID, `{"favorites": {"b": 2}}`, nil))
+	second, err := s.Upsert(t.Context(), testRecord(userID, `{"favorites": {"b": 2}}`))
 	require.NoError(t, err)
 
 	assert.True(t, first.CreatedAt.Equal(second.CreatedAt), "created_at is kept")
@@ -99,7 +86,6 @@ func TestPgStore_UpsertReplaces(t *testing.T) {
 	got, err := s.Get(t.Context(), userID)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"favorites": {"b": 2}}`, string(got.Data), "data is replaced, not merged")
-	assert.Nil(t, got.EncryptedConnections, "connections are cleared")
 	assert.True(t, second.UpdatedAt.Equal(got.UpdatedAt))
 }
 
@@ -108,7 +94,7 @@ func TestPgStore_Delete(t *testing.T) {
 	s := newTestStore(t, pgtest.DB(t))
 	userID := newUserID(t)
 
-	_, err := s.Upsert(t.Context(), testRecord(userID, `{}`, nil))
+	_, err := s.Upsert(t.Context(), testRecord(userID, `{}`))
 	require.NoError(t, err)
 
 	require.NoError(t, s.Delete(t.Context(), userID))
@@ -123,9 +109,9 @@ func TestPgStore_UsersIsolated(t *testing.T) {
 	s := newTestStore(t, pgtest.DB(t))
 	alice, bob := newUserID(t), newUserID(t)
 
-	_, err := s.Upsert(t.Context(), testRecord(alice, `{"settings": {"who": "alice"}}`, []byte{0xa}))
+	_, err := s.Upsert(t.Context(), testRecord(alice, `{"settings": {"who": "alice"}}`))
 	require.NoError(t, err)
-	_, err = s.Upsert(t.Context(), testRecord(bob, `{"settings": {"who": "bob"}}`, []byte{0xb}))
+	_, err = s.Upsert(t.Context(), testRecord(bob, `{"settings": {"who": "bob"}}`))
 	require.NoError(t, err)
 
 	require.NoError(t, s.Delete(t.Context(), alice))
@@ -133,7 +119,6 @@ func TestPgStore_UsersIsolated(t *testing.T) {
 	got, err := s.Get(t.Context(), bob)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"settings": {"who": "bob"}}`, string(got.Data))
-	assert.Equal(t, []byte{0xb}, got.EncryptedConnections)
 }
 
 func TestPgStore_InvalidUserID(t *testing.T) {
@@ -143,7 +128,7 @@ func TestPgStore_InvalidUserID(t *testing.T) {
 	_, err := s.Get(t.Context(), "not-a-uuid")
 	require.Error(t, err)
 	require.NotErrorIs(t, err, storage.ErrNotFound)
-	_, err = s.Upsert(t.Context(), testRecord("not-a-uuid", `{}`, nil))
+	_, err = s.Upsert(t.Context(), testRecord("not-a-uuid", `{}`))
 	require.Error(t, err)
 	require.Error(t, s.Delete(t.Context(), "not-a-uuid"))
 }
@@ -194,13 +179,79 @@ func TestPgStore_UpsertRejectsUnstorableNumber(t *testing.T) {
 	s := newTestStore(t, pgtest.DB(t))
 	userID := newUserID(t)
 
-	// more digits than jsonb's numeric holds (131072 before the decimal point). ParseDocument never lets
-	// such a number through, so the record goes straight to the store to pin how postgres reports it.
+	// more digits than jsonb's numeric holds (131072 before the decimal point).
+	// the store reports content rejection so the service can return a client error.
 	data := `{"n":1` + strings.Repeat("0", 140000) + `}`
-	_, err := s.Upsert(t.Context(), testRecord(userID, data, nil))
+	_, err := s.Upsert(t.Context(), testRecord(userID, data))
 	require.ErrorIs(t, err, storage.ErrInvalidData)
 	require.NotErrorIs(t, err, storage.ErrNotFound)
 
 	_, err = s.Get(t.Context(), userID)
 	require.ErrorIs(t, err, storage.ErrNotFound, "nothing was stored")
+}
+
+func TestPgStore_Update(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t, pgtest.DB(t))
+	id := newUserID(t)
+	rec := testRecord(id, `{"value":"first"}`)
+	rec.ETag = "first-tag"
+	first, err := s.Upsert(t.Context(), rec)
+	require.NoError(t, err)
+	got, err := s.Get(t.Context(), id)
+	require.NoError(t, err)
+	assert.Equal(t, rec.ETag, got.ETag)
+
+	rec.Data = json.RawMessage(`{"value":"second"}`)
+	rec.ETag = "second-tag"
+	second, err := s.Update(t.Context(), rec, first.ETag)
+	require.NoError(t, err)
+	assert.Equal(t, first.CreatedAt, second.CreatedAt)
+	assert.True(t, second.UpdatedAt.After(first.UpdatedAt))
+
+	rec.Data = json.RawMessage(`{"value":"stale"}`)
+	rec.ETag = "stale-tag"
+	_, err = s.Update(t.Context(), rec, first.ETag)
+	require.ErrorIs(t, err, storage.ErrPreconditionFailed)
+	got, err = s.Get(t.Context(), id)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(second.Data), string(got.Data))
+	assert.Equal(t, second.ETag, got.ETag)
+	assert.Equal(t, second.CreatedAt, got.CreatedAt)
+	assert.Equal(t, second.UpdatedAt, got.UpdatedAt, "a stale update must not bump timestamps")
+
+	// an update for a different/missing user cannot change the original row or insert.
+	rec.UserID = newUserID(t)
+	_, err = s.Update(t.Context(), rec, second.ETag)
+	require.ErrorIs(t, err, storage.ErrPreconditionFailed)
+	_, err = s.Get(t.Context(), rec.UserID)
+	require.ErrorIs(t, err, storage.ErrNotFound)
+	require.NoError(t, s.Delete(t.Context(), id))
+	rec.UserID = id
+	_, err = s.Update(t.Context(), rec, second.ETag)
+	require.ErrorIs(t, err, storage.ErrPreconditionFailed, "a deleted record must not be recreated")
+}
+
+func TestPgStore_UpdateFailures(t *testing.T) {
+	t.Parallel()
+	pool := pgtest.DB(t)
+	s := newTestStore(t, pool)
+	rec := testRecord(newUserID(t), `{}`)
+	rec.ETag = "old"
+	_, err := s.Upsert(t.Context(), rec)
+	require.NoError(t, err)
+	rec.Data = json.RawMessage(`{"n":1` + strings.Repeat("0", 140000) + `}`)
+	_, err = s.Update(t.Context(), rec, "old")
+	require.ErrorIs(t, err, storage.ErrInvalidData)
+	got, err := s.Get(t.Context(), rec.UserID)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{}`, string(got.Data))
+	assert.Equal(t, "old", got.ETag)
+
+	closed, err := pgxpool.NewWithConfig(t.Context(), pool.Config().Copy())
+	require.NoError(t, err)
+	closed.Close()
+	_, err = newTestStore(t, closed).Update(t.Context(), rec, "old")
+	require.Error(t, err)
+	require.NotErrorIs(t, err, storage.ErrPreconditionFailed)
 }

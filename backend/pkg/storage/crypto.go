@@ -5,6 +5,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,28 +14,17 @@ import (
 	"slices"
 )
 
-// SensitiveSettings lists the settings keys holding TorrServer, Jackett and Prowlarr credentials.
-// it mirrors the secret inputs of the Lampa settings UI. they are never stored in the data column,
-// Sealer moves them into an encrypted blob.
-var SensitiveSettings = []string{
-	"torrserver_login", "torrserver_password",
-	"jackett_key", "jackett_key_two",
-	"prowlarr_key", "prowlarr_key_two",
-}
-
 // blobVersion is the first byte of every sealed blob and of its additional authenticated data.
 const blobVersion byte = 0x01
 
-const settingsSection = "settings"
-
 var (
-	// ErrConnectionsUnreadable is returned when a sealed blob cannot be decrypted or decoded.
+	// ErrConnectionsUnreadable is returned when a sealed value cannot be decrypted or decoded.
 	ErrConnectionsUnreadable = errors.New("connections unreadable")
 	// ErrInvalidUserID is returned when a user id is not a canonical uuid.
 	ErrInvalidUserID = errors.New("invalid user id")
 )
 
-// Sealer encrypts connection credentials with AES-256-GCM, bound to the owning user id.
+// Sealer encrypts client-selected values with AES-256-GCM, bound to the owning user id.
 type Sealer struct {
 	aead cipher.AEAD
 }
@@ -52,99 +42,87 @@ func NewSealer(key [32]byte) (*Sealer, error) {
 	return &Sealer{aead: aead}, nil
 }
 
-// Split moves the sensitive settings keys of doc into a sealed blob and returns the document without them.
-// blob is nil when doc has none of them. doc itself is not modified.
-func (s *Sealer) Split(userID string, doc Document) (clean Document, blob []byte, err error) {
+// sealListed returns a copy of data with listed, present values sealed in place.
+func (s *Sealer) sealListed(userID string, data map[string]json.RawMessage, encrypt []string) (map[string]json.RawMessage, error) {
 	aad, err := additionalData(userID)
 	if err != nil {
-		return Document{}, nil, err
+		return nil, err
 	}
-	raw, ok := doc.Data[settingsSection]
-	if !ok {
-		return doc, nil, nil
-	}
-	settings, err := decodeObject(raw)
-	if err != nil {
-		return Document{}, nil, fmt.Errorf("decode settings: %w", err)
-	}
-
-	sensitive := map[string]json.RawMessage{}
-	for _, key := range SensitiveSettings {
-		if value, found := settings[key]; found {
-			sensitive[key] = value
-			delete(settings, key)
+	sealed := maps.Clone(data)
+	for key, value := range data {
+		if !slices.Contains(encrypt, key) {
+			continue
 		}
+		blob, err := s.seal(value, aad)
+		if err != nil {
+			return nil, err
+		}
+		raw, err := json.Marshal(map[string]string{"$sealed": base64.StdEncoding.EncodeToString(blob)})
+		if err != nil {
+			return nil, fmt.Errorf("encode sealed value: %w", err)
+		}
+		sealed[key] = raw
 	}
-	if len(sensitive) == 0 {
-		return doc, nil, nil
-	}
-
-	plaintext, err := encodeObject(sensitive)
-	if err != nil {
-		return Document{}, nil, fmt.Errorf("encode connections: %w", err)
-	}
-	cleanSettings, err := encodeObject(settings)
-	if err != nil {
-		return Document{}, nil, fmt.Errorf("encode settings: %w", err)
-	}
-
-	nonce := make([]byte, s.aead.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return Document{}, nil, fmt.Errorf("generate nonce: %w", err)
-	}
-	blob = make([]byte, 0, 1+len(nonce)+len(plaintext)+s.aead.Overhead())
-	blob = append(blob, blobVersion)
-	blob = append(blob, nonce...)
-	blob = s.aead.Seal(blob, nonce, plaintext, aad)
-
-	return withSection(doc, settingsSection, cleanSettings), blob, nil
+	return sealed, nil
 }
 
-// Merge decrypts blob and puts the connection credentials back into the settings of doc.
-// a nil blob means the user has no stored credentials and returns doc unchanged.
-// any blob that cannot be opened for userID fails with ErrConnectionsUnreadable.
-func (s *Sealer) Merge(userID string, doc Document, blob []byte) (Document, error) {
+func (s *Sealer) seal(plaintext, aad []byte) ([]byte, error) {
+	nonce := make([]byte, s.aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, fmt.Errorf("generate nonce: %w", err)
+	}
+	blob := make([]byte, 0, 1+len(nonce)+len(plaintext)+s.aead.Overhead())
+	blob = append(blob, blobVersion)
+	blob = append(blob, nonce...)
+	return s.aead.Seal(blob, nonce, plaintext, aad), nil
+}
+
+// openAll opens sealed top-level values. unreadable values are omitted and logged without content.
+func (s *Sealer) openAll(userID string, data map[string]json.RawMessage, logger Logger) (map[string]json.RawMessage, error) {
 	aad, err := additionalData(userID)
 	if err != nil {
-		return Document{}, err
+		return nil, err
 	}
-	if blob == nil {
-		return doc, nil
+	opened := maps.Clone(data)
+	for key, value := range data {
+		if !isObject(value) {
+			continue
+		}
+		obj, err := decodeObject(value)
+		if err != nil {
+			return nil, fmt.Errorf("decode stored object: %w", err)
+		}
+		raw, found := obj["$sealed"]
+		if !found {
+			continue
+		}
+		plaintext, err := s.open(raw, aad)
+		if err != nil {
+			delete(opened, key)
+			logger.Printf("[WARN] omit unreadable sealed value for user %s key %q: %v", userID, key, err)
+			continue
+		}
+		opened[key] = plaintext
 	}
+	return opened, nil
+}
 
-	nonceSize := s.aead.NonceSize()
-	if len(blob) < 1+nonceSize+s.aead.Overhead() {
-		return Document{}, fmt.Errorf("blob too short: %w", ErrConnectionsUnreadable)
+func (s *Sealer) open(raw json.RawMessage, aad []byte) (json.RawMessage, error) {
+	var encoded string
+	if err := json.Unmarshal(raw, &encoded); err != nil {
+		return nil, ErrConnectionsUnreadable
 	}
-	if blob[0] != blobVersion {
-		return Document{}, fmt.Errorf("unknown blob version: %w", ErrConnectionsUnreadable)
+	blob, err := base64.StdEncoding.DecodeString(encoded)
+	nonceSize := s.aead.NonceSize()
+	if err != nil || len(blob) < 1+nonceSize+s.aead.Overhead() || blob[0] != blobVersion {
+		return nil, ErrConnectionsUnreadable
 	}
 	nonce, ciphertext := blob[1:1+nonceSize], blob[1+nonceSize:]
 	plaintext, err := s.aead.Open(nil, nonce, ciphertext, aad)
-	if err != nil {
-		return Document{}, fmt.Errorf("open blob: %w", ErrConnectionsUnreadable)
+	if err != nil || !json.Valid(plaintext) {
+		return nil, ErrConnectionsUnreadable
 	}
-	sensitive, err := decodeObject(plaintext)
-	if err != nil {
-		return Document{}, fmt.Errorf("decode connections: %w", ErrConnectionsUnreadable)
-	}
-
-	settings := map[string]json.RawMessage{}
-	if raw, ok := doc.Data[settingsSection]; ok {
-		if settings, err = decodeObject(raw); err != nil {
-			return Document{}, fmt.Errorf("decode settings: %w", err)
-		}
-	}
-	for key, value := range sensitive {
-		if slices.Contains(SensitiveSettings, key) {
-			settings[key] = value
-		}
-	}
-	merged, err := encodeObject(settings)
-	if err != nil {
-		return Document{}, fmt.Errorf("encode settings: %w", err)
-	}
-	return withSection(doc, settingsSection, merged), nil
+	return plaintext, nil
 }
 
 // additionalData binds a blob to its owner: format version followed by the 16 raw uuid bytes.
@@ -189,13 +167,4 @@ func encodeObject(obj map[string]json.RawMessage) ([]byte, error) {
 		return nil, fmt.Errorf("marshal object: %w", err)
 	}
 	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
-}
-
-// withSection returns a copy of doc whose data has section replaced by raw.
-func withSection(doc Document, section string, raw []byte) Document {
-	data := make(map[string]json.RawMessage, len(doc.Data))
-	maps.Copy(data, doc.Data)
-	data[section] = raw
-	doc.Data = data
-	return doc
 }

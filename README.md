@@ -42,10 +42,10 @@ regular web server for use in a compatible browser.
 | `docs/` | Design documents and implementation plans for the backend |
 
 Despite its name, `app.min.js` is readable compiled output. The web application
-has no package manager or build command. Fork-only add-ons and the one-link
-TorrServer patch have Node runtime checks and an ES5 syntax gate. Changes to the
-application bundle or compiled CSS are made directly; browser and TV verification
-remains manual. The test command is in [`backend/README.md`](backend/README.md).
+has no package manager or build command. Fork-only add-ons and the two-link
+TorrServer configuration have Node runtime checks and an ES5 syntax gate. Changes
+to the application bundle or compiled CSS are made directly; browser and TV
+verification remains manual. The test command is in [`backend/README.md`](backend/README.md).
 The Go module under `backend/` is the exception: it has its own `Makefile`, tests
 and linter, documented in [`backend/README.md`](backend/README.md).
 
@@ -235,9 +235,10 @@ Secrets**:
 | `LAMPA_API_DATA_KEY` | Base64 of exactly 32 bytes (`openssl rand -base64 32`) |
 | `LAMPA_KEYCLOAK_CLIENT_SECRET` | Secret of the `svtlv-lampa` Keycloak client |
 
-**Back up `LAMPA_API_DATA_KEY` outside GitHub.** It seals every stored TorrServer,
-Jackett and Prowlarr credential; losing or changing it makes them unreadable, and key
-rotation is not implemented. `LAMPA_DB_PASSWORD` applies only when the
+**Back up `LAMPA_API_DATA_KEY` outside GitHub.** It seals values selected by the
+client's `encrypt` list, currently TorrServer login/password. Jackett and Prowlarr
+credentials remain local. Losing or changing the key makes sealed values unreadable;
+key rotation is not implemented. `LAMPA_DB_PASSWORD` applies only when the
 `lampa_db_data` volume is first initialized; see
 [`backend/README.md`](backend/README.md) for rotating it.
 

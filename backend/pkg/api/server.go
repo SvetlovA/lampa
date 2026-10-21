@@ -45,7 +45,7 @@ const (
 // UserData reads, replaces and deletes the document of a user. storage.Service is the production implementation.
 type UserData interface {
 	Get(ctx context.Context, userID string) (storage.Document, error)
-	Replace(ctx context.Context, userID string, raw []byte) (storage.Document, error)
+	Replace(ctx context.Context, userID string, raw []byte, expectedETag *string) (storage.Document, error)
 	Delete(ctx context.Context, userID string) error
 }
 

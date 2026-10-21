@@ -43,7 +43,7 @@ services:
       POSTGRES_PASSWORD: ${LAMPA_DB_PASSWORD:?Set LAMPA_DB_PASSWORD for the lampa database role}
     ports:
       # loopback only: reachable by a Development "go run" on the host, never from outside
-      - "127.0.0.1:5434:5432"
+      - "5434:5432"
     volumes:
       # postgres 18+ images keep PGDATA in a versioned subdirectory of /var/lib/postgresql
       - lampa_db_data:/var/lib/postgresql

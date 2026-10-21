@@ -2,11 +2,13 @@ package storage
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -39,291 +41,6 @@ func newTestSealer(t *testing.T, fill byte) *Sealer {
 	return s
 }
 
-func docWithSettings(t *testing.T, settings string) Document {
-	t.Helper()
-	doc, err := ParseDocument([]byte(`{"schema_version":1,"data":{"settings":`+settings+`,"favorites":{"a":1}}}`),
-		Limits{MaxBodyBytes: 1 << 20, MaxSectionBytes: DefaultMaxSectionBytes, MaxDepth: DefaultMaxDepth})
-	require.NoError(t, err)
-	return doc
-}
-
-// sealedDoc returns a document with every sensitive key set and its sealed blob.
-func sealedDoc(t *testing.T, s *Sealer) (clean Document, blob []byte) {
-	t.Helper()
-	doc := docWithSettings(t, `{"torrserver_login":"admin","torrserver_password":"s3cret-pass",`+
-		`"jackett_key":"jk-one-value","jackett_key_two":"jk-two-value",`+
-		`"prowlarr_key":"pk-one-value","prowlarr_key_two":"pk-two-value","language":"ru"}`)
-	clean, blob, err := s.Split(testUserID, doc)
-	require.NoError(t, err)
-	require.NotNil(t, blob)
-	return clean, blob
-}
-
-func settingsOf(t *testing.T, doc Document) map[string]any {
-	t.Helper()
-	var settings map[string]any
-	require.NoError(t, json.Unmarshal(doc.Data["settings"], &settings))
-	return settings
-}
-
-func TestSealer_RoundTrip(t *testing.T) {
-	s := newTestSealer(t, 1)
-	doc := docWithSettings(t, `{"torrserver_login":"admin","torrserver_password":"s3cret-pass",`+
-		`"jackett_key":"jk-one-value","jackett_key_two":"jk-two-value",`+
-		`"prowlarr_key":"pk-one-value","prowlarr_key_two":"pk-two-value","language":"ru","url":"<a&b>"}`)
-
-	clean, blob, err := s.Split(testUserID, doc)
-	require.NoError(t, err)
-	require.NotNil(t, blob)
-	assert.Equal(t, map[string]any{"language": "ru", "url": "<a&b>"}, settingsOf(t, clean))
-	assert.Contains(t, string(clean.Data["settings"]), `"<a&b>"`, "html characters are not escaped")
-	assert.JSONEq(t, `{"a":1}`, string(clean.Data["favorites"]))
-	assert.Len(t, clean.Data, len(Sections))
-
-	merged, err := s.Merge(testUserID, clean, blob)
-	require.NoError(t, err)
-	assert.Equal(t, settingsOf(t, doc), settingsOf(t, merged))
-	assert.JSONEq(t, `{"a":1}`, string(merged.Data["favorites"]))
-}
-
-func TestSealer_Split(t *testing.T) {
-	s := newTestSealer(t, 1)
-
-	t.Run("no sensitive keys gives nil blob", func(t *testing.T) {
-		doc := docWithSettings(t, `{"language":"ru"}`)
-		clean, blob, err := s.Split(testUserID, doc)
-		require.NoError(t, err)
-		assert.Nil(t, blob)
-		assert.Equal(t, doc, clean)
-	})
-
-	t.Run("missing settings section gives nil blob", func(t *testing.T) {
-		doc := Document{SchemaVersion: 1, Data: map[string]json.RawMessage{"other": json.RawMessage(`{}`)}}
-		clean, blob, err := s.Split(testUserID, doc)
-		require.NoError(t, err)
-		assert.Nil(t, blob)
-		assert.Equal(t, doc, clean)
-	})
-
-	t.Run("clean data never contains plaintext values", func(t *testing.T) {
-		clean, blob := sealedDoc(t, s)
-		for _, raw := range clean.Data {
-			for _, secret := range []string{"admin", "s3cret-pass", "jk-one-value", "jk-two-value", "pk-one-value", "pk-two-value"} {
-				assert.NotContains(t, string(raw), secret)
-			}
-			for _, key := range SensitiveSettings {
-				assert.NotContains(t, string(raw), key)
-			}
-		}
-		assert.NotContains(t, string(blob), "s3cret-pass")
-	})
-
-	t.Run("escaped duplicate and null sensitive keys never reach clean data", func(t *testing.T) {
-		doc := docWithSettings(t, `{"jackett_key":"jk-escaped","torrserver_login":"login-first",`+
-			`"torrserver_login":"login-last","jackett_key_two":null,"language":"ru"}`)
-		clean, blob, err := s.Split(testUserID, doc)
-		require.NoError(t, err)
-		require.NotNil(t, blob)
-		assert.Equal(t, map[string]any{"language": "ru"}, settingsOf(t, clean))
-		for _, leaked := range []string{"jk-escaped", "login-first", "login-last", "jackett_key", `k`} {
-			assert.NotContains(t, string(clean.Data["settings"]), leaked)
-		}
-
-		merged, err := s.Merge(testUserID, clean, blob)
-		require.NoError(t, err)
-		assert.Equal(t, map[string]any{
-			"language": "ru", "jackett_key": "jk-escaped", "torrserver_login": "login-last", "jackett_key_two": nil,
-		}, settingsOf(t, merged), "the last duplicate wins, null is restored as null")
-	})
-
-	t.Run("input document is not modified", func(t *testing.T) {
-		doc := docWithSettings(t, `{"jackett_key":"jk-one-value"}`)
-		before := string(doc.Data["settings"])
-		_, _, err := s.Split(testUserID, doc)
-		require.NoError(t, err)
-		assert.Equal(t, before, string(doc.Data["settings"]))
-	})
-
-	t.Run("fresh nonce per call", func(t *testing.T) {
-		_, first := sealedDoc(t, s)
-		_, second := sealedDoc(t, s)
-		assert.NotEqual(t, first, second)
-	})
-
-	t.Run("blob layout", func(t *testing.T) {
-		_, blob := sealedDoc(t, s)
-		assert.Equal(t, blobVersion, blob[0])
-	})
-
-	t.Run("invalid user id", func(t *testing.T) {
-		_, _, err := s.Split("not-a-uuid", docWithSettings(t, `{"jackett_key":"x"}`))
-		require.ErrorIs(t, err, ErrInvalidUserID)
-	})
-
-	t.Run("non-object settings", func(t *testing.T) {
-		doc := Document{SchemaVersion: 1, Data: map[string]json.RawMessage{"settings": json.RawMessage(`[1]`)}}
-		_, _, err := s.Split(testUserID, doc)
-		require.Error(t, err)
-	})
-}
-
-func TestSealer_Merge(t *testing.T) {
-	s := newTestSealer(t, 1)
-	clean, blob := sealedDoc(t, s)
-
-	t.Run("nil blob returns document unchanged", func(t *testing.T) {
-		doc := docWithSettings(t, `{"language":"ru"}`)
-		merged, err := s.Merge(testUserID, doc, nil)
-		require.NoError(t, err)
-		assert.Equal(t, doc, merged)
-	})
-
-	t.Run("same uuid in upper case decrypts", func(t *testing.T) {
-		merged, err := s.Merge(strings.ToUpper(testUserID), clean, blob)
-		require.NoError(t, err)
-		assert.Equal(t, "s3cret-pass", settingsOf(t, merged)["torrserver_password"])
-	})
-
-	t.Run("missing settings section is recreated", func(t *testing.T) {
-		doc := Document{SchemaVersion: 1, Data: map[string]json.RawMessage{"other": json.RawMessage(`{}`)}}
-		merged, err := s.Merge(testUserID, doc, blob)
-		require.NoError(t, err)
-		assert.Equal(t, "admin", settingsOf(t, merged)["torrserver_login"])
-		assert.Len(t, settingsOf(t, merged), len(SensitiveSettings))
-	})
-
-	t.Run("invalid user id", func(t *testing.T) {
-		_, err := s.Merge("", clean, blob)
-		require.ErrorIs(t, err, ErrInvalidUserID)
-	})
-
-	t.Run("wrong key fails", func(t *testing.T) {
-		_, err := newTestSealer(t, 2).Merge(testUserID, clean, blob)
-		require.ErrorIs(t, err, ErrConnectionsUnreadable)
-	})
-
-	t.Run("non-object settings fails", func(t *testing.T) {
-		doc := Document{SchemaVersion: 1, Data: map[string]json.RawMessage{"settings": json.RawMessage(`"x"`)}}
-		_, err := s.Merge(testUserID, doc, blob)
-		require.Error(t, err)
-		assert.NotErrorIs(t, err, ErrConnectionsUnreadable)
-	})
-
-	corrupt := func(mutate func([]byte) []byte) []byte {
-		return mutate(append([]byte(nil), blob...))
-	}
-	tests := []struct {
-		name   string
-		userID string
-		blob   []byte
-	}{
-		{name: "another user id", userID: otherUserID, blob: blob},
-		{name: "empty blob", userID: testUserID, blob: []byte{}},
-		{name: "version byte only", userID: testUserID, blob: []byte{blobVersion}},
-		{name: "truncated blob", userID: testUserID, blob: blob[:len(blob)-1]},
-		{name: "truncated below minimum", userID: testUserID, blob: blob[:20]},
-		{name: "unknown version byte", userID: testUserID, blob: corrupt(func(b []byte) []byte { b[0] = 0x02; return b })},
-		{name: "tampered nonce", userID: testUserID, blob: corrupt(func(b []byte) []byte { b[1] ^= 0xff; return b })},
-		{name: "tampered ciphertext", userID: testUserID, blob: corrupt(func(b []byte) []byte { b[20] ^= 0x01; return b })},
-		{name: "tampered tag", userID: testUserID, blob: corrupt(func(b []byte) []byte { b[len(b)-1] ^= 0x01; return b })},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := s.Merge(tc.userID, clean, tc.blob)
-			require.ErrorIs(t, err, ErrConnectionsUnreadable)
-			assert.NotContains(t, err.Error(), "s3cret-pass")
-		})
-	}
-}
-
-func TestSealer_MergeRejectsNonObjectPlaintext(t *testing.T) {
-	s := newTestSealer(t, 1)
-	aad, err := additionalData(testUserID)
-	require.NoError(t, err)
-	nonce := make([]byte, s.aead.NonceSize())
-	blob := append([]byte{blobVersion}, nonce...)
-	blob = s.aead.Seal(blob, nonce, []byte(`["not","an","object"]`), aad)
-
-	_, err = s.Merge(testUserID, docWithSettings(t, `{}`), blob)
-	require.ErrorIs(t, err, ErrConnectionsUnreadable)
-}
-
-func TestSealer_MergeIgnoresUnknownSealedKeys(t *testing.T) {
-	s := newTestSealer(t, 1)
-	aad, err := additionalData(testUserID)
-	require.NoError(t, err)
-	nonce := make([]byte, s.aead.NonceSize())
-	blob := append([]byte{blobVersion}, nonce...)
-	blob = s.aead.Seal(blob, nonce, []byte(`{"jackett_key":"k","language":"en"}`), aad)
-
-	merged, err := s.Merge(testUserID, docWithSettings(t, `{"language":"ru"}`), blob)
-	require.NoError(t, err)
-	assert.Equal(t, map[string]any{"jackett_key": "k", "language": "ru"}, settingsOf(t, merged))
-}
-
-func TestSealer_MergeLegacyBlob(t *testing.T) {
-	// a blob sealed before the prowlarr keys joined SensitiveSettings still merges as is.
-	s := newTestSealer(t, 1)
-	aad, err := additionalData(testUserID)
-	require.NoError(t, err)
-	nonce := make([]byte, s.aead.NonceSize())
-	blob := append([]byte{blobVersion}, nonce...)
-	blob = s.aead.Seal(blob, nonce, []byte(`{"torrserver_login":"admin","torrserver_password":"s3cret-pass",`+
-		`"jackett_key":"jk-one-value","jackett_key_two":"jk-two-value"}`), aad)
-
-	merged, err := s.Merge(testUserID, docWithSettings(t, `{"prowlarr_url":"http://p","language":"ru"}`), blob)
-	require.NoError(t, err)
-	assert.Equal(t, map[string]any{
-		"torrserver_login": "admin", "torrserver_password": "s3cret-pass",
-		"jackett_key": "jk-one-value", "jackett_key_two": "jk-two-value",
-		"prowlarr_url": "http://p", "language": "ru",
-	}, settingsOf(t, merged))
-}
-
-// uiInputPattern matches a settings input template inside the escaped js string literals of app.min.js.
-var uiInputPattern = regexp.MustCompile(`data-type=\\"input\\" data-name=\\"([a-z0-9_]+)\\"`)
-
-// uiInputMarker starts every settings input template; uiDynamicInput is the SettingsApi one whose
-// name comes from a plugin at runtime, so it has no literal name to classify.
-const (
-	uiInputMarker  = `data-type=\"input\"`
-	uiDynamicInput = `data-type=\"input\" data-name=\"".concat(`
-)
-
-// plainUIInputs lists the settings inputs of the Lampa UI that are stored unsealed. every literal
-// input must be either here or in SensitiveSettings, so a new upstream input fails the test until
-// someone decides whether it holds a credential.
-var plainUIInputs = []string{
-	"jackett_url", "jackett_url_two",
-	"prowlarr_url", "prowlarr_url_two",
-	"torrserver_url",
-	"player_nw_path", "device_name",
-	"tmdb_proxy_api", "tmdb_proxy_image",
-}
-
-func TestSensitiveSettings_matchUI(t *testing.T) {
-	bundle := readBundle(t)
-
-	matches := uiInputPattern.FindAllSubmatch(bundle, -1)
-	require.NotEmpty(t, matches, "no settings inputs found, the template format changed")
-	require.Len(t, matches, bytes.Count(bundle, []byte(uiInputMarker))-bytes.Count(bundle, []byte(uiDynamicInput)),
-		"some settings inputs do not match uiInputPattern, the template format changed")
-
-	inputs := map[string]bool{}
-	for _, m := range matches {
-		name := string(m[1])
-		inputs[name] = true
-		assert.NotEqual(t, slices.Contains(SensitiveSettings, name), slices.Contains(plainUIInputs, name),
-			"ui input %q must be listed in exactly one of SensitiveSettings and plainUIInputs", name)
-	}
-	for _, key := range SensitiveSettings {
-		assert.True(t, inputs[key], "sealed key %q is no longer a ui input", key)
-	}
-	for _, key := range plainUIInputs {
-		assert.True(t, inputs[key], "plain key %q is no longer a ui input", key)
-	}
-}
-
 func TestParseUUID(t *testing.T) {
 	tests := []struct {
 		name string
@@ -352,14 +69,11 @@ func TestParseUUID(t *testing.T) {
 	}
 }
 
-// TestTorrserverSingleURL_matchBundle guards the fork patch when upstream rebuilds the bundle.
-// Runtime request tests live in testdata/torrserver-one-link.test.cjs.
-func TestTorrserverSingleURL_matchBundle(t *testing.T) {
+// TestTorrserverTwoURLs_matchBundle guards the two-link settings and separate timecode removal.
+// Runtime request tests live in tests/torrserver-one-link.test.cjs at the repository root.
+func TestTorrserverTwoURLs_matchBundle(t *testing.T) {
 	bundle := readBundle(t)
 	text := string(bundle)
-	for _, key := range []string{"torrserver_url_two", "torrserver_use_link"} {
-		assert.NotContains(t, text, key, "dropped second TorrServer link %q is back", key)
-	}
 	for _, fragment := range []string{"torrserver_tracktimecode", "'/viewed'", "Torserver.viewed"} {
 		assert.NotContains(t, text, fragment, "removed TrackTimecode code %q is back", fragment)
 	}
@@ -377,9 +91,14 @@ func TestTorrserverSingleURL_matchBundle(t *testing.T) {
 		}
 	}
 	require.NotEmpty(t, serverTemplate, "TorrServer settings template was lost")
-	assert.Equal(t, 1, strings.Count(serverTemplate, `data-name="torrserver_url"`))
+	for _, key := range []string{"torrserver_url", "torrserver_url_two", "torrserver_use_link"} {
+		assert.Equal(t, 1, strings.Count(serverTemplate, `data-name="`+key+`"`), "settings control %s must occur once", key)
+	}
+	assert.Contains(t, text, "select('torrserver_use_link', {\n    'one': '#{settings_param_link_use_one}',\n    'two': '#{settings_param_link_use_two}'\n  }, 'one');")
+	assert.Contains(t, text, "select('torrserver_url_two', '', '');")
 	assert.Equal(t, strings.Count(serverTemplate, "<div"), strings.Count(serverTemplate, "</div>"), "template divs must balance")
-	assert.Contains(t, serverTemplate, "#{settings_main_torrserver}")
+	assert.Contains(t, serverTemplate, "#{settings_server_link_one}")
+	assert.Contains(t, serverTemplate, "#{settings_server_link_two}")
 	for _, key := range []string{"jackett_url_two", "prowlarr_url_two", "parser_use_link"} {
 		assert.Contains(t, text, `data-name=\"`+key+`\"`, "unrelated parser controls must remain")
 	}
@@ -479,6 +198,8 @@ type storageScopeFile struct {
 	Version int                 `json:"version"`
 	Scopes  map[string][]string `json:"scopes"`
 	Notes   map[string]string   `json:"notes"`
+	// encryption policy belongs to the frontend; this guard only inventories scopes.
+	Encrypt json.RawMessage `json:"encrypt"`
 }
 
 func parseStorageScope(data []byte) (storageScopeFile, error) {
@@ -495,7 +216,7 @@ func parseStorageScope(data []byte) (storageScopeFile, error) {
 		return scope, fmt.Errorf("unsupported storage scope version %d", scope.Version)
 	}
 	if len(scope.Scopes) != len(storageScopeNames) {
-		return scope, errors.New("storage scope must contain all six scopes")
+		return scope, fmt.Errorf("storage scope must contain all %d scopes", len(storageScopeNames))
 	}
 	for _, name := range storageScopeNames {
 		if entries, ok := scope.Scopes[name]; !ok || entries == nil {
@@ -548,7 +269,7 @@ func resolveStorageScope(entries map[string]string, key string) string {
 	return scope
 }
 
-func storageScopeDrift(bundle []byte, entries map[string]string, sensitive []string) []string {
+func storageScopeDrift(bundle []byte, entries map[string]string) []string {
 	keys := extractStorageKeys(bundle)
 	var problems []string
 	for _, key := range keys {
@@ -566,12 +287,6 @@ func storageScopeDrift(bundle []byte, entries map[string]string, sensitive []str
 			problems = append(problems, "stale exact: "+entry)
 		}
 	}
-	for _, key := range sensitive {
-		scope := resolveStorageScope(entries, key)
-		if scope != "user_connection" && scope != "connection" {
-			problems = append(problems, "sensitive key outside connection scopes: "+key)
-		}
-	}
 	slices.Sort(problems)
 	return problems
 }
@@ -586,15 +301,20 @@ func TestStorageScope_matchBundle(t *testing.T) {
 	require.NoError(t, err)
 	entries, err := storageScopeEntries(scope.Scopes)
 	require.NoError(t, err)
-	problems := storageScopeDrift(bundle, entries, SensitiveSettings)
+	problems := storageScopeDrift(bundle, entries)
 	assert.Empty(t, problems, "storage scope drift (audit read/write sites before classifying):\n%s", strings.Join(problems, "\n"))
 	// Portable settings must not absorb local engines, credentials owned by other
 	// services, executable plugins, or generated CUB cursors via broad prefixes.
 	for _, tc := range []struct{ key, scope string }{
-		{"language", "user"}, {"tmdb_lang", "user"}, {"file_view_42", "user"},
+		{"language", "user"}, {"tmdb_lang", "user"}, {"favorite", "user"},
+		{"mine_reactions", "user"}, {"person_subscribes_id", "user"},
+		{"file_view", "user"}, {"file_view_42", "external"},
 		{"online_watched_last", "user"}, {"torrents_view", "user"},
+		{"online_view", "user"}, {"online_last_balanser", "user"},
+		{"search_history", "user"}, {"user_clarifys", "user"},
 		{"torrserver_url", "user_connection"}, {"torrserver_auth", "user_connection"},
-		{"torrserver_url_two", ""}, {"torrserver_use_link", ""}, {"torrserver_savedb", "connection"},
+		{"torrserver_login", "user_connection"}, {"torrserver_password", "user_connection"},
+		{"torrserver_url_two", "user_connection"}, {"torrserver_use_link", "device"}, {"torrserver_savedb", "connection"},
 		{"plugins", "device"}, {"plugins_blacklist", "device"}, {"player", "device"},
 		{"menu_sort", "device"}, {"menu_hide", "device"}, {"start_page", "device"},
 		{"content_rows_online", "device"}, {"parental_control_pin", "device"},
@@ -608,8 +328,6 @@ func TestStorageScope_matchBundle(t *testing.T) {
 			assert.Equal(t, tc.scope, resolveStorageScope(entries, tc.key))
 		})
 	}
-	assert.ElementsMatch(t, []string{"torrserver_url", "torrserver_auth", "torrserver_login", "torrserver_password"},
-		scope.Scopes["user_connection"], "only the sole TorrServer connection belongs in Plan 4")
 	t.Logf("audited %d extracted storage keys/fragments and %d scope entries", len(keys), len(entries))
 }
 
@@ -720,12 +438,15 @@ func TestParseStorageScope(t *testing.T) {
 	valid := `{"version":1,"scopes":{"user":[],"user_connection":[],"device":[],"connection":[],"external":[],"cache":[]},"notes":{}}`
 	for _, tc := range []struct{ name, data, problem string }{
 		{"valid empty inventory", valid, ""},
+		{"encryption list", strings.Replace(valid, `"version":1`, `"version":1,"encrypt":["custom.secret","missing"]`, 1), ""},
+		{"encryption policy not audited", strings.Replace(valid, `"version":1`, `"version":1,"encrypt":["plugins","not a storage key",42]`, 1), ""},
+		{"user inventory", strings.Replace(valid, `"user":[]`, `"user":["history","progress_*"]`, 1), ""},
 		{"malformed", `{`, "decode"},
 		{"empty", ``, "decode"},
 		{"unsupported version", strings.Replace(valid, `"version":1`, `"version":2`, 1), "version"},
 		{"missing version", strings.Replace(valid, `"version":1,`, "", 1), "version"},
-		{"missing scopes", `{"version":1}`, "six scopes"},
-		{"missing scope", strings.Replace(valid, `"user":[],`, "", 1), "six scopes"},
+		{"missing scopes", `{"version":1}`, "all 6 scopes"},
+		{"missing scope", strings.Replace(valid, `"user":[],`, "", 1), "all 6 scopes"},
 		{"unknown scope", strings.Replace(valid, `"user":[]`, `"users":[]`, 1), "missing"},
 		{"null array", strings.Replace(valid, `"user":[]`, `"user":null`, 1), "missing"},
 		{"wrong array type", strings.Replace(valid, `"user":[]`, `"user":"key"`, 1), "decode"},
@@ -747,26 +468,119 @@ func TestParseStorageScope(t *testing.T) {
 
 func TestStorageScopeDrift(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		bundle    string
-		entries   map[string]string
-		sensitive []string
-		want      []string
+		name    string
+		bundle  string
+		entries map[string]string
+		want    []string
 	}{
 		{name: "empty allowlist inventory", bundle: `Storage.get('b'); Storage.get('a');`, entries: map[string]string{}, want: []string{"unclassified: a", "unclassified: b"}},
+		{name: "user history", bundle: `Storage.get('history');`, entries: map[string]string{"history": "user"}},
 		{name: "exact", bundle: `Storage.get('a');`, entries: map[string]string{"a": "user"}},
 		{name: "stale exact", bundle: `var a = 'a';`, entries: map[string]string{"a": "user"}, want: []string{"stale exact: a"}},
 		{name: "prefix", bundle: `Storage.get('file_view'); var name = 'file_view_' + id;`, entries: map[string]string{"file_view": "user", "file_view_*": "user"}},
 		{name: "stale prefix", bundle: `Storage.get('key_value');`, entries: map[string]string{"key_*": "device"}, want: []string{"stale prefix: key_*"}},
 		{name: "variable prefix literal", bundle: `var base = 'content_rows';`, entries: map[string]string{"content_rows*": "device"}},
-		{name: "secret user connection", bundle: `Storage.get('secret');`, entries: map[string]string{"secret": "user_connection"}, sensitive: []string{"secret"}},
-		{name: "secret connection", bundle: `Storage.get('secret');`, entries: map[string]string{"secret": "connection"}, sensitive: []string{"secret"}},
-		{name: "secret exact overrides unsafe prefix", bundle: `Storage.get('secret_key'); var name = 'secret_' + id;`, entries: map[string]string{"secret_*": "user", "secret_key": "connection"}, sensitive: []string{"secret_key"}},
-		{name: "unsafe secret", bundle: `Storage.get('secret');`, entries: map[string]string{"secret": "user"}, sensitive: []string{"secret"}, want: []string{"sensitive key outside connection scopes: secret"}},
-		{name: "unclassified secret", bundle: `Storage.get('secret');`, entries: map[string]string{}, sensitive: []string{"secret"}, want: []string{"sensitive key outside connection scopes: secret", "unclassified: secret"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, storageScopeDrift([]byte(tc.bundle), tc.entries, tc.sensitive))
+			assert.Equal(t, tc.want, storageScopeDrift([]byte(tc.bundle), tc.entries))
 		})
 	}
+}
+
+func TestSealer_ListedRoundTrip(t *testing.T) {
+	s := newTestSealer(t, 1)
+	for _, value := range []string{`"secret-value"`, `null`, `true`, `12345678901234567890`, `[1,"x",null]`, `{"url":"<a&b>","nested":{}}`} {
+		t.Run(value, func(t *testing.T) {
+			data := map[string]json.RawMessage{"custom.secret": json.RawMessage(value), "plain": json.RawMessage(`"unlisted-secret"`)}
+			sealed, err := s.sealListed(testUserID, data, []string{"custom.secret", "missing", "custom.secret"})
+			require.NoError(t, err)
+			assert.Equal(t, value, string(data["custom.secret"]), "input is not mutated")
+			require.Len(t, sealed, 2)
+			assert.Contains(t, string(sealed["custom.secret"]), `"$sealed"`)
+			assert.NotEqual(t, value, string(sealed["custom.secret"]))
+			assert.Equal(t, data["plain"], sealed["plain"])
+			var logs bytes.Buffer
+			opened, err := s.openAll(testUserID, sealed, log.New(&logs, "", 0))
+			require.NoError(t, err)
+			assert.Equal(t, data, opened)
+			assert.Contains(t, string(sealed["custom.secret"]), `"$sealed"`, "stored map is not mutated")
+			assert.Empty(t, logs.String())
+		})
+	}
+}
+
+func TestSealer_NoListedValues(t *testing.T) {
+	s := newTestSealer(t, 1)
+	data := map[string]json.RawMessage{"plain": json.RawMessage(`{"nested":true}`)}
+	for _, encrypt := range [][]string{nil, {}, {"missing"}} {
+		sealed, err := s.sealListed(testUserID, data, encrypt)
+		require.NoError(t, err)
+		assert.Equal(t, data, sealed)
+	}
+	_, err := s.sealListed("invalid", data, nil)
+	require.ErrorIs(t, err, ErrInvalidUserID)
+	_, err = s.openAll("invalid", data, log.New(io.Discard, "", 0))
+	require.ErrorIs(t, err, ErrInvalidUserID)
+}
+
+func TestSealer_UnreadableOmitted(t *testing.T) {
+	s := newTestSealer(t, 1)
+	data := map[string]json.RawMessage{"secret": json.RawMessage(`"private-value"`), "plain": json.RawMessage(`{"x":1}`)}
+	sealed, err := s.sealListed(testUserID, data, []string{"secret"})
+	require.NoError(t, err)
+	var wrapper map[string]string
+	require.NoError(t, json.Unmarshal(sealed["secret"], &wrapper))
+	blob, err := base64.StdEncoding.DecodeString(wrapper["$sealed"])
+	require.NoError(t, err)
+	badVersion := bytes.Clone(blob)
+	badVersion[0]++
+	tampered := bytes.Clone(blob)
+	tampered[len(tampered)-1] ^= 1
+	aad, err := additionalData(testUserID)
+	require.NoError(t, err)
+	invalidJSON, err := s.seal([]byte(`not json`), aad)
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name   string
+		reader *Sealer
+		user   string
+		raw    json.RawMessage
+	}{
+		{name: "wrong key", reader: newTestSealer(t, 2), user: testUserID, raw: sealed["secret"]},
+		{name: "wrong user", reader: s, user: otherUserID, raw: sealed["secret"]},
+		{name: "not a string", reader: s, user: testUserID, raw: json.RawMessage(`{"$sealed":42}`)},
+		{name: "invalid base64", reader: s, user: testUserID, raw: json.RawMessage(`{"$sealed":"!!!"}`)},
+		{name: "short blob", reader: s, user: testUserID, raw: json.RawMessage(`{"$sealed":"AQ=="}`)},
+		{name: "unknown version", reader: s, user: testUserID, raw: sealedWrapper(t, badVersion)},
+		{name: "tampered", reader: s, user: testUserID, raw: sealedWrapper(t, tampered)},
+		{name: "invalid json", reader: s, user: testUserID, raw: sealedWrapper(t, invalidJSON)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			stored := map[string]json.RawMessage{"secret": tc.raw, "plain": data["plain"]}
+			opened, err := tc.reader.openAll(tc.user, stored, log.New(&logs, "", 0))
+			require.NoError(t, err)
+			assert.Equal(t, map[string]json.RawMessage{"plain": data["plain"]}, opened)
+			assert.Contains(t, logs.String(), "[WARN] omit unreadable sealed value")
+			assert.NotContains(t, logs.String(), "private-value")
+			assert.NotContains(t, logs.String(), string(tc.raw))
+		})
+	}
+}
+
+func sealedWrapper(t *testing.T, blob []byte) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(map[string]string{"$sealed": base64.StdEncoding.EncodeToString(blob)})
+	require.NoError(t, err)
+	return raw
+}
+
+func TestSealer_RandomNonces(t *testing.T) {
+	s := newTestSealer(t, 1)
+	data := map[string]json.RawMessage{"key": json.RawMessage(`"secret"`)}
+	first, err := s.sealListed(testUserID, data, []string{"key"})
+	require.NoError(t, err)
+	second, err := s.sealListed(testUserID, data, []string{"key"})
+	require.NoError(t, err)
+	assert.NotEqual(t, first["key"], second["key"])
 }
