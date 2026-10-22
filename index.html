@@ -176,6 +176,7 @@
         $('head').append('<link rel="stylesheet" href="svtlv/account.css?v=' + cache_version + '">')
 
         putScript('svtlv/account.js?v=' + cache_version, function () {}, function () {})
+        putScript('svtlv/settings.js?v=' + cache_version, function () {}, function () {})
 
         // Both callbacks resume boot, including a missing add-on. Guard old
         // onreadystatechange engines against starting the bundle twice.
