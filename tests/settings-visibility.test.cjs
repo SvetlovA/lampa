@@ -58,7 +58,8 @@ function device({platform = 'webos', region = 'ru', preference, disabled = false
     card(id = 42, tv = false) {
       const overlays = [];
       const html = {find(selector) {
-        if (selector === '.card__filter') return {remove: () => { overlays.length = 0; }};
+        // Element.find is querySelector: no overlay yet means null, not an empty set.
+        if (selector === '.card__filter') return overlays.length ? {remove: () => { overlays.length = 0; }} : null;
         assert.equal(selector, '.card__img');
         return {after: layer => overlays.push(layer)};
       }};
