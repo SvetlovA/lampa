@@ -21,7 +21,7 @@ services:
     container_name: svtlvtv_lampa_web
     restart: unless-stopped
     ports:
-      - "0.0.0.0:8092:80"
+      - "8092:80"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
       interval: 10s
