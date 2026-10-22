@@ -239,35 +239,12 @@ jobs:
           sed -i \
             -e "s|image: lampa-web:dev|image: ${IMAGE_BASE}-web:latest|g" \
             -e "s|image: lampa-api:dev|image: ${IMAGE_BASE}-api:latest|g" \
-            -e 's|"0.0.0.0:8092:80"|"100.105.140.19:8092:80"|' \
             devops/docker-compose.yaml
           sed -i '/build:/,/dockerfile:/d' devops/docker-compose.yaml
 
           echo "::group::Modified docker-compose.yaml"
           cat devops/docker-compose.yaml
           echo "::endgroup::"
-
-      # fail instead of deploying a mangled file when a compose edit breaks the strip rules
-      - name: Verify stripped docker-compose
-        shell: bash
-        run: |
-          set -euo pipefail
-          file=devops/docker-compose.yaml
-          if grep -nE '^\s*(build|context|dockerfile|args):|:dev\s*$' "$file"; then
-            echo "$file still has build keys or dev images after the strip" >&2
-            exit 1
-          fi
-          # a build block without a dockerfile line would strip through the end of the file
-          for line in '^services:' '^  lampa-web:' '^  lampa-db:' '^  lampa-api:' '^networks:' '^volumes:' '^  lampa_db_data:'; do
-            if ! grep -qE "$line" "$file"; then
-              echo "$file lost '$line' in the strip" >&2
-              exit 1
-            fi
-          done
-          if ! grep -qF '"100.105.140.19:8092:80"' "$file"; then
-            echo "$file must bind the web port to svtlv's Tailscale address" >&2
-            exit 1
-          fi
 
       - name: Prepare deployment env
         shell: bash

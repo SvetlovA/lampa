@@ -8,7 +8,6 @@
 #   2. only context and args (with their entries) may sit between the build key and dockerfile,
 #      and dockerfile is the last key of the block;
 #   3. no other line, comments included, may contain the build key followed by a colon.
-# the workflow fails the deploy if a build key or a dev image survives the strip.
 services:
   lampa-web:
     image: lampa-web:dev
