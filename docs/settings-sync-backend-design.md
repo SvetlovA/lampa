@@ -716,7 +716,7 @@ Example PUT body (`Content-Type: application/json`, `X-Lampa-Csrf: 1`):
     "torrserver_password": "secret",
     "favorite": "{\"book\":[],\"history\":[]}"
   },
-  "encrypt": ["torrserver_login", "torrserver_password"]
+  "encrypt": ["account", "jackett_key", "jackett_key_two", "prowlarr_key", "prowlarr_key_two", "torrserver_login", "torrserver_password"]
 }
 ```
 
@@ -991,11 +991,11 @@ below summarizes their actual rules. The JSON file is the complete authority.
 
 | Scope | Examples and rule |
 | --- | --- |
-| `user` | `favorite`, `file_view`, `language`, `mine_reactions`, `online_last_balanser`, `online_view`, `online_watched_last`, `person_subscribes_id`, `search_history`, `tmdb_lang`, `torrents_view`, `user_clarifys`. Portable preferences, personal data, history and playback progress sync with the same persistence rules. |
-| `user_connection` | `torrserver_url`, `torrserver_url_two`, `torrserver_auth`, `torrserver_login`, `torrserver_password`. Both TorrServer endpoints, the shared authentication toggle and credentials are portable connection fields. These fields must sync; the top-level encrypt list selects login/password for sealing by the API. |
-| `device` | `player`, `player_iptv`, `player_torrent`, `player_volume`, `interface_size`, `navigation_type`, `plugins`, `plugins_blacklist`, `menu_sort`, `menu_hide`, `start_page`, `content_rows*`, `parental_control_pin`, `torrserver_use_link`. Hardware, controls, executable plugins, feature-dependent menus and the active TorrServer link selector never sync. The selector defaults to one on each client. |
-| `connection` | `jackett_url`, `jackett_key`, `prowlarr_url`, `prowlarr_key`, `parser_use`, `parser_use_link`, `parse_lang`, `tmdb_proxy`, `proxy_other`, `cub_domain`, `torrserver_savedb`. Other endpoints, credentials and server/device-dependent behavior stay local. |
-| `external` | `file_view_*`, `account`, `account_bookmarks_*`, `account_timeline_sync*`, `account_plugins`, `cloud_token`, `cloud_use`, `terminal_access`. CUB and third-party identity, tokens, cursors and service-owned data never become Keycloak user data. |
+| `user` | `favorite`, `file_view`, `account`, `account_use`, `adult_content_view`, `background`, `background_type`, `black_style`, `card_episodes`, `card_interfice_cover`, `card_interfice_poster`, `card_interfice_reactions`, `card_quality`, `content_rows*`, `jackett_interview`, `language`, `lgbt_content_block`, `mine_reactions`, `online_last_balanser`, `online_view`, `online_watched_last`, `parse_in_search`, `parse_lang`, `parse_timeout`, `parser_torrent_type`, `parser_use`, `person_subscribes_id`, `player_rewind`, `player_segments_ad`, `player_segments_skip`, `player_timecode`, `playlist_next`, `search_history`, `shots_in_card`, `shots_in_player`, `source`, `subtitles_backdrop`, `subtitles_lang`, `subtitles_start`, `subtitles_stroke`, `tmdb_lang`, `tmdb_only_released`, `torrents_sort`, `torrents_view`, `torrserver_search_type`, `user_clarifys`. Portable preferences, personal data, history and playback progress sync with the same persistence rules, including the CUB login object with its selected profile and the two audited remote Shots toggles. |
+| `user_connection` | `torrserver_url`, `torrserver_url_two`, `torrserver_auth`, `torrserver_login`, `torrserver_password`, `jackett_key`, `jackett_key_two`, `jackett_url`, `jackett_url_two`, `prowlarr_key`, `prowlarr_key_two`, `prowlarr_url`, `prowlarr_url_two`. Both TorrServer endpoints with their shared authentication toggle and credentials, plus both Jackett and Prowlarr endpoints and keys, are portable connection fields. These fields must sync; the top-level encrypt list selects the CUB login, parser keys and TorrServer login/password for sealing by the API. |
+| `device` | `player`, `player_iptv`, `player_torrent`, `player_volume`, `interface_size`, `navigation_type`, `plugins`, `plugins_blacklist`, `menu_sort`, `menu_hide`, `start_page`, `parental_control_pin`, `torrserver_use_link`. Hardware, controls, executable plugins, feature-dependent menus and the active TorrServer link selector never sync. The selector defaults to one on each client. |
+| `connection` | `parser_use_link`, `parser_website_url`, `tmdb_proxy`, `proxy_other`, `cub_domain`, `torrserver_savedb`. Link selectors, other endpoints and server/device-dependent behavior stay local. |
+| `external` | `file_view_*`, `account_bookmarks_*`, `account_timeline_sync*`, `account_plugins`, `cloud_token`, `cloud_use`, `terminal_access`. Other CUB and third-party identity, tokens, cursors and service-owned data never become Keycloak user data. |
 | `cache` | `activity`, `torrents_filter_data`, `recomends_list`, `recomends_scan`, `timetable`, `cub_alive`, `lampa_uid`, `region`, `storage_*`. Generated navigation, cached responses, device identity and sync bookkeeping stay local. |
 
 The sync add-on exports `user` and `user_connection` rules, subject to the

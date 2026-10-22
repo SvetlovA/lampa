@@ -360,7 +360,7 @@ Example PUT body (`Content-Type: application/json`, `X-Lampa-Csrf: 1`):
     "torrserver_password": "secret",
     "favorite": "{\"book\":[],\"history\":[]}"
   },
-  "encrypt": ["torrserver_login", "torrserver_password"]
+  "encrypt": ["account", "jackett_key", "jackett_key_two", "prowlarr_key", "prowlarr_key_two", "torrserver_login", "torrserver_password"]
 }
 ```
 

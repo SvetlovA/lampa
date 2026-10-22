@@ -210,11 +210,11 @@ test('scope fetch uses the loader cache version and classifies the real inventor
   const cases = [
     ['favorite', 'user'], ['language', 'user'], ['torrserver_login', 'user_connection'],
     ['file_view', 'user'], ['file_view_123', 'external'],
-    ['account', 'external'], ['account_token', ''], ['account_timeline_sync_12', 'external'],
+    ['account', 'user'], ['account_token', ''], ['account_timeline_sync_12', 'external'],
     ['account_bookmarks_sync', 'external'], ['search_history', 'user'],
     ['search_other', 'cache'], ['developer_enabled', 'device'], ['developer_param_test', 'cache'],
-    ['player_normalization_step_1', 'device'], ['plugins', 'device'], ['jackett_key', 'connection'],
-    ['content_rows', 'device'], ['content_rows_movie', 'device'], ['unknown', ''], ['xaccount', '']
+    ['player_normalization_step_1', 'device'], ['plugins', 'device'], ['jackett_key', 'user_connection'],
+    ['parser_use_link', 'connection'], ['content_rows', 'user'], ['content_rows_movie', 'user'], ['unknown', ''], ['xaccount', '']
   ];
   for (const [key, expected] of cases) assert.equal(p.core.classify(key), expected, key);
   for (const [key, expected] of cases) {
@@ -2690,8 +2690,8 @@ test('acceptance: simultaneous saves from two devices preserve both edits throug
 
 test('acceptance: progress writes and remote bookmarks converge live on the timer and screen return', () => {
   const server = sharedDocument({favorite: '{"book":[]}', file_view: '{"movie":0.1}', torrserver_url: 'http://old'});
-  const a = acceptanceDevice(server, {items: {player: 'native', jackett_key: 'a', plugins: '["a"]'}});
-  const b = acceptanceDevice(server, {items: {player: 'external', jackett_key: 'b', plugins: '["b"]'}});
+  const a = acceptanceDevice(server, {items: {player: 'native', parser_website_url: 'a', plugins: '["a"]'}});
+  const b = acceptanceDevice(server, {items: {player: 'external', parser_website_url: 'b', plugins: '["b"]'}});
   b.change('file_view', '{"movie":0.5}');
   a.change('favorite', '{"book":[42]}'); a.change('torrserver_url', 'http://new'); a.tick(2000);
   server.respond(a.requests.at(-1)); server.respond(a.requests.at(-1));
@@ -2706,7 +2706,7 @@ test('acceptance: progress writes and remote bookmarks converge live on the time
   assert.deepEqual(clean(a.window.Lampa.Storage.get('file_view')), {movie: 0.5});
   assert.deepEqual(a.refreshes, ['timeline']);
   for (const [p, player, key] of [[a, 'native', 'a'], [b, 'external', 'b']]) {
-    assert.equal(p.items.player, player); assert.equal(p.items.jackett_key, key);
+    assert.equal(p.items.player, player); assert.equal(p.items.parser_website_url, key);
     assert.equal(p.items.plugins, JSON.stringify([key]));
     assert.equal(p.reloads.length, 0); assert.deepEqual(p.notices, []);
   }
@@ -2734,7 +2734,7 @@ test('acceptance: temporary whitelist additions alone enable export, import and 
 test('acceptance: logout and confirmed session expiry mask reserve data while retaining device settings', () => {
   for (const status of [null, 401, 409]) {
     const reserve = {favorite: {book: ['private']}, file_view: {private: 1}, torrserver_password: 'private'};
-    const local = {player: 'native', jackett_key: 'local-key', plugins: '["local"]', file_view_cub: 'external'};
+    const local = {player: 'native', parser_website_url: 'local-key', plugins: '["local"]', file_view_cub: 'external'};
     const server = sharedDocument({language: 'en', favorite: '{"book":[42]}',
       ...(status ? {torrserver_password: 'private'} : {})});
     const p = acceptanceDevice(server, {items: local, reserve});

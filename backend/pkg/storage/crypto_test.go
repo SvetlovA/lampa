@@ -163,6 +163,13 @@ var auditedStorageLiterals = []string{
 	"ser_clarifys",           // Legacy key still visited by clear-cache.
 }
 
+// Remote plugin settings never appear in the bundle; they were audited in the
+// official plugin script instead, so the guard does not report them as stale.
+var auditedRemoteStorageKeys = []string{
+	"shots_in_card",   // official /plugin/shots card toggle.
+	"shots_in_player", // official /plugin/shots player toggle.
+}
+
 func bundleHasLiteral(bundle []byte, literal string) bool {
 	return bytes.Contains(bundle, []byte("'"+literal+"'")) || bytes.Contains(bundle, []byte(`"`+literal+`"`))
 }
@@ -283,7 +290,7 @@ func storageScopeDrift(bundle []byte, entries map[string]string) []string {
 			if !slices.Contains(keys, prefix) && !bundleHasLiteral(bundle, prefix) {
 				problems = append(problems, "stale prefix: "+entry)
 			}
-		} else if !slices.Contains(keys, entry) {
+		} else if !slices.Contains(keys, entry) && !slices.Contains(auditedRemoteStorageKeys, entry) {
 			problems = append(problems, "stale exact: "+entry)
 		}
 	}
@@ -317,8 +324,8 @@ func TestStorageScope_matchBundle(t *testing.T) {
 		{"torrserver_url_two", "user_connection"}, {"torrserver_use_link", "device"}, {"torrserver_savedb", "connection"},
 		{"plugins", "device"}, {"plugins_blacklist", "device"}, {"player", "device"},
 		{"menu_sort", "device"}, {"menu_hide", "device"}, {"start_page", "device"},
-		{"content_rows_online", "device"}, {"parental_control_pin", "device"},
-		{"account", "external"}, {"account_timeline_sync_42", "external"},
+		{"content_rows_online", "user"}, {"parental_control_pin", "device"},
+		{"account", "user"}, {"account_timeline_sync_42", "external"},
 		{"account_bookmarks_sync", "external"}, {"cloud_token", "external"},
 		{"storage_search_history_update_time", "cache"}, {"lampa_uid", "cache"},
 		{"torrents_filter_data", "cache"}, {"unclassified_plugin_setting", ""},

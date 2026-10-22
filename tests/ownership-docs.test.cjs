@@ -115,7 +115,7 @@ function userDataExamples(document) {
 function checkConnectionExample(example) {
   const scope = JSON.parse(read('svtlv/storage-scope.json'));
   const keys = Object.keys(example.data).filter(key => key.startsWith('torrserver_'));
-  assert.deepEqual(keys.sort(), [...scope.scopes.user_connection].sort(),
+  assert.deepEqual(keys.sort(), scope.scopes.user_connection.filter(key => key.startsWith('torrserver_')).sort(),
     'example must include both URLs and shared authentication, without the local selector');
   assert.deepEqual([...example.encrypt].sort(), [...scope.encrypt].sort(),
     'example must seal the shared credentials');
