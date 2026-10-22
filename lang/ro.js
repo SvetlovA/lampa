@@ -210,7 +210,7 @@ export default {
     settings_server_client: 'Client integrat',
     settings_server_client_descr: 'Folosește clientul JS TorrServer încorporat, altfel va porni cel de sistem.',
     settings_server_base: 'Salvează în baza de date',
-    settings_server_base_descr: 'Torrent-ul va fi adăugat în baza de date TorrServer',
+    settings_server_base_descr: 'Torrent-ul va fi adăugat în baza de date',
     settings_server_preload: 'Folosește buffer prefetch',
     settings_server_preload_descr: 'Așteaptă procesarea buffer-ului de preîncărcare TorrServer înainte de redare',
     settings_server_auth: 'Autorizare',

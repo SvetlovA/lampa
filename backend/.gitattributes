@@ -1,0 +1,2 @@
+# keep lf in the module so make and shell steps work in wsl/linux regardless of core.autocrlf
+* text=auto eol=lf

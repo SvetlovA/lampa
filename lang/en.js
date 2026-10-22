@@ -210,7 +210,7 @@ export default {
     settings_server_client: 'Embedded client',
     settings_server_client_descr: 'Use the built-in TorrServer JS client, otherwise the system one starts.',
     settings_server_base: 'Save to database',
-    settings_server_base_descr: 'The torrent will be added to the TorrServer database',
+    settings_server_base_descr: 'The torrent will be added to the database',
     settings_server_preload: 'Use prefetch buffer',
     settings_server_preload_descr: 'Wait for TorrServer\'s preload buffer to fill before playing',
     settings_server_auth: 'Authorization',

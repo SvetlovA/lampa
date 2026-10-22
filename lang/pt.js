@@ -208,7 +208,7 @@ export default {
     settings_server_client: 'Cliente incorporado',
     settings_server_client_descr: 'Use o cliente TorrServer JS embutido, caso contrário o sistema será iniciado.',
     settings_server_base: 'Guardar na base de dados',
-    settings_server_base_descr: 'O torrent será adicionado na base de dados do TorrServer',
+    settings_server_base_descr: 'O torrent será adicionado na base de dados',
     settings_server_preload: 'Usar buffer de pré-busca',
     settings_server_preload_descr: 'Aguardar que o buffer de pré-carregamento do TorrServer seja preenchido antes de iniciar',
     settings_server_auth: 'Autorização',
