@@ -8,6 +8,12 @@ timeout   = 30s
 routing_policy = Choose the option with the lowest cost that can reliably satisfy this task's requirements. Compare the supplied model prices and the effort descriptions, including their effect on token usage. Prefer cheaper options when their capabilities are sufficient. Choose a more expensive model or higher effort when it materially improves the likelihood of completing this specific task correctly. Prefer less time when cost and capability are comparable. The project complexity, when present, rates the codebase the task runs in: use it as context for how hard this specific task is there, not as a substitute for judging the task (a typo fix stays trivial in any codebase).
 complexity_policy = Judge the codebase as a whole: its size, architecture, dependencies and constraints, not any single task in it.
 
+# routing request size and logging; long context is opt-in.
+request_tokens  = 30000
+bytes_per_token = 3
+long_context    = false
+log_dir         = .agrouter/logs
+
 [cli.claude]
 enabled         = true
 command         = claude
