@@ -1,0 +1,48 @@
+# Native Windows Makefile. Invoke from the repository root with:
+#   make.exe -C backend -f WMakefile <target>
+# Or from backend/ with:
+#   make.exe -f WMakefile <target>
+# Requires: Go, git, PowerShell, golangci-lint (for lint), goimports (for fmt)
+SHELL := cmd.exe
+
+# Support both invocation forms above.
+ROOT := $(dir $(lastword $(MAKEFILE_LIST)))
+
+# Get the exact tag (when present), branch, hash, and commit Unix timestamp.
+TAG := $(shell git -C "$(ROOT)" describe --tags --abbrev=0 --exact-match 2>NUL)
+BRANCH := $(if $(TAG),$(TAG),$(shell git -C "$(ROOT)" rev-parse --abbrev-ref HEAD 2>NUL))
+HASH := $(shell git -C "$(ROOT)" rev-parse --short=7 HEAD 2>NUL)
+TIMESTAMP := $(shell git -C "$(ROOT)" log -1 --format=%%ct HEAD 2>NUL)
+GIT_REV := $(BRANCH)-$(HASH)-$(TIMESTAMP)
+REV := $(if $(filter --,$(GIT_REV)),latest,$(GIT_REV))
+
+all: test build
+
+build:
+	cd "$(ROOT)/cmd/lampa-api" && go build -ldflags "-X main.revision=$(REV) -s -w" -o ../../.bin/lampa-api.exe
+
+test:
+	cd "$(ROOT)" && go clean -testcache
+	cd "$(ROOT)" && go test -coverprofile=coverage.out ./...
+	cd "$(ROOT)" && (findstr /V /C:"_mock.go" coverage.out | findstr /V /C:"mocks" > coverage_no_mocks.out)
+	cd "$(ROOT)" && go tool cover -func=coverage_no_mocks.out
+	cd "$(ROOT)" && del /Q coverage.out coverage_no_mocks.out
+
+lint:
+	cd "$(ROOT)" && golangci-lint run --max-issues-per-linter=0 --max-same-issues=0
+
+fmt:
+	cd "$(ROOT)" && powershell.exe -NoProfile -Command "$$files = @(Get-ChildItem -Path . -Recurse -File -Filter '*.go' | Where-Object { $$_.FullName -notmatch '\\(vendor|mocks)\\' }); if ($$files.Count -eq 0) { exit 0 }; & gofmt -s -w $$files.FullName; if ($$LASTEXITCODE -ne 0) { exit $$LASTEXITCODE }; & go tool goimports -w $$files.FullName; exit $$LASTEXITCODE"
+
+race:
+	@echo The race detector requires cgo; run "make race" inside WSL Ubuntu.
+	@exit /B 1
+
+generate:
+	cd "$(ROOT)" && go generate ./...
+
+version:
+	@echo branch: $(BRANCH), hash: $(HASH), timestamp: $(TIMESTAMP)
+	@echo revision: $(REV)
+
+.PHONY: all build test lint fmt race generate version

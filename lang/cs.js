@@ -247,7 +247,7 @@ export default {
     settings_server_client: "Vestavěný klient",
     settings_server_client_descr: "Použít vestavěný JS klient TorrServer, jinak se spustí systémový.",
     settings_server_base: "Uložit do databáze",
-    settings_server_base_descr: "Torrent bude přidán do databáze TorrServer",
+    settings_server_base_descr: "Torrent bude přidán do databáze",
     settings_server_preload: "Použít buffer předběžného načítání",
     settings_server_preload_descr: "Čekat na naplnění bufferu předběžného načítání TorrServer před přehráváním",
     settings_server_auth: "Autorizace",

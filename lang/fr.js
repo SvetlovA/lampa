@@ -210,7 +210,7 @@ export default {
     settings_server_client: 'Client intégré',
     settings_server_client_descr: 'Utiliser le client JS TorrServer intégré, sinon le client système sera lancé.',
     settings_server_base: 'Enregistrer dans la base de données',
-    settings_server_base_descr: 'Le torrent sera ajouté à la base de données de TorrServer',
+    settings_server_base_descr: 'Le torrent sera ajouté à la base de données',
     settings_server_preload: 'Utiliser le tampon de préchargement',
     settings_server_preload_descr: 'Attendre que le tampon de TorrServer soit plein avant la lecture',
     settings_server_auth: 'Authentification',

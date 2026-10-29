@@ -209,7 +209,7 @@ export default {
     settings_server_client: 'Вграден клиент',
     settings_server_client_descr: 'Използване на вграденият TorrServe JS клиент, в противен случай ще се стартира системният клиент.',
     settings_server_base: 'Запис в базата данни',
-    settings_server_base_descr: 'Торентът ще бъде добавен в базата данни на TorrServer',
+    settings_server_base_descr: 'Торентът ще бъде добавен в базата данни',
     settings_server_preload: 'Използвай предварителен буфер',
     settings_server_preload_descr: 'Да се изчака предварителният буфер на TorrServer да се запълни, преди възпроизвеждане',
     settings_server_auth: 'Оторизация',

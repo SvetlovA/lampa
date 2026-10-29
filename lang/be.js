@@ -209,7 +209,7 @@ export default {
     settings_server_client: 'Убудаваны кліент',
     settings_server_client_descr: 'Выкарыстоўваць убудаваны JS-кліент TorrServer, інакш запускаецца сістэмны.',
     settings_server_base: 'Захаваць у базу',
-    settings_server_base_descr: 'Торэнт будзе дададзены ў базу TorrServer',
+    settings_server_base_descr: 'Торэнт будзе дададзены ў базу',
     settings_server_preload: 'Выкарыстоўваць буфер перад.загрузкі',
     settings_server_preload_descr: 'Чакаць запаўнення буфера папярэдняй загрузкі TorrServer перад прайграваннем',
     settings_server_auth: 'аўтарызацыя',
