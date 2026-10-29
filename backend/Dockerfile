@@ -22,7 +22,7 @@ FROM ghcr.io/umputun/baseimage/app:v1.21.1
 
 ARG GITHUB_SHA
 
-LABEL org.opencontainers.image.source="https://github.com/SvetlovA/lampa"
+LABEL org.opencontainers.image.source="https://github.com/svtlv/lampa"
 LABEL org.opencontainers.image.revision="${GITHUB_SHA}"
 LABEL org.opencontainers.image.description="Lampa user-data persistence service"
 
